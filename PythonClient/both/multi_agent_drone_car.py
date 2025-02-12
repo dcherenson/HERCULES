@@ -49,14 +49,15 @@ state1 = client_1.getMultirotorState(vehicle_name="Drone1")
 s = pprint.pformat(state1)
 print("Drone1: State: %s" % s)
 
-# f1 = client_1.moveToPositionAsync(-5, 5, -10, 5, vehicle_name="Drone1")
-# car_controls1.throttle = 0.5
-# car_controls1.steering = 0.5
-# client_2.setCarControls(car_controls1, "Car1")
-# print("Car1: Go Forward")
-# f1.join()
+# test motion of car and drone
+f1 = client_1.moveToPositionAsync(-5, 5, -10, 5, vehicle_name="Drone1")
+car_controls1.throttle = 0.2
+car_controls1.steering = 0.5
+client_2.setCarControls(car_controls1, "Car1")
+print("Car1: Go Forward")
+f1.join()
 
-# time.sleep(2)
+time.sleep(2)
 airsim.wait_key('Press any key to take images')
 # get camera images from the car
 responses1 = client_1.simGetImages([
@@ -88,11 +89,12 @@ for idx, response in enumerate(responses1 + responses2):
         airsim.write_file(os.path.normpath(filename + '.png'), response.image_data_uint8)
     else: #uncompressed array
         print("Type %d, size %d" % (response.image_type, len(response.image_data_uint8)))
-        img1d = np.fromstring(response.image_data_uint8, dtype=np.uint8) #get numpy array
-        img_rgba = img1d.reshape(response.height, response.width, 4) #reshape array to 4 channel image array H X W X 4
-        img_rgba = np.flipud(img_rgba) #original image is flipped vertically
-        img_rgba[:,:,1:2] = 100 #just for fun add little bit of green in all pixels
-        airsim.write_png(os.path.normpath(filename + '.greener.png'), img_rgba) #write to png
+        # temporarily commenting out for debugging purposes
+        # img1d = np.fromstring(response.image_data_uint8, dtype=np.uint8) #get numpy array
+        # img_rgba = img1d.reshape(response.height, response.width, 4) #reshape array to 4 channel image array H X W X 4
+        # img_rgba = np.flipud(img_rgba) #original image is flipped vertically
+        # img_rgba[:,:,1:2] = 100 #just for fun add little bit of green in all pixels
+        # airsim.write_png(os.path.normpath(filename + '.greener.png'), img_rgba) #write to png
 
 airsim.wait_key('Press any key to reset to original state')
 
