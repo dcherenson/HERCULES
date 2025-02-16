@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "SimModeWorldBoth.h"
+#include "SimModeWorldHero.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Logging/MessageLog.h"
 #include "Engine/World.h"
@@ -19,7 +19,7 @@
 #include "vehicles/multirotor/api/MultirotorRpcLibServer.hpp"
 #include "common/SteppableClock.hpp"
 
-void ASimModeWorldBoth::BeginPlay()
+void ASimModeWorldHero::BeginPlay()
 {
     Super::BeginPlay();
 
@@ -27,7 +27,7 @@ void ASimModeWorldBoth::BeginPlay()
     initializeForPlay();
 }
 
-void ASimModeWorldBoth::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void ASimModeWorldHero::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     // stop physics thread before we dismantle
     stopAsyncUpdator();
@@ -35,7 +35,7 @@ void ASimModeWorldBoth::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
-void ASimModeWorldBoth::setupClockSpeed()
+void ASimModeWorldHero::setupClockSpeed()
 {
     typedef msr::airlib::ClockFactory ClockFactory;
 
@@ -84,7 +84,7 @@ void ASimModeWorldBoth::setupClockSpeed()
 
 //-------------------------------- overrides -----------------------------------------------//
 
-std::vector<std::unique_ptr<msr::airlib::ApiServerBase>> ASimModeWorldBoth::createApiServer() const
+std::vector<std::unique_ptr<msr::airlib::ApiServerBase>> ASimModeWorldHero::createApiServer() const
 {
     std::vector<std::unique_ptr<msr::airlib::ApiServerBase>> api_servers;
 #ifdef AIRLIB_NO_RPC
@@ -102,14 +102,14 @@ std::vector<std::unique_ptr<msr::airlib::ApiServerBase>> ASimModeWorldBoth::crea
 #endif
 }
 
-void ASimModeWorldBoth::getExistingVehiclePawns(TArray<AActor *> &pawns) const
+void ASimModeWorldHero::getExistingVehiclePawns(TArray<AActor *> &pawns) const
 {
     TArray<AActor *> FlyingPawns;
     UAirBlueprintLib::FindAllActor<TFlyingPawn>(this, FlyingPawns);
     for (AActor *fpawn : FlyingPawns)
     {
         pawns.Add(fpawn);
-        if (getSettings().simmode_name == "Both")
+        if (getSettings().simmode_name == "Hero")
         {
             APawn *vehicle_pawn = static_cast<APawn *>(fpawn);
             addPawnToMap(vehicle_pawn, AirSimSettings::kVehicleTypeSimpleFlight);
@@ -121,7 +121,7 @@ void ASimModeWorldBoth::getExistingVehiclePawns(TArray<AActor *> &pawns) const
     for (AActor *cpawn : CarPawns)
     {
         pawns.Add(cpawn);
-        if (getSettings().simmode_name == "Both")
+        if (getSettings().simmode_name == "Hero")
         {
             APawn *vehicle_pawn = static_cast<APawn *>(cpawn);
             addPawnToMap(vehicle_pawn, AirSimSettings::kVehicleTypePhysXCar);
@@ -129,14 +129,14 @@ void ASimModeWorldBoth::getExistingVehiclePawns(TArray<AActor *> &pawns) const
     }
 }
 
-bool ASimModeWorldBoth::isVehicleTypeSupported(const std::string &vehicle_type) const
+bool ASimModeWorldHero::isVehicleTypeSupported(const std::string &vehicle_type) const
 {
     return ((vehicle_type == AirSimSettings::kVehicleTypeSimpleFlight) ||
             (vehicle_type == AirSimSettings::kVehicleTypePhysXCar) ||
             (vehicle_type == AirSimSettings::kVehicleTypePX4) ||
             (vehicle_type == AirSimSettings::kVehicleTypeArduCopterSolo));
 }
-std::string ASimModeWorldBoth::getVehiclePawnPathName(const AirSimSettings::VehicleSetting &vehicle_setting) const
+std::string ASimModeWorldHero::getVehiclePawnPathName(const AirSimSettings::VehicleSetting &vehicle_setting) const
 {
     // decide which derived BP to use
     std::string pawn_path = vehicle_setting.pawn_path;
@@ -153,7 +153,7 @@ std::string ASimModeWorldBoth::getVehiclePawnPathName(const AirSimSettings::Vehi
     }
     return pawn_path;
 }
-PawnEvents *ASimModeWorldBoth::getVehiclePawnEvents(APawn *pawn) const
+PawnEvents *ASimModeWorldHero::getVehiclePawnEvents(APawn *pawn) const
 {
     std::string vehicle_type = getVehicleType(pawn);
     if (vehicle_type == AirSimSettings::kVehicleTypePhysXCar)
@@ -165,7 +165,7 @@ PawnEvents *ASimModeWorldBoth::getVehiclePawnEvents(APawn *pawn) const
         return static_cast<TFlyingPawn *>(pawn)->getPawnEvents();
     }
 }
-const common_utils::UniqueValueMap<std::string, APIPCamera *> ASimModeWorldBoth::getVehiclePawnCameras(
+const common_utils::UniqueValueMap<std::string, APIPCamera *> ASimModeWorldHero::getVehiclePawnCameras(
     APawn *pawn) const
 {
     std::string vehicle_type = getVehicleType(pawn);
@@ -178,7 +178,7 @@ const common_utils::UniqueValueMap<std::string, APIPCamera *> ASimModeWorldBoth:
         return (static_cast<const TFlyingPawn *>(pawn))->getCameras();
     }
 }
-void ASimModeWorldBoth::initializeVehiclePawn(APawn *pawn)
+void ASimModeWorldHero::initializeVehiclePawn(APawn *pawn)
 {
     std::string vehicle_type = getVehicleType(pawn);
     if (vehicle_type == AirSimSettings::kVehicleTypePhysXCar)
@@ -190,7 +190,7 @@ void ASimModeWorldBoth::initializeVehiclePawn(APawn *pawn)
         static_cast<TFlyingPawn *>(pawn)->initializeForBeginPlay();
     }
 }
-std::unique_ptr<PawnSimApi> ASimModeWorldBoth::createVehicleSimApi(
+std::unique_ptr<PawnSimApi> ASimModeWorldHero::createVehicleSimApi(
     const PawnSimApi::Params &pawn_sim_api_params) const
 {
     APawn *pawn = pawn_sim_api_params.pawn;
@@ -212,7 +212,7 @@ std::unique_ptr<PawnSimApi> ASimModeWorldBoth::createVehicleSimApi(
     }
     // vehicle_sim_api->reset();
 }
-msr::airlib::VehicleApiBase *ASimModeWorldBoth::getVehicleApi(const PawnSimApi::Params &pawn_sim_api_params,
+msr::airlib::VehicleApiBase *ASimModeWorldHero::getVehicleApi(const PawnSimApi::Params &pawn_sim_api_params,
                                                               const PawnSimApi *sim_api) const
 {
     APawn *pawn = pawn_sim_api_params.pawn;

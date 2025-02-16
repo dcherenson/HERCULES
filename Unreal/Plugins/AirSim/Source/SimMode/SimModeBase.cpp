@@ -2094,7 +2094,7 @@ void ASimModeBase::setupVehiclesAndCamera()
                     if (vehicle_setting.is_fpv_vehicle)
                         fpv_pawn = spawned_pawn;
 
-                    if (getSettings().simmode_name == "Both")
+                    if (getSettings().simmode_name == "Hero")
                     {
                         // if (vehicle_setting.vehicle_type == "PhysXCar" && fpv_flag){
                         //     fpv_flag = false;

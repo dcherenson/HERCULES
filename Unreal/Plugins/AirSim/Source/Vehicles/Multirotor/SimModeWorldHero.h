@@ -8,10 +8,10 @@
 #include "SimMode/SimModeWorldBase.h"
 #include "api/ApiServerBase.hpp"
 #include "api/VehicleSimApiBase.hpp"
-#include "SimModeWorldBoth.generated.h"
+#include "SimModeWorldHero.generated.h"
 
 UCLASS()
-class AIRSIM_API ASimModeWorldBoth : public ASimModeWorldBase
+class AIRSIM_API ASimModeWorldHero : public ASimModeWorldBase
 {
     GENERATED_BODY()
 

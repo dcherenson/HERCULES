@@ -13,7 +13,7 @@ import pprint
 """
 {
     "SettingsVersion": 1.2,
-    "SimMode": "Both",
+    "SimMode": "Hero",
 
     "Vehicles": {
         "Car1": {

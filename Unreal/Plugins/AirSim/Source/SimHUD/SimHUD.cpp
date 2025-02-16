@@ -4,7 +4,7 @@
 #include "Misc/FileHelper.h"
 
 #include "Vehicles/Multirotor/SimModeWorldMultiRotor.h"
-#include "Vehicles/Multirotor/SimModeWorldBoth.h"
+#include "Vehicles/Multirotor/SimModeWorldHero.h"
 #include "Vehicles/Car/SimModeCar.h"
 #include "Vehicles/SkidSteer/SimModeSkidVehicle.h"
 #include "Vehicles/ComputerVision/SimModeComputerVision.h"
@@ -332,8 +332,8 @@ void ASimHUD::createSimMode()
                                                                         FRotator::ZeroRotator,
                                                                         simmode_spawn_params);
     
-    else if (simmode_name == "Both")
-        simmode_ = this->GetWorld()->SpawnActor<ASimModeWorldBoth>(FVector::ZeroVector,
+    else if (simmode_name == "Hero")
+        simmode_ = this->GetWorld()->SpawnActor<ASimModeWorldHero>(FVector::ZeroVector,
                                                                    FRotator::ZeroRotator, simmode_spawn_params);
     
     else
