@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 
-#include "Vehicles/Car/CarPawn.h"
+#include "Vehicles/SkidSteer/SkidVehiclePawn.h"
 #include "FlyingPawn.h"
 #include "common/Common.hpp"
 #include "SimMode/SimModeWorldBase.h"
@@ -34,6 +34,6 @@ protected: // overrides
                                                        const PawnSimApi *sim_api) const override;
 
 private:
-    typedef ACarPawn TCarPawn;
+    typedef ASkidVehiclePawn TVehiclePawn;
     typedef AFlyingPawn TFlyingPawn;
 };

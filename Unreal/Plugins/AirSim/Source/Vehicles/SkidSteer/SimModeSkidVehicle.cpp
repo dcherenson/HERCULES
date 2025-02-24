@@ -1,5 +1,3 @@
-// Developed by Cosys-Lab, University of Antwerp
-
 #include "SimModeSkidVehicle.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -89,8 +87,8 @@ std::vector<std::unique_ptr<msr::airlib::ApiServerBase>> ASimModeSkidVehicle::cr
 #else
 	api_servers.push_back(std::unique_ptr<msr::airlib::ApiServerBase>(new msr::airlib::CarRpcLibServer(
         getApiProvider(), getSettings().api_server_address, getSettings().api_port)));
+
     return api_servers;
-	// NOTE by ssg: might not need the api port part
 #endif
 }
 

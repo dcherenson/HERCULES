@@ -25,25 +25,25 @@ public:
     virtual void initialize() override;
     virtual ~CarPawnSimApi() = default;
 
-    //VehicleSimApiBase interface
-    //implements game interface to update pawn
-    CarPawnSimApi(const Params& params,
-                  const msr::airlib::CarApiBase::CarControls& keyboard_controls);
+    // VehicleSimApiBase interface
+    // implements game interface to update pawn
+    CarPawnSimApi(const Params &params,
+                  const msr::airlib::CarApiBase::CarControls &keyboard_controls);
 
     virtual void update(float delta = 0) override;
-    virtual void reportState(StateReporter& reporter) override;
+    virtual void reportState(StateReporter &reporter) override;
 
     virtual std::string getRecordFileLine(bool is_header_line) const override;
 
     virtual void updateRenderedState(float dt) override;
     virtual void updateRendering(float dt) override;
 
-    msr::airlib::CarApiBase* getVehicleApi() const
+    msr::airlib::CarApiBase *getVehicleApi() const
     {
         return vehicle_api_.get();
     }
 
-    virtual msr::airlib::VehicleApiBase* getVehicleApiBase() const override
+    virtual msr::airlib::VehicleApiBase *getVehicleApiBase() const override
     {
         return vehicle_api_.get();
     }
@@ -59,8 +59,8 @@ private:
     std::unique_ptr<CarPawnApi> pawn_api_;
     std::vector<std::string> vehicle_api_messages_;
 
-    //storing reference from pawn
-    const msr::airlib::CarApiBase::CarControls& keyboard_controls_;
+    // storing reference from pawn
+    const msr::airlib::CarApiBase::CarControls &keyboard_controls_;
 
     msr::airlib::CarApiBase::CarControls joystick_controls_;
     msr::airlib::CarApiBase::CarControls current_controls_;

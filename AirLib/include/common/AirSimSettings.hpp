@@ -1519,10 +1519,13 @@ namespace airlib
             }
 
             if (std::isnan(camera_director.follow_distance)) {
-                if (simmode_name == kSimModeTypeCar || simmode_name == kSimModeTypeHero)
-                    camera_director.follow_distance = -8;
+                if (simmode_name == kSimModeTypeCar)
+                    camera_director.follow_distance = -3;
                 else if(simmode_name == kSimModeTypeSkidVehicle)
 				    camera_director.follow_distance = -2;
+                else if(simmode_name == kSimModeTypeHero) {
+                    camera_director.follow_distance = -3;
+                }
                 else
                     camera_director.follow_distance = -3;
             }

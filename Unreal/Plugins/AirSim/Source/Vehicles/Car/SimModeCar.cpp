@@ -92,10 +92,6 @@ std::vector<std::unique_ptr<msr::airlib::ApiServerBase>> ASimModeCar::createApiS
     api_servers.push_back(std::unique_ptr<msr::airlib::ApiServerBase>(new msr::airlib::CarRpcLibServer(
         getApiProvider(), getSettings().api_server_address, getSettings().api_port)));
 
-    // NOTE by ssg: might not need the api port, like below:
-    // api_servers.push_back(std::unique_ptr<msr::airlib::ApiServerBase>(new msr::airlib::CarRpcLibServer(
-    //     getApiProvider(), getSettings().api_server_address)));
-
     return api_servers;
 #endif
 }
