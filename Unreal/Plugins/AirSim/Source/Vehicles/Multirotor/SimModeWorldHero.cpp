@@ -9,7 +9,8 @@
 
 #include "AirBlueprintLib.h"
 #include "vehicles/multirotor/api/MultirotorApiBase.hpp"
-#include "Vehicles/SkidSteer/SkidVehiclePawnSimApi.h"
+#include "Vehicles/Car/CarPawnSimApi.h"
+// #include "CarPawnSimApi.h"
 #include "MultirotorPawnSimApi.h"
 #include "physics/PhysicsBody.hpp"
 #include "common/ClockFactory.hpp"
@@ -17,9 +18,6 @@
 #include "vehicles/car/api/CarRpcLibServer.hpp"
 #include "vehicles/multirotor/api/MultirotorRpcLibServer.hpp"
 #include "common/SteppableClock.hpp"
-#include "common/EarthUtils.hpp"
-#include "common/Common.hpp"
-#include "common/AirSimSettings.hpp"
 
 void ASimModeWorldHero::BeginPlay()
 {
@@ -106,18 +104,6 @@ std::vector<std::unique_ptr<msr::airlib::ApiServerBase>> ASimModeWorldHero::crea
 
 void ASimModeWorldHero::getExistingVehiclePawns(TArray<AActor *> &pawns) const
 {
-    TArray<AActor *> UGVPawns;
-    UAirBlueprintLib::FindAllActor<TVehiclePawn>(this, UGVPawns);
-    for (AActor *cpawn : UGVPawns)
-    {
-        pawns.Add(cpawn);
-        if (getSettings().simmode_name == "Hero")
-        {
-            APawn *vehicle_pawn = static_cast<APawn *>(cpawn);
-            addPawnToMap(vehicle_pawn, AirSimSettings::kVehicleTypeCPHusky);
-        }
-    }
-
     TArray<AActor *> FlyingPawns;
     UAirBlueprintLib::FindAllActor<TFlyingPawn>(this, FlyingPawns);
     for (AActor *fpawn : FlyingPawns)
@@ -129,6 +115,18 @@ void ASimModeWorldHero::getExistingVehiclePawns(TArray<AActor *> &pawns) const
             addPawnToMap(vehicle_pawn, AirSimSettings::kVehicleTypeSimpleFlight);
         }
     }
+
+    TArray<AActor *> CarPawns;
+    UAirBlueprintLib::FindAllActor<TCarPawn>(this, CarPawns);
+    for (AActor *cpawn : CarPawns)
+    {
+        pawns.Add(cpawn);
+        if (getSettings().simmode_name == "Hero")
+        {
+            APawn *vehicle_pawn = static_cast<APawn *>(cpawn);
+            addPawnToMap(vehicle_pawn, AirSimSettings::kVehicleTypePhysXCar);
+        }
+    }
 }
 
 bool ASimModeWorldHero::isVehicleTypeSupported(const std::string &vehicle_type) const
@@ -136,9 +134,7 @@ bool ASimModeWorldHero::isVehicleTypeSupported(const std::string &vehicle_type) 
     return ((vehicle_type == AirSimSettings::kVehicleTypeSimpleFlight) ||
             (vehicle_type == AirSimSettings::kVehicleTypePhysXCar) ||
             (vehicle_type == AirSimSettings::kVehicleTypePX4) ||
-            (vehicle_type == AirSimSettings::kVehicleTypeArduCopterSolo) ||
-            (vehicle_type == AirSimSettings::kVehicleTypeCPHusky) ||
-            (vehicle_type == AirSimSettings::kVehicleTypePioneer));
+            (vehicle_type == AirSimSettings::kVehicleTypeArduCopterSolo));
 }
 std::string ASimModeWorldHero::getVehiclePawnPathName(const AirSimSettings::VehicleSetting &vehicle_setting) const
 {
@@ -146,9 +142,9 @@ std::string ASimModeWorldHero::getVehiclePawnPathName(const AirSimSettings::Vehi
     std::string pawn_path = vehicle_setting.pawn_path;
     if (pawn_path == "")
     {
-        if (vehicle_setting.vehicle_type == AirSimSettings::kVehicleTypeCPHusky)
+        if (vehicle_setting.vehicle_type == AirSimSettings::kVehicleTypePhysXCar)
         {
-            pawn_path = "DefaultSkidVehicle";
+            pawn_path = "DefaultCar";
         }
         else
         {
@@ -160,9 +156,9 @@ std::string ASimModeWorldHero::getVehiclePawnPathName(const AirSimSettings::Vehi
 PawnEvents *ASimModeWorldHero::getVehiclePawnEvents(APawn *pawn) const
 {
     std::string vehicle_type = getVehicleType(pawn);
-    if (vehicle_type == AirSimSettings::kVehicleTypeCPHusky)
+    if (vehicle_type == AirSimSettings::kVehicleTypePhysXCar)
     {
-        return static_cast<TVehiclePawn *>(pawn)->getPawnEvents();
+        return static_cast<TCarPawn *>(pawn)->getPawnEvents();
     }
     else
     {
@@ -173,9 +169,9 @@ const common_utils::UniqueValueMap<std::string, APIPCamera *> ASimModeWorldHero:
     APawn *pawn) const
 {
     std::string vehicle_type = getVehicleType(pawn);
-    if (vehicle_type == AirSimSettings::kVehicleTypeCPHusky)
+    if (vehicle_type == AirSimSettings::kVehicleTypePhysXCar)
     {
-        return (static_cast<const TVehiclePawn *>(pawn))->getCameras();
+        return (static_cast<const TCarPawn *>(pawn))->getCameras();
     }
     else
     {
@@ -185,9 +181,9 @@ const common_utils::UniqueValueMap<std::string, APIPCamera *> ASimModeWorldHero:
 void ASimModeWorldHero::initializeVehiclePawn(APawn *pawn)
 {
     std::string vehicle_type = getVehicleType(pawn);
-    if (vehicle_type == AirSimSettings::kVehicleTypeCPHusky)
+    if (vehicle_type == AirSimSettings::kVehicleTypePhysXCar)
     {
-        static_cast<TVehiclePawn *>(pawn)->initializeForBeginPlay(getSettings().engine_sound);
+        static_cast<TCarPawn *>(pawn)->initializeForBeginPlay(getSettings().engine_sound);
     }
     else
     {
@@ -199,11 +195,10 @@ std::unique_ptr<PawnSimApi> ASimModeWorldHero::createVehicleSimApi(
 {
     APawn *pawn = pawn_sim_api_params.pawn;
     std::string vehicle_type = getVehicleType(pawn);
-    if (vehicle_type == AirSimSettings::kVehicleTypeCPHusky)
+    if (vehicle_type == AirSimSettings::kVehicleTypePhysXCar)
     {
-        auto vehicle_pawn = static_cast<TVehiclePawn *>(pawn_sim_api_params.pawn);
-        auto vehicle_sim_api = std::unique_ptr<PawnSimApi>(new SkidVehiclePawnSimApi(pawn_sim_api_params,
-                                                                                     vehicle_pawn->getKeyBoardControls()));
+        auto vehicle_pawn = static_cast<TCarPawn *>(pawn_sim_api_params.pawn);
+        auto vehicle_sim_api = std::unique_ptr<PawnSimApi>(new CarPawnSimApi(pawn_sim_api_params, vehicle_pawn->getKeyBoardControls()));
         vehicle_sim_api->initialize();
         // vehicle_sim_api->reset();
         return vehicle_sim_api;
@@ -222,9 +217,9 @@ msr::airlib::VehicleApiBase *ASimModeWorldHero::getVehicleApi(const PawnSimApi::
 {
     APawn *pawn = pawn_sim_api_params.pawn;
     std::string vehicle_type = getVehicleType(pawn);
-    if (vehicle_type == AirSimSettings::kVehicleTypeCPHusky)
+    if (vehicle_type == AirSimSettings::kVehicleTypePhysXCar)
     {
-        const auto car_sim_api = static_cast<const SkidVehiclePawnSimApi *>(sim_api);
+        const auto car_sim_api = static_cast<const CarPawnSimApi *>(sim_api);
         return car_sim_api->getVehicleApi();
     }
     else
