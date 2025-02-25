@@ -38,13 +38,13 @@ ACarPawn::ACarPawn()
 
     // Create In-Car camera component
     camera_front_center_base_ = CreateDefaultSubobject<USceneComponent>(TEXT("camera_front_center_base_"));
-    camera_front_center_base_->SetRelativeLocation(FVector(45, 0, 45)); //center
+    camera_front_center_base_->SetRelativeLocation(FVector(25, 0, 30)); //center
     camera_front_center_base_->SetupAttachment(GetMesh());
     camera_front_left_base_ = CreateDefaultSubobject<USceneComponent>(TEXT("camera_front_left_base_"));
-    camera_front_left_base_->SetRelativeLocation(FVector(45, -20, 45)); //left
+    camera_front_left_base_->SetRelativeLocation(FVector(25, -20, 30)); //left
     camera_front_left_base_->SetupAttachment(GetMesh());
     camera_front_right_base_ = CreateDefaultSubobject<USceneComponent>(TEXT("camera_front_right_base_"));
-    camera_front_right_base_->SetRelativeLocation(FVector(45, 20, 45)); //right
+    camera_front_right_base_->SetRelativeLocation(FVector(25, 20, 30)); //right
     camera_front_right_base_->SetupAttachment(GetMesh());
 
     // Note by SSG: Not spawning driver and rear cameras to reduce GPU usage and because exploration algorithm does not use them
