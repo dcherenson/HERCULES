@@ -1,5 +1,3 @@
-"""NOTE by SSG: As of Dec/12/2024, this script has not been tested yet."""
-
 import setup_path
 import cosysairsim as airsim
 
