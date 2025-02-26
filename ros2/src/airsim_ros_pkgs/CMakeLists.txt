@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(airsim_ros_pkgs)
 
+set(CMAKE_BUILD_TYPE Debug)
+
 find_package(rclcpp REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geographic_msgs REQUIRED)
