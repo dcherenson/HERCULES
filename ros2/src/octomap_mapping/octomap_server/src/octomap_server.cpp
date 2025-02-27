@@ -332,8 +332,8 @@ OctomapServer::OctomapServer(const rclcpp::NodeOptions & node_options)
   // const auto filename = declare_parameter("octomap_path", "");
   // std::string filename = "/home/sgarimella34/Downloads/binvox-octomap/AusLandscape_map_test1.binvox.bt";
   // std::string filename = "/home/sgarimella34/Downloads/binvox-octomap/AusLandscape_test3.binvox.bt";
-    // std::string filename = "/home/sgarimella34/Downloads/binvox-octomap/merged_test1.bt";
-  std::string filename = "/home/sgarimella34/Downloads/binvox-octomap/AusLandscape_test4.binvox.bt";
+    std::string filename = "/home/sgarimella34/Downloads/binvox-octomap/merged_test2.bt";
+  // std::string filename = "/home/sgarimella34/Downloads/binvox-octomap/AusLandscape_test4.binvox.bt";
 
   if (!openFile(filename)) {
     RCLCPP_WARN(get_logger(), "Could not open file %s", filename.c_str());
