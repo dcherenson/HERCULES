@@ -329,8 +329,8 @@ OctomapServer::OctomapServer(const rclcpp::NodeOptions & node_options)
   set_param_res_ =
     this->add_on_set_parameters_callback(std::bind(&OctomapServer::onParameter, this, _1));
 
-  // const auto filename = declare_parameter("octomap_path", "");
-    std::string filename = "/home/sgarimella34/Downloads/data_binvox_octomap/merged_test2.bt";
+  const auto filename = declare_parameter("octomap_path", "");
+    // std::string filename = "/home/sgarimella34/Downloads/data_binvox_octomap/merged_test2.bt";
 
   if (!openFile(filename)) {
     RCLCPP_WARN(get_logger(), "Could not open file %s", filename.c_str());
