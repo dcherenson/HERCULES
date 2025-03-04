@@ -8,7 +8,7 @@ def generate_voxel_patch(client, center, patch_size, resolution, output_file):
 
 def main():
     # Parameters
-    world_size = 300       # Total extent in meters for X and Y (world assumed to be square)
+    world_size = 200       # Total extent in meters for X and Y (world assumed to be square)
     patch_size = 100        # Each patch covers 100m x 100m x 100m
     resolution = 0.5        # Voxel resolution in meters
     
@@ -25,7 +25,7 @@ def main():
     num_patches_xy = int(world_size / patch_size)
     
     # Make sure the output directory exists
-    output_dir = "/home/sgarimella34/Downloads/binvox-octomap/tesselation_test"
+    output_dir = "/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_test"
     os.makedirs(output_dir, exist_ok=True)
     
     # Create a single client for efficiency
@@ -41,7 +41,8 @@ def main():
             center = airsim.Vector3r(cx, cy, cz)
             
             # Define a unique filename for this patch.
-            output_file = os.path.join(output_dir, f"patch_{ix}_{iy}.binvox")
+            # output_file = os.path.join(output_dir, f"patch_{ix}_{iy}.binvox")
+            output_file = os.path.join(output_dir, f"patch_{cx}_{cy}.binvox") #using center of tile to name
             print(f"Generating patch at center ({cx}, {cy}, {cz}) into file {output_file}")
             
             # Generate the voxel grid for this patch.
