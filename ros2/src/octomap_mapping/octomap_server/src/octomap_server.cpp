@@ -335,6 +335,13 @@ OctomapServer::OctomapServer(const rclcpp::NodeOptions & node_options)
   if (!openFile(filename)) {
     RCLCPP_WARN(get_logger(), "Could not open file %s", filename.c_str());
   }
+
+  static_broadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
+  timer_ = this->create_wall_timer(
+    std::chrono::seconds(10),
+    std::bind(&OctomapServer::timerCallback, this)
+  );
+
 }
 
 bool OctomapServer::openFile(const std::string & filename)
@@ -1432,6 +1439,24 @@ void OctomapServer::adjustMapData(OccupancyGrid & map, const MapMetaData & old_m
   }
 }
 
+void OctomapServer::timerCallback() {
+  // Broadcast a static transform from "map" to "base_footprint"
+  geometry_msgs::msg::TransformStamped static_transform;
+  static_transform.header.stamp = this->now();
+  static_transform.header.frame_id = world_frame_id_; // "map"
+  static_transform.child_frame_id = base_frame_id_;     // "base_footprint" (or any desired child)
+  static_transform.transform.translation.x = 0.0;
+  static_transform.transform.translation.y = 0.0;
+  static_transform.transform.translation.z = 0.0;
+  static_transform.transform.rotation.x = 0.0;
+  static_transform.transform.rotation.y = 0.0;
+  static_transform.transform.rotation.z = 0.0;
+  static_transform.transform.rotation.w = 1.0;
+  static_broadcaster_->sendTransform(static_transform);
+
+  // republish map info periodically:
+  // publishAll(this->now());
+}
 
 ColorRGBA OctomapServer::heightMapColor(double h)
 {

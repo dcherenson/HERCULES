@@ -53,6 +53,7 @@
 #include "pcl_conversions/pcl_conversions.h"
 #include "pcl_ros/transforms.hpp"
 
+#include <tf2_ros/static_transform_broadcaster.h>
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/create_timer_ros.h"
 #include "tf2_ros/message_filter.h"
@@ -211,6 +212,9 @@ protected:
   /// updates the downprojected 2D map as either occupied or free
   virtual void update2DMap(const OcTreeT::iterator & it, bool occupied);
 
+  // to publish the tf transform
+  virtual void timerCallback();
+
   inline size_t mapIdx(const int i, const int j) const
   {
     return gridmap_.info.width * j + i;
@@ -306,6 +310,10 @@ protected:
   unsigned multires_2d_scale_;
   bool project_complete_map_;
   bool use_colored_map_;
+
+  std::shared_ptr<tf2_ros::StaticTransformBroadcaster> static_broadcaster_;
+  rclcpp::TimerBase::SharedPtr timer_;
+
 };
 }  // namespace octomap_server
 
