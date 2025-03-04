@@ -19,8 +19,14 @@ for file in "$BINVOX_DIR"/patch_*.binvox; do
     IFS='_' read -r cx cy <<< "$offsets"
     # Set the z offset (assumed to be 0)
     cz=0.0
+    # Compute the composite offset:
+    # Previous transform for y-flip and 90° clockwise was: (cx,cy) -> (-cy, -cx)
+    # To apply an extra 180° rotation (i.e. multiply by -1), we get:
+    # (-cy, -cx) * -1 = (cy, cx)
+    new_offset_x=$(echo "scale=6; $cy" | bc -l)
+    new_offset_y=$(echo "scale=6; $cx" | bc -l)
     # Append the per-file offset and filename to the command
-    CMD+=" --offset $cx $cy $cz $file"
+    CMD+=" --offset $new_offset_x $new_offset_y $cz $file"
 done
 
 # Append the output filename option
