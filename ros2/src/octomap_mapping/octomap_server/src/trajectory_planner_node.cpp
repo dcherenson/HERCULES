@@ -4,6 +4,7 @@
 #include <vector>
 #include <cmath>
 #include <sstream>
+#include <tuple>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -24,11 +25,24 @@ public:
   {
     // Declare parameters.
     this->declare_parameter("z_height", 0.25);
-    this->declare_parameter("trajectory_length", 100.0);
-    this->declare_parameter("square_size", 100.0);
+    this->declare_parameter("trajectory_length", 100.0); // meters
+    this->declare_parameter("square_size", 100.0);         // planning area side (meters)
+    this->declare_parameter("num_waypoints", 50);          // total number of waypoints
+    this->declare_parameter("max_step", 5.0);              // maximum allowed step length
+
+    // New parameters for the starting point.
+    this->declare_parameter("start_x", 0.0);
+    this->declare_parameter("start_y", 0.0);
+    this->declare_parameter("start_z", 0.25); // default same as z_height
+
     this->get_parameter("z_height", z_height_);
     this->get_parameter("trajectory_length", trajectory_length_);
     this->get_parameter("square_size", square_size_);
+    this->get_parameter("num_waypoints", num_waypoints_);
+    this->get_parameter("max_step", max_step_);
+    this->get_parameter("start_x", start_x_);
+    this->get_parameter("start_y", start_y_);
+    this->get_parameter("start_z", start_z_);
 
     // Define the planning area as a 2D square.
     grid_resolution_ = 0.25;  // meters per cell
@@ -38,7 +52,7 @@ public:
     grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
     occupancy_grid_.assign(grid_width_ * grid_height_, 0);
 
-    // Set up subscription to the binary octomap.
+    // Subscribe to the binary octomap.
     octomap_sub_ = this->create_subscription<octomap_msgs::msg::Octomap>(
       "/octomap_binary", 10,
       std::bind(&TrajectoryPlanner::octomap_callback, this, std::placeholders::_1));
@@ -47,7 +61,7 @@ public:
     path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
     marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/trajectory_marker", 10);
 
-    // Timer to plan and publish a new trajectory every second.
+    // Timer to publish the (single) trajectory every second.
     timer_ = this->create_wall_timer(1s, std::bind(&TrajectoryPlanner::timer_callback, this));
 
     // Initialize random generators for x and y.
@@ -63,10 +77,17 @@ private:
   double z_height_;
   double trajectory_length_;
   double square_size_;
+  int num_waypoints_;
+  double max_step_;
   double grid_resolution_;
   double grid_origin_x_, grid_origin_y_;
   int grid_width_, grid_height_;
   std::vector<int8_t> occupancy_grid_;  // 0: free, 1: occupied
+
+  // New starting point parameters.
+  double start_x_;
+  double start_y_;
+  double start_z_;
 
   // ROS publishers/subscribers/timer.
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
@@ -79,6 +100,9 @@ private:
   std::mt19937 rng_;
   std::uniform_real_distribution<double> x_dist_;
   std::uniform_real_distribution<double> y_dist_;
+
+  // Storage for the planned trajectory.
+  std::vector<std::tuple<double, double, double>> trajectory_;
 
   // Octomap callback: decode the binary message, iterate over leaves,
   // and update the occupancy grid for leaves whose z coordinate is near z_height_.
@@ -131,7 +155,7 @@ private:
     return occupancy_grid_[iy * grid_width_ + ix] == 0;
   }
 
-  // Check if the straight-line segment between p1 and p2 is free by sampling points.
+  // Check if the straight-line segment between p1 and p2 is free by sampling intermediate points.
   bool check_line_free(const std::tuple<double, double, double>& p1,
                        const std::tuple<double, double, double>& p2)
   {
@@ -151,65 +175,70 @@ private:
     return true;
   }
 
-  // Plan a collision-free trajectory by randomly sampling free points in the planning area.
-  // The trajectory stops when the cumulative path length reaches trajectory_length_.
+  // Generate a single, smooth trajectory using a fixed number of waypoints.
+  // The starting point is now taken from the user-provided parameters.
   std::vector<std::tuple<double, double, double>> plan_trajectory()
   {
-    std::vector<std::tuple<double, double, double>> trajectory;
+    std::vector<std::tuple<double, double, double>> traj;
     std::tuple<double, double, double> start_point;
 
-    // Find a random free starting point.
-    while (true) {
-      double start_x = x_dist_(rng_);
-      double start_y = y_dist_(rng_);
-      if (is_free(start_x, start_y, z_height_)) {
-        start_point = std::make_tuple(start_x, start_y, z_height_);
-        break;
-      }
+    // Determine the target step length (average distance between consecutive waypoints).
+    double target_step = trajectory_length_ / static_cast<double>(num_waypoints_ - 1);
+
+    // Use the user-provided starting point.
+    start_point = std::make_tuple(start_x_, start_y_, start_z_);
+    if (!is_free(start_x_, start_y_, start_z_)) {
+      RCLCPP_WARN(this->get_logger(), "Provided starting point (%.2f, %.2f, %.2f) is not free!",
+                  start_x_, start_y_, start_z_);
     }
-    trajectory.push_back(start_point);
+    traj.push_back(start_point);
     auto current_point = start_point;
     double total_length = 0.0;
-    int max_attempts = 1000;
+    int max_attempts_per_waypoint = 100;
 
-    for (int i = 0; i < max_attempts; ++i) {
-      if (total_length >= trajectory_length_) break;
-      double next_x = x_dist_(rng_);
-      double next_y = y_dist_(rng_);
-      auto next_point = std::make_tuple(next_x, next_y, z_height_);
-      if (is_free(next_x, next_y, z_height_) && check_line_free(current_point, next_point)) {
-        double dx = std::get<0>(next_point) - std::get<0>(current_point);
-        double dy = std::get<1>(next_point) - std::get<1>(current_point);
-        double seg_length = std::sqrt(dx*dx + dy*dy);
-        if (total_length + seg_length > trajectory_length_) {
-          double remaining = trajectory_length_ - total_length;
-          double scale = remaining / seg_length;
-          double trimmed_x = std::get<0>(current_point) + dx * scale;
-          double trimmed_y = std::get<1>(current_point) + dy * scale;
-          auto trimmed_point = std::make_tuple(trimmed_x, trimmed_y, z_height_);
-          if (!check_line_free(current_point, trimmed_point))
-            continue;
-          trajectory.push_back(trimmed_point);
-          total_length += remaining;
+    // For each subsequent waypoint...
+    for (int i = 1; i < num_waypoints_; ++i) {
+      bool found = false;
+      for (int attempt = 0; attempt < max_attempts_per_waypoint; ++attempt) {
+        // Sample a random direction.
+        double angle = ((double)rand() / RAND_MAX) * 2.0 * M_PI;
+        // Choose a step length randomly between 0.5*target_step and min(1.5*target_step, max_step_).
+        double step = 0.5 * target_step + ((double)rand() / RAND_MAX) * (std::min(1.5 * target_step, max_step_) - 0.5 * target_step);
+        double next_x = std::get<0>(current_point) + step * std::cos(angle);
+        double next_y = std::get<1>(current_point) + step * std::sin(angle);
+
+        // Ensure the new point is within the planning area.
+        if (next_x < grid_origin_x_ || next_x > grid_origin_x_ + square_size_ ||
+            next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_) {
+          continue;
+        }
+        // Check if candidate is free and the line segment is collision-free.
+        auto candidate = std::make_tuple(next_x, next_y, z_height_);
+        if (is_free(next_x, next_y, z_height_) && check_line_free(current_point, candidate)) {
+          traj.push_back(candidate);
+          total_length += step;
+          current_point = candidate;
+          found = true;
           break;
         }
-        trajectory.push_back(next_point);
-        total_length += seg_length;
-        current_point = next_point;
+      }
+      if (!found) {
+        RCLCPP_WARN(this->get_logger(), "Could not find a valid waypoint at index %d", i);
+        break; // Exit early if unable to extend trajectory.
       }
     }
-    RCLCPP_INFO(this->get_logger(), "Planned trajectory length: %.2f m with %zu waypoints", total_length, trajectory.size());
-    return trajectory;
+    RCLCPP_INFO(this->get_logger(), "Planned trajectory length: %.2f m with %zu waypoints", total_length, traj.size());
+    return traj;
   }
 
   // Publish the trajectory as a nav_msgs::msg::Path and as a visualization_msgs::msg::Marker.
-  void publish_trajectory(const std::vector<std::tuple<double, double, double>> &trajectory)
+  void publish_trajectory(const std::vector<std::tuple<double, double, double>> &traj)
   {
     auto now = this->now();
     nav_msgs::msg::Path path_msg;
     path_msg.header.stamp = now;
     path_msg.header.frame_id = "map";
-    for (const auto &pt : trajectory) {
+    for (const auto &pt : traj) {
       geometry_msgs::msg::PoseStamped pose;
       pose.header = path_msg.header;
       pose.pose.position.x = std::get<0>(pt);
@@ -231,7 +260,7 @@ private:
     marker.color.r = 1.0;
     marker.color.g = 0.0;
     marker.color.b = 0.0;
-    for (const auto &pt : trajectory) {
+    for (const auto &pt : traj) {
       geometry_msgs::msg::Point p;
       p.x = std::get<0>(pt);
       p.y = std::get<1>(pt);
@@ -241,11 +270,13 @@ private:
     marker_pub_->publish(marker);
   }
 
-  // Timer callback to replan and publish trajectory periodically.
+  // Timer callback: if a trajectory has not yet been generated, generate it once; then publish it.
   void timer_callback()
   {
-    auto trajectory = plan_trajectory();
-    publish_trajectory(trajectory);
+    if (trajectory_.empty()) {
+      trajectory_ = plan_trajectory();
+    }
+    publish_trajectory(trajectory_);
   }
 };
 
