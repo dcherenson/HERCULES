@@ -126,7 +126,8 @@ install(FILES README.md DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch rviz DESTINATION share/${PROJECT_NAME})
 
 install(PROGRAMS
-  scripts/test_rviz2_markers.py
+  scripts/test_rviz2_markers.py 
+  scripts/trajectory_planner.py 
   DESTINATION lib/${PROJECT_NAME}
 )
 
