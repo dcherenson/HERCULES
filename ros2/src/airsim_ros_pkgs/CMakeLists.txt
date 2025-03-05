@@ -125,6 +125,10 @@ install(FILES README.md DESTINATION share/${PROJECT_NAME})
 
 install(DIRECTORY launch rviz DESTINATION share/${PROJECT_NAME})
 
+install(PROGRAMS
+  scripts/test_rviz2_markers.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 
 ament_export_dependencies(rclcpp)
