@@ -112,6 +112,22 @@ rclcpp_components_register_node(octomap_saver
   EXECUTABLE octomap_saver_node
 )
 
+
+ament_auto_add_executable(trajectory_planner_node
+  src/trajectory_planner_node.cpp
+)
+
+target_link_libraries(trajectory_planner_node
+  ${OCTOMAP_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
+install(TARGETS trajectory_planner_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
