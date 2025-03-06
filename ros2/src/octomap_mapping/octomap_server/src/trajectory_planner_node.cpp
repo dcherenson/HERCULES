@@ -23,18 +23,24 @@ class TrajectoryPlanner : public rclcpp::Node {
 public:
   TrajectoryPlanner() : Node("trajectory_planner")
   {
-    // Declare parameters.
+    // Declare old parameters.
     this->declare_parameter("z_height", 0.25);
     this->declare_parameter("trajectory_length", 100.0); // meters
-    this->declare_parameter("square_size", 100.0);         // planning area side (meters)
-    this->declare_parameter("num_waypoints", 50);          // total number of waypoints
-    this->declare_parameter("max_step", 5.0);              // maximum allowed step length
+    this->declare_parameter("square_size", 100.0);       // planning area side (meters)
+    this->declare_parameter("num_waypoints", 50);        // total number of waypoints
+    this->declare_parameter("max_step", 5.0);            // maximum allowed step length
 
     // New parameters for the starting point.
     this->declare_parameter("start_x", 0.0);
     this->declare_parameter("start_y", 0.0);
     this->declare_parameter("start_z", 0.25); // default same as z_height
 
+    // --- New parameters for smoothness and unicycle constraints ---
+    this->declare_parameter("start_yaw", 0.0);            // initial heading in degrees
+    this->declare_parameter("min_waypoint_distance", 2.0); // min distance between waypoints
+    this->declare_parameter("max_turn_angle_deg", 45.0);   // max turn angle between consecutive waypoints in degrees
+
+    // Retrieve parameter values.
     this->get_parameter("z_height", z_height_);
     this->get_parameter("trajectory_length", trajectory_length_);
     this->get_parameter("square_size", square_size_);
@@ -43,6 +49,13 @@ public:
     this->get_parameter("start_x", start_x_);
     this->get_parameter("start_y", start_y_);
     this->get_parameter("start_z", start_z_);
+    this->get_parameter("start_yaw", start_yaw_deg_);
+    this->get_parameter("min_waypoint_distance", min_waypoint_distance_);
+    this->get_parameter("max_turn_angle_deg", max_turn_angle_deg_);
+
+    // Convert degrees to radians where needed.
+    start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
+    max_turn_angle_rad_ = max_turn_angle_deg_ * M_PI / 180.0;
 
     // Define the planning area as a 2D square.
     grid_resolution_ = 0.25;  // meters per cell
@@ -64,7 +77,7 @@ public:
     // Timer to publish the (single) trajectory every second.
     timer_ = this->create_wall_timer(1s, std::bind(&TrajectoryPlanner::timer_callback, this));
 
-    // Initialize random generators for x and y.
+    // Initialize random generators (Mersenne Twister).
     rng_ = std::mt19937(rd_());
     x_dist_ = std::uniform_real_distribution<double>(grid_origin_x_, grid_origin_x_ + square_size_);
     y_dist_ = std::uniform_real_distribution<double>(grid_origin_y_, grid_origin_y_ + square_size_);
@@ -84,10 +97,17 @@ private:
   int grid_width_, grid_height_;
   std::vector<int8_t> occupancy_grid_;  // 0: free, 1: occupied
 
-  // New starting point parameters.
+  // Starting point parameters.
   double start_x_;
   double start_y_;
   double start_z_;
+  double start_yaw_deg_; // in degrees from parameter
+  double start_yaw_;     // in radians (converted)
+
+  // Unicycle-like constraints.
+  double min_waypoint_distance_;
+  double max_turn_angle_deg_;
+  double max_turn_angle_rad_;
 
   // ROS publishers/subscribers/timer.
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
@@ -152,7 +172,7 @@ private:
     if (ix < 0 || ix >= grid_width_ || iy < 0 || iy >= grid_height_) {
       return false;
     }
-    return occupancy_grid_[iy * grid_width_ + ix] == 0;
+    return (occupancy_grid_[iy * grid_width_ + ix] == 0);
   }
 
   // Check if the straight-line segment between p1 and p2 is free by sampling intermediate points.
@@ -163,6 +183,8 @@ private:
     double x2 = std::get<0>(p2), y2 = std::get<1>(p2);
     double dx = x2 - x1, dy = y2 - y1;
     double distance = std::sqrt(dx*dx + dy*dy);
+
+    // Sample more densely than grid_resolution to be safe.
     int steps = static_cast<int>(distance / (grid_resolution_ / 2.0));
     for (int i = 0; i <= steps; ++i) {
       double t = static_cast<double>(i) / steps;
@@ -175,59 +197,85 @@ private:
     return true;
   }
 
-  // Generate a single, smooth trajectory using a fixed number of waypoints.
-  // The starting point is now taken from the user-provided parameters.
+  // Generate a single, smoother trajectory using a unicycle-like approach.
+  // We track (x, y, theta) and randomly sample small turns + forward steps.
   std::vector<std::tuple<double, double, double>> plan_trajectory()
   {
     std::vector<std::tuple<double, double, double>> traj;
-    std::tuple<double, double, double> start_point;
 
-    // Determine the target step length (average distance between consecutive waypoints).
-    double target_step = trajectory_length_ / static_cast<double>(num_waypoints_ - 1);
+    // Use the user-provided starting point and heading.
+    double current_x = start_x_;
+    double current_y = start_y_;
+    double current_theta = start_yaw_;  // in radians
+    double total_length = 0.0;
 
-    // Use the user-provided starting point.
-    start_point = std::make_tuple(start_x_, start_y_, start_z_);
-    if (!is_free(start_x_, start_y_, start_z_)) {
-      RCLCPP_WARN(this->get_logger(), "Provided starting point (%.2f, %.2f, %.2f) is not free!",
-                  start_x_, start_y_, start_z_);
+    // First waypoint is the starting point.
+    // We'll store (x, y, z) in the final trajectory; keep heading separate.
+    std::tuple<double, double, double> start_point = std::make_tuple(current_x, current_y, start_z_);
+    if (!is_free(current_x, current_y, start_z_)) {
+      RCLCPP_WARN(this->get_logger(),
+                  "Provided start point (%.2f, %.2f, %.2f) is not free!",
+                  current_x, current_y, start_z_);
     }
     traj.push_back(start_point);
-    auto current_point = start_point;
-    double total_length = 0.0;
+
+    // Typical average distance between consecutive waypoints.
+    double target_step = trajectory_length_ / static_cast<double>(num_waypoints_ - 1);
     int max_attempts_per_waypoint = 100;
 
-    // For each subsequent waypoint...
+    // Random distributions for turn and step:
+    // turn in [-max_turn_angle_rad_, +max_turn_angle_rad_]
+    // step in [min_waypoint_distance_, min(max_step_, some factor * target_step)]
+    std::uniform_real_distribution<double> turn_dist(-max_turn_angle_rad_, max_turn_angle_rad_);
+    // We can allow step up to 1.5*target_step, but never above max_step_.
+    double max_step_for_dist = std::min(1.5 * target_step, max_step_);
+    std::uniform_real_distribution<double> step_dist(min_waypoint_distance_, max_step_for_dist);
+
     for (int i = 1; i < num_waypoints_; ++i) {
       bool found = false;
       for (int attempt = 0; attempt < max_attempts_per_waypoint; ++attempt) {
-        // Sample a random direction.
-        double angle = ((double)rand() / RAND_MAX) * 2.0 * M_PI;
-        // Choose a step length randomly between 0.5*target_step and min(1.5*target_step, max_step_).
-        double step = 0.5 * target_step + ((double)rand() / RAND_MAX) * (std::min(1.5 * target_step, max_step_) - 0.5 * target_step);
-        double next_x = std::get<0>(current_point) + step * std::cos(angle);
-        double next_y = std::get<1>(current_point) + step * std::sin(angle);
+        // Sample a small turn (unicycle-like).
+        double dtheta = turn_dist(rng_);
+        double new_theta = current_theta + dtheta;
 
-        // Ensure the new point is within the planning area.
+        // Sample a forward step distance.
+        double step = step_dist(rng_);
+
+        // Compute next waypoint based on unicycle motion.
+        double next_x = current_x + step * std::cos(new_theta);
+        double next_y = current_y + step * std::sin(new_theta);
+
+        // Keep the z at the planning height (or near it).
+        auto candidate = std::make_tuple(next_x, next_y, z_height_);
+
+        // Check if it's inside the planning area.
         if (next_x < grid_origin_x_ || next_x > grid_origin_x_ + square_size_ ||
             next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_) {
           continue;
         }
-        // Check if candidate is free and the line segment is collision-free.
-        auto candidate = std::make_tuple(next_x, next_y, z_height_);
-        if (is_free(next_x, next_y, z_height_) && check_line_free(current_point, candidate)) {
+
+        // Check occupancy and collision-free line from current -> candidate.
+        if (is_free(next_x, next_y, z_height_) && check_line_free(traj.back(), candidate)) {
+          // Accept this waypoint.
           traj.push_back(candidate);
           total_length += step;
-          current_point = candidate;
+          // Update current state.
+          current_x = next_x;
+          current_y = next_y;
+          current_theta = new_theta;
           found = true;
           break;
         }
       }
       if (!found) {
         RCLCPP_WARN(this->get_logger(), "Could not find a valid waypoint at index %d", i);
-        break; // Exit early if unable to extend trajectory.
+        break; // Exit early if unable to extend trajectory
       }
     }
-    RCLCPP_INFO(this->get_logger(), "Planned trajectory length: %.2f m with %zu waypoints", total_length, traj.size());
+
+    RCLCPP_INFO(this->get_logger(),
+                "Planned trajectory length: %.2f m with %zu waypoints",
+                total_length, traj.size());
     return traj;
   }
 
@@ -238,13 +286,14 @@ private:
     nav_msgs::msg::Path path_msg;
     path_msg.header.stamp = now;
     path_msg.header.frame_id = "map";
+
     for (const auto &pt : traj) {
       geometry_msgs::msg::PoseStamped pose;
       pose.header = path_msg.header;
       pose.pose.position.x = std::get<0>(pt);
       pose.pose.position.y = std::get<1>(pt);
       pose.pose.position.z = std::get<2>(pt);
-      pose.pose.orientation.w = 1.0;
+      pose.pose.orientation.w = 1.0; // no rotation about z for display
       path_msg.poses.push_back(pose);
     }
     path_pub_->publish(path_msg);
@@ -255,11 +304,12 @@ private:
     marker.id = 0;
     marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
     marker.action = visualization_msgs::msg::Marker::ADD;
-    marker.scale.x = 0.1;  // Line width.
+    marker.scale.x = 0.1;  // line width
     marker.color.a = 1.0;
     marker.color.r = 1.0;
     marker.color.g = 0.0;
     marker.color.b = 0.0;
+
     for (const auto &pt : traj) {
       geometry_msgs::msg::Point p;
       p.x = std::get<0>(pt);
@@ -270,7 +320,7 @@ private:
     marker_pub_->publish(marker);
   }
 
-  // Timer callback: if a trajectory has not yet been generated, generate it once; then publish it.
+  // Timer callback: generate the trajectory once (if not generated), then publish it repeatedly.
   void timer_callback()
   {
     if (trajectory_.empty()) {
