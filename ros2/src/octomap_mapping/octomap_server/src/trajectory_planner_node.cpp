@@ -6,6 +6,8 @@
 #include <sstream>
 #include <tuple>
 #include <algorithm>
+#include <functional>
+#include <utility>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -24,23 +26,24 @@ public:
   TrajectoryPlanner() : Node("trajectory_planner")
   {
     // Declare parameters.
-    this->declare_parameter("z_height", 0.0);
+    this->declare_parameter("z_height", 0.25);
     this->declare_parameter("trajectory_length", 100.0); // meters
-    this->declare_parameter("square_size", 100.0);         // planning area side (meters)
+    this->declare_parameter("square_size", 200.0);         // planning area side (meters)
     this->declare_parameter("num_waypoints", 50);          // total number of waypoints
     this->declare_parameter("max_step", 5.0);              // maximum allowed step length
+    this->declare_parameter("max_linear_velocity", 2.0);   // maximum linear velocity
 
-    // New parameter for maximum linear velocity (max distance per time step)
-    this->declare_parameter("max_linear_velocity", 2.0);
-
-    // New parameters for the starting point.
+    // Starting point parameters.
     this->declare_parameter("start_x", 0.0);
     this->declare_parameter("start_y", 0.0);
     this->declare_parameter("start_z", 0.25); // default same as z_height
 
-    // --- New parameters for smoothness and unicycle constraints ---
+    // Unicycle-like constraints.
     this->declare_parameter("start_yaw", 0.0);            // initial heading in degrees
     this->declare_parameter("max_turn_angle_deg", 45.0);   // max turn angle between consecutive waypoints in degrees
+
+    // New parameter for obstacle inflation (in meters).
+    this->declare_parameter("inflation_radius", 2.0);
 
     // Retrieve parameter values.
     this->get_parameter("z_height", z_height_);
@@ -54,6 +57,7 @@ public:
     this->get_parameter("start_z", start_z_);
     this->get_parameter("start_yaw", start_yaw_deg_);
     this->get_parameter("max_turn_angle_deg", max_turn_angle_deg_);
+    this->get_parameter("inflation_radius", inflation_radius_);
 
     // Convert degrees to radians where needed.
     start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
@@ -111,6 +115,9 @@ private:
   double max_turn_angle_deg_;
   double max_turn_angle_rad_;
 
+  // Inflation radius parameter.
+  double inflation_radius_;
+
   // ROS publishers/subscribers/timer.
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
@@ -160,104 +167,158 @@ private:
     }
   }
 
-  // Check whether a point (x, y, z) is free.
-  bool is_free(double x, double y, double z)
-  {
+  // Check if a candidate point is free by verifying that every cell in the circular area
+  // with radius 'infl' (in meters) around the candidate's grid cell is free.
+  bool is_free(double x, double y, double z, double infl) {
     int ix = static_cast<int>((x - grid_origin_x_) / grid_resolution_);
     int iy = static_cast<int>((y - grid_origin_y_) / grid_resolution_);
-    if (ix < 0 || ix >= grid_width_ || iy < 0 || iy >= grid_height_) {
-      return false;
+    int inflation_cells = static_cast<int>(std::ceil(infl / grid_resolution_));
+    
+    for (int dx = -inflation_cells; dx <= inflation_cells; ++dx) {
+      for (int dy = -inflation_cells; dy <= inflation_cells; ++dy) {
+        double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
+        if (dist > infl)
+          continue;
+        int nx = ix + dx;
+        int ny = iy + dy;
+        if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+          continue;
+        if (occupancy_grid_[ny * grid_width_ + nx] == 1)
+          return false;
+      }
     }
-    return (occupancy_grid_[iy * grid_width_ + ix] == 0);
+    return true;
+  }
+  
+  // Overloaded is_free using the default inflation radius.
+  bool is_free(double x, double y, double z) {
+    return is_free(x, y, z, inflation_radius_);
   }
 
-  // Check if the straight-line segment between two points is free.
-  bool check_line_free(const std::tuple<double, double, double>& p1,
-                         const std::tuple<double, double, double>& p2)
-  {
-    double x1 = std::get<0>(p1), y1 = std::get<1>(p1);
-    double x2 = std::get<0>(p2), y2 = std::get<1>(p2);
-    double dx = x2 - x1, dy = y2 - y1;
-    double distance = std::sqrt(dx*dx + dy*dy);
+  // Bresenham's line algorithm: compute grid cells between (x0,y0) and (x1,y1).
+  std::vector<std::pair<int,int>> bresenham(int x0, int y0, int x1, int y1) {
+    std::vector<std::pair<int,int>> cells;
+    int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy; // error value e_xy
+    while (true) {
+      cells.push_back(std::make_pair(x0, y0));
+      if (x0 == x1 && y0 == y1)
+        break;
+      int e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+    return cells;
+  }
 
-    int steps = static_cast<int>(distance / (grid_resolution_ / 2.0));
-    for (int i = 0; i <= steps; ++i) {
-      double t = static_cast<double>(i) / steps;
-      double x = x1 + t * dx;
-      double y = y1 + t * dy;
-      if (!is_free(x, y, z_height_)) {
-        return false;
+  // Check if the straight-line segment between two waypoints is free.
+  // For every grid cell that the line passes through (via Bresenham), we check
+  // that every cell within the circular neighborhood (of radius 'infl') is free.
+  bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
+                                 const std::tuple<double,double,double>& p2,
+                                 double infl)
+  {
+    int x0 = static_cast<int>((std::get<0>(p1) - grid_origin_x_) / grid_resolution_);
+    int y0 = static_cast<int>((std::get<1>(p1) - grid_origin_y_) / grid_resolution_);
+    int x1 = static_cast<int>((std::get<0>(p2) - grid_origin_x_) / grid_resolution_);
+    int y1 = static_cast<int>((std::get<1>(p2) - grid_origin_y_) / grid_resolution_);
+    auto line_cells = bresenham(x0, y0, x1, y1);
+    int infl_cells = static_cast<int>(std::ceil(infl / grid_resolution_));
+    
+    for (auto cell : line_cells) {
+      int cx = cell.first, cy = cell.second;
+      // Check every cell in the circular neighborhood of (cx,cy).
+      for (int dx = -infl_cells; dx <= infl_cells; ++dx) {
+        for (int dy = -infl_cells; dy <= infl_cells; ++dy) {
+          double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
+          if (dist > infl)
+            continue;
+          int nx = cx + dx, ny = cy + dy;
+          if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+            continue;
+          if (occupancy_grid_[ny * grid_width_ + nx] == 1)
+            return false;
+        }
       }
     }
     return true;
   }
 
-  // Generate a trajectory that respects both angular and linear (non-zero) constraints.
+  // Overloaded check_line_free using the default inflation.
+  bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
+                                 const std::tuple<double,double,double>& p2)
+  {
+    return check_line_free_bresenham(p1, p2, inflation_radius_);
+  }
+
+  // Generate a trajectory using recursive backtracking.
   std::vector<std::tuple<double, double, double>> plan_trajectory()
   {
     std::vector<std::tuple<double, double, double>> traj;
-    double current_x = start_x_;
-    double current_y = start_y_;
-    double current_theta = start_yaw_;
+    // Start from the given starting point.
+    traj.push_back(std::make_tuple(start_x_, start_y_, start_z_));
     double total_length = 0.0;
 
-    std::tuple<double, double, double> start_point = std::make_tuple(current_x, current_y, start_z_);
-    if (!is_free(current_x, current_y, start_z_)) {
-      RCLCPP_WARN(this->get_logger(),
-                  "Provided start point (%.2f, %.2f, %.2f) is not free!",
-                  current_x, current_y, start_z_);
-    }
-    traj.push_back(start_point);
-
-    // Compute target step using only trajectory_length and num_waypoints.
+    // Compute step parameters based on desired trajectory length and waypoints.
     double target_step = trajectory_length_ / static_cast<double>(num_waypoints_ - 1);
-    // Use target_step as the minimum forward motion to ensure non-zero linear velocity.
     double min_step = target_step;
-    // Cap the forward step by the maximum allowed step and the vehicle's max linear velocity.
     double max_step_for_dist = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
     int max_attempts_per_waypoint = 100;
 
+    // Prepare random distributions for turning and stepping.
     std::uniform_real_distribution<double> turn_dist(-max_turn_angle_rad_, max_turn_angle_rad_);
     std::uniform_real_distribution<double> step_dist(min_step, max_step_for_dist);
 
-    for (int i = 1; i < num_waypoints_; ++i) {
-      bool found = false;
+    // Recursive lambda for backtracking.
+    std::function<bool(int, double, double, double, std::vector<std::tuple<double,double,double>> &)> backtrackTrajectory;
+    backtrackTrajectory = [&](int idx, double current_x, double current_y, double current_theta,
+                                std::vector<std::tuple<double,double,double>> &current_traj) -> bool {
+      if (idx == num_waypoints_) {
+        return true; // Full trajectory has been generated.
+      }
       for (int attempt = 0; attempt < max_attempts_per_waypoint; ++attempt) {
-        // Sample a small turn and a forward step.
         double dtheta = turn_dist(rng_);
         double new_theta = current_theta + dtheta;
         double step = step_dist(rng_);
-
         double next_x = current_x + step * std::cos(new_theta);
         double next_y = current_y + step * std::sin(new_theta);
         auto candidate = std::make_tuple(next_x, next_y, z_height_);
 
-        // Ensure the candidate is within the planning area.
+        // Check that the candidate is within the planning area.
         if (next_x < grid_origin_x_ || next_x > grid_origin_x_ + square_size_ ||
-            next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_) {
+            next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_)
           continue;
-        }
+        // Check that all cells within the discretized inflation radius around the candidate are free.
+        if (!is_free(next_x, next_y, z_height_, inflation_radius_))
+          continue;
+        // Check that the connecting line from the previous waypoint to the candidate is free.
+        if (!check_line_free_bresenham(current_traj.back(), candidate, inflation_radius_))
+          continue;
 
-        // Check for collisions.
-        if (is_free(next_x, next_y, z_height_) && check_line_free(traj.back(), candidate)) {
-          traj.push_back(candidate);
-          total_length += step;
-          current_x = next_x;
-          current_y = next_y;
-          current_theta = new_theta;
-          found = true;
-          break;
-        }
+        // Candidate is valid; add it to the trajectory.
+        current_traj.push_back(candidate);
+        if (backtrackTrajectory(idx + 1, next_x, next_y, new_theta, current_traj))
+          return true;
+        // Backtrack if the candidate did not lead to a complete trajectory.
+        current_traj.pop_back();
       }
-      if (!found) {
-        RCLCPP_WARN(this->get_logger(), "Could not find a valid waypoint at index %d", i);
-        break;
+      return false; // No candidate worked for this index.
+    };
+
+    bool success = backtrackTrajectory(1, start_x_, start_y_, start_yaw_, traj);
+    if (!success) {
+      RCLCPP_ERROR(this->get_logger(), "Backtracking failed to generate a complete trajectory.");
+    } else {
+      for (size_t i = 1; i < traj.size(); i++) {
+        double dx = std::get<0>(traj[i]) - std::get<0>(traj[i - 1]);
+        double dy = std::get<1>(traj[i]) - std::get<1>(traj[i - 1]);
+        total_length += std::sqrt(dx*dx + dy*dy);
       }
+      RCLCPP_INFO(this->get_logger(),
+                  "Planned trajectory length: %.2f m with %zu waypoints",
+                  total_length, traj.size());
     }
-
-    RCLCPP_INFO(this->get_logger(),
-                "Planned trajectory length: %.2f m with %zu waypoints",
-                total_length, traj.size());
     return traj;
   }
 
@@ -275,7 +336,7 @@ private:
       pose.pose.position.x = std::get<0>(pt);
       pose.pose.position.y = std::get<1>(pt);
       pose.pose.position.z = std::get<2>(pt);
-      pose.pose.orientation.w = 1.0; // for visualization
+      pose.pose.orientation.w = 1.0;
       path_msg.poses.push_back(pose);
     }
     path_pub_->publish(path_msg);
@@ -286,7 +347,7 @@ private:
     marker.id = 0;
     marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
     marker.action = visualization_msgs::msg::Marker::ADD;
-    marker.scale.x = 0.1;  // line width
+    marker.scale.x = 0.1;
     marker.color.a = 1.0;
     marker.color.r = 1.0;
     marker.color.g = 0.0;
