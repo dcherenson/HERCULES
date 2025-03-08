@@ -5,6 +5,7 @@
 #include <cmath>
 #include <sstream>
 #include <tuple>
+#include <algorithm>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -14,7 +15,6 @@
 #include "std_msgs/msg/header.hpp"
 #include "octomap_msgs/msg/octomap.hpp"
 
-// Include the OctoMap header from your installed library.
 #include <octomap/octomap.h>
 
 using namespace std::chrono_literals;
@@ -23,12 +23,15 @@ class TrajectoryPlanner : public rclcpp::Node {
 public:
   TrajectoryPlanner() : Node("trajectory_planner")
   {
-    // Declare old parameters.
+    // Declare parameters.
     this->declare_parameter("z_height", 0.25);
     this->declare_parameter("trajectory_length", 100.0); // meters
-    this->declare_parameter("square_size", 100.0);       // planning area side (meters)
-    this->declare_parameter("num_waypoints", 50);        // total number of waypoints
-    this->declare_parameter("max_step", 5.0);            // maximum allowed step length
+    this->declare_parameter("square_size", 100.0);         // planning area side (meters)
+    this->declare_parameter("num_waypoints", 50);          // total number of waypoints
+    this->declare_parameter("max_step", 5.0);              // maximum allowed step length
+
+    // New parameter for maximum linear velocity (max distance per time step)
+    this->declare_parameter("max_linear_velocity", 2.0);
 
     // New parameters for the starting point.
     this->declare_parameter("start_x", 0.0);
@@ -37,7 +40,6 @@ public:
 
     // --- New parameters for smoothness and unicycle constraints ---
     this->declare_parameter("start_yaw", 0.0);            // initial heading in degrees
-    this->declare_parameter("min_waypoint_distance", 2.0); // min distance between waypoints
     this->declare_parameter("max_turn_angle_deg", 45.0);   // max turn angle between consecutive waypoints in degrees
 
     // Retrieve parameter values.
@@ -46,11 +48,11 @@ public:
     this->get_parameter("square_size", square_size_);
     this->get_parameter("num_waypoints", num_waypoints_);
     this->get_parameter("max_step", max_step_);
+    this->get_parameter("max_linear_velocity", max_linear_velocity_);
     this->get_parameter("start_x", start_x_);
     this->get_parameter("start_y", start_y_);
     this->get_parameter("start_z", start_z_);
     this->get_parameter("start_yaw", start_yaw_deg_);
-    this->get_parameter("min_waypoint_distance", min_waypoint_distance_);
     this->get_parameter("max_turn_angle_deg", max_turn_angle_deg_);
 
     // Convert degrees to radians where needed.
@@ -92,20 +94,20 @@ private:
   double square_size_;
   int num_waypoints_;
   double max_step_;
+  double max_linear_velocity_;
   double grid_resolution_;
   double grid_origin_x_, grid_origin_y_;
   int grid_width_, grid_height_;
-  std::vector<int8_t> occupancy_grid_;  // 0: free, 1: occupied
+  std::vector<int8_t> occupancy_grid_;
 
   // Starting point parameters.
   double start_x_;
   double start_y_;
   double start_z_;
-  double start_yaw_deg_; // in degrees from parameter
-  double start_yaw_;     // in radians (converted)
+  double start_yaw_deg_;
+  double start_yaw_;
 
   // Unicycle-like constraints.
-  double min_waypoint_distance_;
   double max_turn_angle_deg_;
   double max_turn_angle_rad_;
 
@@ -124,17 +126,13 @@ private:
   // Storage for the planned trajectory.
   std::vector<std::tuple<double, double, double>> trajectory_;
 
-  // Octomap callback: decode the binary message, iterate over leaves,
-  // and update the occupancy grid for leaves whose z coordinate is near z_height_.
+  // Octomap callback: update the occupancy grid.
   void octomap_callback(const octomap_msgs::msg::Octomap::SharedPtr msg)
   {
     RCLCPP_INFO(this->get_logger(), "Received Octomap message, updating occupancy grid");
-
-    // Reset occupancy grid.
     std::fill(occupancy_grid_.begin(), occupancy_grid_.end(), 0);
 
     try {
-      // Create an OcTree using the resolution from the message.
       octomap::OcTree tree(msg->resolution);
       std::stringstream ss;
       for (auto byte : msg->data) {
@@ -142,13 +140,11 @@ private:
       }
       tree.readBinary(ss);
 
-      // Iterate over all leaf nodes.
       for (octomap::OcTree::leaf_iterator it = tree.begin_leafs(), end = tree.end_leafs(); it != end; ++it) {
         if (tree.isNodeOccupied(*it)) {
           double x = it.getX();
           double y = it.getY();
           double z = it.getZ();
-          // If the leaf's z coordinate is close to our fixed z_height_.
           if (std::fabs(z - z_height_) < (grid_resolution_ / 2.0)) {
             int ix = static_cast<int>((x - grid_origin_x_) / grid_resolution_);
             int iy = static_cast<int>((y - grid_origin_y_) / grid_resolution_);
@@ -164,7 +160,7 @@ private:
     }
   }
 
-  // Check whether a point (x, y, z) is free according to the occupancy grid.
+  // Check whether a point (x, y, z) is free.
   bool is_free(double x, double y, double z)
   {
     int ix = static_cast<int>((x - grid_origin_x_) / grid_resolution_);
@@ -175,16 +171,15 @@ private:
     return (occupancy_grid_[iy * grid_width_ + ix] == 0);
   }
 
-  // Check if the straight-line segment between p1 and p2 is free by sampling intermediate points.
+  // Check if the straight-line segment between two points is free.
   bool check_line_free(const std::tuple<double, double, double>& p1,
-                       const std::tuple<double, double, double>& p2)
+                         const std::tuple<double, double, double>& p2)
   {
     double x1 = std::get<0>(p1), y1 = std::get<1>(p1);
     double x2 = std::get<0>(p2), y2 = std::get<1>(p2);
     double dx = x2 - x1, dy = y2 - y1;
     double distance = std::sqrt(dx*dx + dy*dy);
 
-    // Sample more densely than grid_resolution to be safe.
     int steps = static_cast<int>(distance / (grid_resolution_ / 2.0));
     for (int i = 0; i <= steps; ++i) {
       double t = static_cast<double>(i) / steps;
@@ -197,20 +192,15 @@ private:
     return true;
   }
 
-  // Generate a single, smoother trajectory using a unicycle-like approach.
-  // We track (x, y, theta) and randomly sample small turns + forward steps.
+  // Generate a trajectory that respects both angular and linear (non-zero) constraints.
   std::vector<std::tuple<double, double, double>> plan_trajectory()
   {
     std::vector<std::tuple<double, double, double>> traj;
-
-    // Use the user-provided starting point and heading.
     double current_x = start_x_;
     double current_y = start_y_;
-    double current_theta = start_yaw_;  // in radians
+    double current_theta = start_yaw_;
     double total_length = 0.0;
 
-    // First waypoint is the starting point.
-    // We'll store (x, y, z) in the final trajectory; keep heading separate.
     std::tuple<double, double, double> start_point = std::make_tuple(current_x, current_y, start_z_);
     if (!is_free(current_x, current_y, start_z_)) {
       RCLCPP_WARN(this->get_logger(),
@@ -219,47 +209,39 @@ private:
     }
     traj.push_back(start_point);
 
-    // Typical average distance between consecutive waypoints.
+    // Compute target step using only trajectory_length and num_waypoints.
     double target_step = trajectory_length_ / static_cast<double>(num_waypoints_ - 1);
+    // Use target_step as the minimum forward motion to ensure non-zero linear velocity.
+    double min_step = target_step;
+    // Cap the forward step by the maximum allowed step and the vehicle's max linear velocity.
+    double max_step_for_dist = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
     int max_attempts_per_waypoint = 100;
 
-    // Random distributions for turn and step:
-    // turn in [-max_turn_angle_rad_, +max_turn_angle_rad_]
-    // step in [min_waypoint_distance_, min(max_step_, some factor * target_step)]
     std::uniform_real_distribution<double> turn_dist(-max_turn_angle_rad_, max_turn_angle_rad_);
-    // We can allow step up to 1.5*target_step, but never above max_step_.
-    double max_step_for_dist = std::min(1.5 * target_step, max_step_);
-    std::uniform_real_distribution<double> step_dist(min_waypoint_distance_, max_step_for_dist);
+    std::uniform_real_distribution<double> step_dist(min_step, max_step_for_dist);
 
     for (int i = 1; i < num_waypoints_; ++i) {
       bool found = false;
       for (int attempt = 0; attempt < max_attempts_per_waypoint; ++attempt) {
-        // Sample a small turn (unicycle-like).
+        // Sample a small turn and a forward step.
         double dtheta = turn_dist(rng_);
         double new_theta = current_theta + dtheta;
-
-        // Sample a forward step distance.
         double step = step_dist(rng_);
 
-        // Compute next waypoint based on unicycle motion.
         double next_x = current_x + step * std::cos(new_theta);
         double next_y = current_y + step * std::sin(new_theta);
-
-        // Keep the z at the planning height (or near it).
         auto candidate = std::make_tuple(next_x, next_y, z_height_);
 
-        // Check if it's inside the planning area.
+        // Ensure the candidate is within the planning area.
         if (next_x < grid_origin_x_ || next_x > grid_origin_x_ + square_size_ ||
             next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_) {
           continue;
         }
 
-        // Check occupancy and collision-free line from current -> candidate.
+        // Check for collisions.
         if (is_free(next_x, next_y, z_height_) && check_line_free(traj.back(), candidate)) {
-          // Accept this waypoint.
           traj.push_back(candidate);
           total_length += step;
-          // Update current state.
           current_x = next_x;
           current_y = next_y;
           current_theta = new_theta;
@@ -269,7 +251,7 @@ private:
       }
       if (!found) {
         RCLCPP_WARN(this->get_logger(), "Could not find a valid waypoint at index %d", i);
-        break; // Exit early if unable to extend trajectory
+        break;
       }
     }
 
@@ -279,7 +261,7 @@ private:
     return traj;
   }
 
-  // Publish the trajectory as a nav_msgs::msg::Path and as a visualization_msgs::msg::Marker.
+  // Publish the trajectory as a Path message and a visualization Marker.
   void publish_trajectory(const std::vector<std::tuple<double, double, double>> &traj)
   {
     auto now = this->now();
@@ -293,7 +275,7 @@ private:
       pose.pose.position.x = std::get<0>(pt);
       pose.pose.position.y = std::get<1>(pt);
       pose.pose.position.z = std::get<2>(pt);
-      pose.pose.orientation.w = 1.0; // no rotation about z for display
+      pose.pose.orientation.w = 1.0; // for visualization
       path_msg.poses.push_back(pose);
     }
     path_pub_->publish(path_msg);
@@ -320,7 +302,7 @@ private:
     marker_pub_->publish(marker);
   }
 
-  // Timer callback: generate the trajectory once (if not generated), then publish it repeatedly.
+  // Timer callback: generate (if not already generated) and publish the trajectory.
   void timer_callback()
   {
     if (trajectory_.empty()) {

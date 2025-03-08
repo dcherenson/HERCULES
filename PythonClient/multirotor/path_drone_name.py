@@ -4,7 +4,6 @@ import cosysairsim as airsim
 import sys
 import time
 
-
 drone_name = "Drone1"
 
 client = airsim.MultirotorClient()
