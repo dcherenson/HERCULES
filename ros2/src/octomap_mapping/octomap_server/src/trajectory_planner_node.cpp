@@ -26,9 +26,9 @@ public:
   TrajectoryPlanner() : Node("trajectory_planner")
   {
     // Declare parameters.
-    this->declare_parameter("z_height", 0.25);
-    this->declare_parameter("trajectory_length", 100.0); // meters
-    this->declare_parameter("square_size", 200.0);         // planning area side (meters)
+    this->declare_parameter("z_height", -0.25);
+    this->declare_parameter("trajectory_length", 500.0); // meters
+    this->declare_parameter("square_size", 500.0);         // planning area side (meters)
     this->declare_parameter("num_waypoints", 50);          // total number of waypoints
     this->declare_parameter("max_step", 5.0);              // maximum allowed step length
     this->declare_parameter("max_linear_velocity", 2.0);   // maximum linear velocity
@@ -36,14 +36,14 @@ public:
     // Starting point parameters.
     this->declare_parameter("start_x", 0.0);
     this->declare_parameter("start_y", 0.0);
-    this->declare_parameter("start_z", 0.25); // default same as z_height
+    this->declare_parameter("start_z", -0.25); // default same as z_height
 
     // Unicycle-like constraints.
     this->declare_parameter("start_yaw", 0.0);            // initial heading in degrees
     this->declare_parameter("max_turn_angle_deg", 45.0);   // max turn angle between consecutive waypoints in degrees
 
     // New parameter for obstacle inflation (in meters).
-    this->declare_parameter("inflation_radius", 2.0);
+    this->declare_parameter("inflation_radius", 5.0);
 
     // Retrieve parameter values.
     this->get_parameter("z_height", z_height_);
@@ -264,7 +264,7 @@ private:
     double target_step = trajectory_length_ / static_cast<double>(num_waypoints_ - 1);
     double min_step = target_step;
     double max_step_for_dist = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
-    int max_attempts_per_waypoint = 100;
+    int max_attempts_per_waypoint = 500;
 
     // Prepare random distributions for turning and stepping.
     std::uniform_real_distribution<double> turn_dist(-max_turn_angle_rad_, max_turn_angle_rad_);

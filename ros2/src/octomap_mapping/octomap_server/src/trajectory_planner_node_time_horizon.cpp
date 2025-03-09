@@ -24,7 +24,7 @@ public:
   TrajectoryPlanner() : Node("trajectory_planner")
   {
     // Declare parameters for spatial planning.
-    this->declare_parameter("z_height", 0.25);
+    this->declare_parameter("z_height", -0.25);
     this->declare_parameter("square_size", 100.0);  // planning area side (meters)
 
     // Time horizon based planning parameters.
@@ -39,7 +39,7 @@ public:
     // New parameters for the starting point.
     this->declare_parameter("start_x", 0.0);
     this->declare_parameter("start_y", 0.0);
-    this->declare_parameter("start_z", 0.25);  // same as z_height
+    this->declare_parameter("start_z", -0.25);  // same as z_height
 
     // Retrieve parameter values.
     this->get_parameter("z_height", z_height_);
