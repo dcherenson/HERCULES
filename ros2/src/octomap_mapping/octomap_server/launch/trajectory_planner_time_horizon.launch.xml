@@ -1,0 +1,7 @@
+<launch>
+    <node
+        pkg="octomap_server"
+        exec="trajectory_planner_node_time_horizon"
+        name="trajectory_planner"
+        output="screen" />
+</launch>

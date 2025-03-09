@@ -127,6 +127,19 @@ install(TARGETS trajectory_planner_node
 )
 
 
+ament_auto_add_executable(trajectory_planner_node_time_horizon
+  src/trajectory_planner_node_time_horizon.cpp
+)
+
+target_link_libraries(trajectory_planner_node_time_horizon
+  ${OCTOMAP_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
+install(TARGETS trajectory_planner_node_time_horizon
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

@@ -27,9 +27,9 @@ public:
   {
     // Declare parameters.
     this->declare_parameter("z_height", -0.25);
-    this->declare_parameter("trajectory_length", 500.0); // meters
+    this->declare_parameter("trajectory_length", 1000.0); // meters
     this->declare_parameter("square_size", 500.0);         // planning area side (meters)
-    this->declare_parameter("num_waypoints", 50);          // total number of waypoints
+    // this->declare_parameter("num_waypoints", 50);          // total number of waypoints
     this->declare_parameter("max_step", 5.0);              // maximum allowed step length
     this->declare_parameter("max_linear_velocity", 2.0);   // maximum linear velocity
 
@@ -49,7 +49,7 @@ public:
     this->get_parameter("z_height", z_height_);
     this->get_parameter("trajectory_length", trajectory_length_);
     this->get_parameter("square_size", square_size_);
-    this->get_parameter("num_waypoints", num_waypoints_);
+    // this->get_parameter("num_waypoints", num_waypoints_);
     this->get_parameter("max_step", max_step_);
     this->get_parameter("max_linear_velocity", max_linear_velocity_);
     this->get_parameter("start_x", start_x_);
@@ -167,33 +167,34 @@ private:
     }
   }
 
-  // Check if a candidate point is free by verifying that every cell in the circular area
-  // with radius 'infl' (in meters) around the candidate's grid cell is free.
-  bool is_free(double x, double y, double z, double infl) {
-    int ix = static_cast<int>((x - grid_origin_x_) / grid_resolution_);
-    int iy = static_cast<int>((y - grid_origin_y_) / grid_resolution_);
-    int inflation_cells = static_cast<int>(std::ceil(infl / grid_resolution_));
-    
-    for (int dx = -inflation_cells; dx <= inflation_cells; ++dx) {
-      for (int dy = -inflation_cells; dy <= inflation_cells; ++dy) {
-        double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
-        if (dist > infl)
-          continue;
-        int nx = ix + dx;
-        int ny = iy + dy;
-        if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
-          continue;
-        if (occupancy_grid_[ny * grid_width_ + nx] == 1)
-          return false;
-      }
-    }
-    return true;
-  }
+// Check if a candidate point is free by verifying that every cell in the circular area
+// with an effective radius (inflation radius + half grid cell) around the candidate's grid cell is free.
+bool is_free(double x, double y, double z, double infl) {
+  int ix = static_cast<int>((x - grid_origin_x_) / grid_resolution_);
+  int iy = static_cast<int>((y - grid_origin_y_) / grid_resolution_);
+  double effective_infl = infl + grid_resolution_ / 2.0;
+  int inflation_cells = static_cast<int>(std::ceil(effective_infl / grid_resolution_));
   
-  // Overloaded is_free using the default inflation radius.
-  bool is_free(double x, double y, double z) {
-    return is_free(x, y, z, inflation_radius_);
+  for (int dx = -inflation_cells; dx <= inflation_cells; ++dx) {
+    for (int dy = -inflation_cells; dy <= inflation_cells; ++dy) {
+      double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
+      if (dist > effective_infl)
+        continue;
+      int nx = ix + dx;
+      int ny = iy + dy;
+      if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+        continue;
+      if (occupancy_grid_[ny * grid_width_ + nx] == 1)
+        return false;
+    }
   }
+  return true;
+}
+
+// Overloaded is_free using the default inflation radius.
+bool is_free(double x, double y, double z) {
+  return is_free(x, y, z, inflation_radius_);
+}
 
   // Bresenham's line algorithm: compute grid cells between (x0,y0) and (x1,y1).
   std::vector<std::pair<int,int>> bresenham(int x0, int y0, int x1, int y1) {
@@ -212,45 +213,49 @@ private:
     return cells;
   }
 
-  // Check if the straight-line segment between two waypoints is free.
-  // For every grid cell that the line passes through (via Bresenham), we check
-  // that every cell within the circular neighborhood (of radius 'infl') is free.
-  bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
-                                 const std::tuple<double,double,double>& p2,
-                                 double infl)
-  {
-    int x0 = static_cast<int>((std::get<0>(p1) - grid_origin_x_) / grid_resolution_);
-    int y0 = static_cast<int>((std::get<1>(p1) - grid_origin_y_) / grid_resolution_);
-    int x1 = static_cast<int>((std::get<0>(p2) - grid_origin_x_) / grid_resolution_);
-    int y1 = static_cast<int>((std::get<1>(p2) - grid_origin_y_) / grid_resolution_);
-    auto line_cells = bresenham(x0, y0, x1, y1);
-    int infl_cells = static_cast<int>(std::ceil(infl / grid_resolution_));
-    
-    for (auto cell : line_cells) {
-      int cx = cell.first, cy = cell.second;
-      // Check every cell in the circular neighborhood of (cx,cy).
-      for (int dx = -infl_cells; dx <= infl_cells; ++dx) {
-        for (int dy = -infl_cells; dy <= infl_cells; ++dy) {
-          double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
-          if (dist > infl)
-            continue;
-          int nx = cx + dx, ny = cy + dy;
-          if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
-            continue;
-          if (occupancy_grid_[ny * grid_width_ + nx] == 1)
-            return false;
-        }
+// Check if the straight-line segment between two waypoints is free.
+// For every grid cell that the line passes through (via Bresenham), we check
+// that every cell within the effective circular neighborhood (of radius infl + half cell)
+// is free.
+bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
+                               const std::tuple<double,double,double>& p2,
+                               double infl)
+{
+  int x0 = static_cast<int>((std::get<0>(p1) - grid_origin_x_) / grid_resolution_);
+  int y0 = static_cast<int>((std::get<1>(p1) - grid_origin_y_) / grid_resolution_);
+  int x1 = static_cast<int>((std::get<0>(p2) - grid_origin_x_) / grid_resolution_);
+  int y1 = static_cast<int>((std::get<1>(p2) - grid_origin_y_) / grid_resolution_);
+  auto line_cells = bresenham(x0, y0, x1, y1);
+  
+  double effective_infl = infl + grid_resolution_ / 2.0;
+  int infl_cells = static_cast<int>(std::ceil(effective_infl / grid_resolution_));
+  
+  for (auto cell : line_cells) {
+    int cx = cell.first, cy = cell.second;
+    // Check every cell in the circular neighborhood of (cx,cy).
+    for (int dx = -infl_cells; dx <= infl_cells; ++dx) {
+      for (int dy = -infl_cells; dy <= infl_cells; ++dy) {
+        double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
+        if (dist > effective_infl)
+          continue;
+        int nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+          continue;
+        if (occupancy_grid_[ny * grid_width_ + nx] == 1)
+          return false;
       }
     }
-    return true;
   }
+  return true;
+}
 
-  // Overloaded check_line_free using the default inflation.
-  bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
-                                 const std::tuple<double,double,double>& p2)
-  {
-    return check_line_free_bresenham(p1, p2, inflation_radius_);
-  }
+// Overloaded check_line_free using the default inflation.
+bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
+                               const std::tuple<double,double,double>& p2)
+{
+  return check_line_free_bresenham(p1, p2, inflation_radius_);
+}
+
 
   // Generate a trajectory using recursive backtracking.
   std::vector<std::tuple<double, double, double>> plan_trajectory()
@@ -261,9 +266,11 @@ private:
     double total_length = 0.0;
 
     // Compute step parameters based on desired trajectory length and waypoints.
+    num_waypoints_ = static_cast<int>(std::ceil(trajectory_length_ / max_step_)) + 1;
     double target_step = trajectory_length_ / static_cast<double>(num_waypoints_ - 1);
-    double min_step = target_step;
-    double max_step_for_dist = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
+  double min_step = target_step;
+  double max_step_for_dist = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
+
     int max_attempts_per_waypoint = 500;
 
     // Prepare random distributions for turning and stepping.
