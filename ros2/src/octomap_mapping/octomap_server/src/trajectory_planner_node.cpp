@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <functional>
 #include <utility>
+#include <fstream>
+#include <string>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -26,12 +28,13 @@ public:
   TrajectoryPlanner() : Node("trajectory_planner")
   {
     // Declare parameters.
+    this->declare_parameter("output_file_path", "/home/sgarimella34/multi-robot-coordination/trajectory_data/trajectory.txt");
     this->declare_parameter("z_height", -0.25);
     this->declare_parameter("trajectory_length", 1000.0); // meters
     this->declare_parameter("square_size", 500.0);         // planning area side (meters)
     // this->declare_parameter("num_waypoints", 50);          // total number of waypoints
-    this->declare_parameter("max_step", 5.0);              // maximum allowed step length
-    this->declare_parameter("max_linear_velocity", 2.0);   // maximum linear velocity
+    this->declare_parameter("max_step", 5.0);                // maximum allowed step length
+    this->declare_parameter("max_linear_velocity", 2.0);     // maximum linear velocity
 
     // Starting point parameters.
     this->declare_parameter("start_x", 0.0);
@@ -58,6 +61,7 @@ public:
     this->get_parameter("start_yaw", start_yaw_deg_);
     this->get_parameter("max_turn_angle_deg", max_turn_angle_deg_);
     this->get_parameter("inflation_radius", inflation_radius_);
+    this->get_parameter("output_file_path", output_file_path_);
 
     // Convert degrees to radians where needed.
     start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
@@ -104,6 +108,9 @@ private:
   int grid_width_, grid_height_;
   std::vector<int8_t> occupancy_grid_;
 
+  std::string output_file_path_;
+  bool trajectory_saved_ = false;
+
   // Starting point parameters.
   double start_x_;
   double start_y_;
@@ -131,7 +138,8 @@ private:
   std::uniform_real_distribution<double> y_dist_;
 
   // Storage for the planned trajectory.
-  std::vector<std::tuple<double, double, double>> trajectory_;
+  // Now each waypoint is a 4-tuple: (x, y, z, timestamp)
+  std::vector<std::tuple<double, double, double, double>> trajectory_;
 
   // Octomap callback: update the occupancy grid.
   void octomap_callback(const octomap_msgs::msg::Octomap::SharedPtr msg)
@@ -167,34 +175,34 @@ private:
     }
   }
 
-// Check if a candidate point is free by verifying that every cell in the circular area
-// with an effective radius (inflation radius + half grid cell) around the candidate's grid cell is free.
-bool is_free(double x, double y, double z, double infl) {
-  int ix = static_cast<int>((x - grid_origin_x_) / grid_resolution_);
-  int iy = static_cast<int>((y - grid_origin_y_) / grid_resolution_);
-  double effective_infl = infl + grid_resolution_ / 2.0;
-  int inflation_cells = static_cast<int>(std::ceil(effective_infl / grid_resolution_));
-  
-  for (int dx = -inflation_cells; dx <= inflation_cells; ++dx) {
-    for (int dy = -inflation_cells; dy <= inflation_cells; ++dy) {
-      double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
-      if (dist > effective_infl)
-        continue;
-      int nx = ix + dx;
-      int ny = iy + dy;
-      if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
-        continue;
-      if (occupancy_grid_[ny * grid_width_ + nx] == 1)
-        return false;
+  // Check if a candidate point is free by verifying that every cell in the circular area
+  // with an effective radius (inflation radius + half grid cell) around the candidate's grid cell is free.
+  bool is_free(double x, double y, double z, double infl) {
+    int ix = static_cast<int>((x - grid_origin_x_) / grid_resolution_);
+    int iy = static_cast<int>((y - grid_origin_y_) / grid_resolution_);
+    double effective_infl = infl + grid_resolution_ / 2.0;
+    int inflation_cells = static_cast<int>(std::ceil(effective_infl / grid_resolution_));
+    
+    for (int dx = -inflation_cells; dx <= inflation_cells; ++dx) {
+      for (int dy = -inflation_cells; dy <= inflation_cells; ++dy) {
+        double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
+        if (dist > effective_infl)
+          continue;
+        int nx = ix + dx;
+        int ny = iy + dy;
+        if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+          continue;
+        if (occupancy_grid_[ny * grid_width_ + nx] == 1)
+          return false;
+      }
     }
+    return true;
   }
-  return true;
-}
 
-// Overloaded is_free using the default inflation radius.
-bool is_free(double x, double y, double z) {
-  return is_free(x, y, z, inflation_radius_);
-}
+  // Overloaded is_free using the default inflation radius.
+  bool is_free(double x, double y, double z) {
+    return is_free(x, y, z, inflation_radius_);
+  }
 
   // Bresenham's line algorithm: compute grid cells between (x0,y0) and (x1,y1).
   std::vector<std::pair<int,int>> bresenham(int x0, int y0, int x1, int y1) {
@@ -213,64 +221,59 @@ bool is_free(double x, double y, double z) {
     return cells;
   }
 
-// Check if the straight-line segment between two waypoints is free.
-// For every grid cell that the line passes through (via Bresenham), we check
-// that every cell within the effective circular neighborhood (of radius infl + half cell)
-// is free.
-bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
-                               const std::tuple<double,double,double>& p2,
-                               double infl)
-{
-  int x0 = static_cast<int>((std::get<0>(p1) - grid_origin_x_) / grid_resolution_);
-  int y0 = static_cast<int>((std::get<1>(p1) - grid_origin_y_) / grid_resolution_);
-  int x1 = static_cast<int>((std::get<0>(p2) - grid_origin_x_) / grid_resolution_);
-  int y1 = static_cast<int>((std::get<1>(p2) - grid_origin_y_) / grid_resolution_);
-  auto line_cells = bresenham(x0, y0, x1, y1);
-  
-  double effective_infl = infl + grid_resolution_ / 2.0;
-  int infl_cells = static_cast<int>(std::ceil(effective_infl / grid_resolution_));
-  
-  for (auto cell : line_cells) {
-    int cx = cell.first, cy = cell.second;
-    // Check every cell in the circular neighborhood of (cx,cy).
-    for (int dx = -infl_cells; dx <= infl_cells; ++dx) {
-      for (int dy = -infl_cells; dy <= infl_cells; ++dy) {
-        double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
-        if (dist > effective_infl)
-          continue;
-        int nx = cx + dx, ny = cy + dy;
-        if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
-          continue;
-        if (occupancy_grid_[ny * grid_width_ + nx] == 1)
-          return false;
+  // Overloaded check_line_free_bresenham that works with 4-tuple waypoints.
+  bool check_line_free_bresenham(const std::tuple<double,double,double,double>& p1,
+                                 const std::tuple<double,double,double,double>& p2,
+                                 double infl)
+  {
+    int x0 = static_cast<int>((std::get<0>(p1) - grid_origin_x_) / grid_resolution_);
+    int y0 = static_cast<int>((std::get<1>(p1) - grid_origin_y_) / grid_resolution_);
+    int x1 = static_cast<int>((std::get<0>(p2) - grid_origin_x_) / grid_resolution_);
+    int y1 = static_cast<int>((std::get<1>(p2) - grid_origin_y_) / grid_resolution_);
+    auto line_cells = bresenham(x0, y0, x1, y1);
+    
+    double effective_infl = infl + grid_resolution_ / 2.0;
+    int infl_cells = static_cast<int>(std::ceil(effective_infl / grid_resolution_));
+    
+    for (auto cell : line_cells) {
+      int cx = cell.first, cy = cell.second;
+      // Check every cell in the circular neighborhood of (cx,cy).
+      for (int dx = -infl_cells; dx <= infl_cells; ++dx) {
+        for (int dy = -infl_cells; dy <= infl_cells; ++dy) {
+          double dist = std::sqrt(dx*dx + dy*dy) * grid_resolution_;
+          if (dist > effective_infl)
+            continue;
+          int nx = cx + dx, ny = cy + dy;
+          if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+            continue;
+          if (occupancy_grid_[ny * grid_width_ + nx] == 1)
+            return false;
+        }
       }
     }
+    return true;
   }
-  return true;
-}
 
-// Overloaded check_line_free using the default inflation.
-bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
-                               const std::tuple<double,double,double>& p2)
-{
-  return check_line_free_bresenham(p1, p2, inflation_radius_);
-}
-
+  // Overloaded version without explicit inflation parameter.
+  bool check_line_free_bresenham(const std::tuple<double,double,double,double>& p1,
+                                 const std::tuple<double,double,double,double>& p2)
+  {
+    return check_line_free_bresenham(p1, p2, inflation_radius_);
+  }
 
   // Generate a trajectory using recursive backtracking.
-  std::vector<std::tuple<double, double, double>> plan_trajectory()
+  // Now each waypoint is stored as (x, y, z, timestamp).
+  std::vector<std::tuple<double, double, double, double>> plan_trajectory()
   {
-    std::vector<std::tuple<double, double, double>> traj;
-    // Start from the given starting point.
-    traj.push_back(std::make_tuple(start_x_, start_y_, start_z_));
-    double total_length = 0.0;
-
-    // Compute step parameters based on desired trajectory length and waypoints.
+    std::vector<std::tuple<double, double, double, double>> traj;
+    // Start from the given starting point with time 0.0.
+    traj.push_back(std::make_tuple(start_x_, start_y_, start_z_, 0.0));
+    
+    // Compute step parameters based on desired trajectory length.
     num_waypoints_ = static_cast<int>(std::ceil(trajectory_length_ / max_step_)) + 1;
     double target_step = trajectory_length_ / static_cast<double>(num_waypoints_ - 1);
-  double min_step = target_step;
-  double max_step_for_dist = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
-
+    double min_step = target_step;
+    double max_step_for_dist = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
     int max_attempts_per_waypoint = 500;
 
     // Prepare random distributions for turning and stepping.
@@ -278,9 +281,10 @@ bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
     std::uniform_real_distribution<double> step_dist(min_step, max_step_for_dist);
 
     // Recursive lambda for backtracking.
-    std::function<bool(int, double, double, double, std::vector<std::tuple<double,double,double>> &)> backtrackTrajectory;
-    backtrackTrajectory = [&](int idx, double current_x, double current_y, double current_theta,
-                                std::vector<std::tuple<double,double,double>> &current_traj) -> bool {
+    // Note: now we carry current_time as an extra parameter.
+    std::function<bool(int, double, double, double, double, std::vector<std::tuple<double,double,double,double>> &)> backtrackTrajectory;
+    backtrackTrajectory = [&](int idx, double current_x, double current_y, double current_theta, double current_time,
+                                std::vector<std::tuple<double,double,double,double>> &current_traj) -> bool {
       if (idx == num_waypoints_) {
         return true; // Full trajectory has been generated.
       }
@@ -290,22 +294,37 @@ bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
         double step = step_dist(rng_);
         double next_x = current_x + step * std::cos(new_theta);
         double next_y = current_y + step * std::sin(new_theta);
-        auto candidate = std::make_tuple(next_x, next_y, z_height_);
+
+        // Compute time increment for this segment.
+        double dx = next_x - current_x;
+        double dy = next_y - current_y;
+        double distance = std::sqrt(dx*dx + dy*dy);
+        double t_linear = distance / max_linear_velocity_;
+        double new_heading = std::atan2(dy, dx);
+        double dtheta_abs = std::fabs(new_heading - current_theta);
+        if (dtheta_abs > M_PI) {
+          dtheta_abs = 2 * M_PI - dtheta_abs;
+        }
+        double t_angular = (dtheta_abs / max_turn_angle_rad_) * t_linear;
+        double dt = t_linear + t_angular;
+        double new_time = current_time + dt;
+
+        auto candidate = std::make_tuple(next_x, next_y, z_height_, new_time);
 
         // Check that the candidate is within the planning area.
         if (next_x < grid_origin_x_ || next_x > grid_origin_x_ + square_size_ ||
             next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_)
           continue;
-        // Check that all cells within the discretized inflation radius around the candidate are free.
+        // Check that the candidate is free.
         if (!is_free(next_x, next_y, z_height_, inflation_radius_))
           continue;
-        // Check that the connecting line from the previous waypoint to the candidate is free.
+        // Check that the connecting line is free.
         if (!check_line_free_bresenham(current_traj.back(), candidate, inflation_radius_))
           continue;
 
         // Candidate is valid; add it to the trajectory.
         current_traj.push_back(candidate);
-        if (backtrackTrajectory(idx + 1, next_x, next_y, new_theta, current_traj))
+        if (backtrackTrajectory(idx + 1, next_x, next_y, new_theta, new_time, current_traj))
           return true;
         // Backtrack if the candidate did not lead to a complete trajectory.
         current_traj.pop_back();
@@ -313,10 +332,11 @@ bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
       return false; // No candidate worked for this index.
     };
 
-    bool success = backtrackTrajectory(1, start_x_, start_y_, start_yaw_, traj);
+    bool success = backtrackTrajectory(1, start_x_, start_y_, start_yaw_, 0.0, traj);
     if (!success) {
       RCLCPP_ERROR(this->get_logger(), "Backtracking failed to generate a complete trajectory.");
     } else {
+      double total_length = 0.0;
       for (size_t i = 1; i < traj.size(); i++) {
         double dx = std::get<0>(traj[i]) - std::get<0>(traj[i - 1]);
         double dy = std::get<1>(traj[i]) - std::get<1>(traj[i - 1]);
@@ -330,7 +350,8 @@ bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
   }
 
   // Publish the trajectory as a Path message and a visualization Marker.
-  void publish_trajectory(const std::vector<std::tuple<double, double, double>> &traj)
+  // Only the (x,y,z) parts are used for visualization.
+  void publish_trajectory(const std::vector<std::tuple<double, double, double, double>> &traj)
   {
     auto now = this->now();
     nav_msgs::msg::Path path_msg;
@@ -370,6 +391,26 @@ bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
     marker_pub_->publish(marker);
   }
 
+  // Save the trajectory to a file.
+  // Now each line is: "x y z t" where t is the computed timestamp.
+  void save_trajectory_to_file(const std::vector<std::tuple<double, double, double, double>> &traj)
+  {
+    std::ofstream ofs(output_file_path_);
+    if (!ofs.is_open()) {
+      RCLCPP_ERROR(this->get_logger(), "Unable to open file %s for writing", output_file_path_.c_str());
+      return;
+    }
+    // Write each waypoint as "x y z t"
+    for (const auto &pt : traj) {
+      ofs << std::get<0>(pt) << " "
+          << std::get<1>(pt) << " "
+          << std::get<2>(pt) << " "
+          << std::get<3>(pt) << "\n";
+    }
+    ofs.close();
+    RCLCPP_INFO(this->get_logger(), "Trajectory saved to %s", output_file_path_.c_str());
+  }
+
   // Timer callback: generate (if not already generated) and publish the trajectory.
   void timer_callback()
   {
@@ -377,6 +418,12 @@ bool check_line_free_bresenham(const std::tuple<double,double,double>& p1,
       trajectory_ = plan_trajectory();
     }
     publish_trajectory(trajectory_);
+
+    // Save the trajectory to file only once.
+    if (!trajectory_saved_) {
+      save_trajectory_to_file(trajectory_);
+      trajectory_saved_ = true;
+    }
   }
 };
 

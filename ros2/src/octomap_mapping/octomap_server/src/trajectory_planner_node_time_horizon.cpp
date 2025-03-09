@@ -25,10 +25,11 @@ public:
   {
     // Declare parameters for spatial planning.
     this->declare_parameter("z_height", -0.25);
-    this->declare_parameter("square_size", 100.0);  // planning area side (meters)
+    this->declare_parameter("square_size", 500.0);  // planning area side (meters)
+    this->declare_parameter("desired_trajectory_length", 300.0); //total length of trajectory
 
     // Time horizon based planning parameters.
-    this->declare_parameter("planning_horizon", 50.0); // total planning time (seconds)
+    this->declare_parameter("planning_horizon", 120.0); // total planning time (seconds)
     this->declare_parameter("dt", 1.0);                // time step (seconds)
 
     // Dynamic constraints.
@@ -52,6 +53,7 @@ public:
     this->get_parameter("start_x", start_x_);
     this->get_parameter("start_y", start_y_);
     this->get_parameter("start_z", start_z_);
+    this->get_parameter("desired_trajectory_length", desired_trajectory_length_);
 
     // Define the planning area as a 2D square.
     grid_resolution_ = 0.25;  // meters per cell
@@ -83,6 +85,7 @@ public:
 
 private:
   // Parameters.
+  double desired_trajectory_length_;
   double z_height_;
   double square_size_;
   double planning_horizon_;
@@ -236,6 +239,11 @@ private:
           current_y = next_y;
           current_theta = new_theta;
           found = true;
+
+          // Check if the accumulated trajectory length has reached the desired value.
+          if (total_length >= desired_trajectory_length_) {
+            return traj; // Exit early by returning the planned trajectory.
+          }
           break;
         }
       }
