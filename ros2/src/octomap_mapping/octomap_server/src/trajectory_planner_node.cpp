@@ -10,6 +10,7 @@
 #include <utility>
 #include <fstream>
 #include <string>
+#include <iostream>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -47,6 +48,9 @@ public:
     // New parameter for obstacle inflation (in meters).
     this->declare_parameter("inflation_radius", 5.0);
 
+    // New parameter: file with required waypoints (each line: "X Y Z")
+    this->declare_parameter("waypoints_file", "/home/sgarimella34/multi-robot-coordination/trajectory_data/checkpoints.txt");
+
     // Retrieve parameter values.
     this->get_parameter("z_height", z_height_);
     this->get_parameter("trajectory_length", trajectory_length_);
@@ -60,6 +64,7 @@ public:
     this->get_parameter("max_turn_angle_deg", max_turn_angle_deg_);
     this->get_parameter("inflation_radius", inflation_radius_);
     this->get_parameter("robot_name", robot_name_);
+    this->get_parameter("waypoints_file", waypoints_file_);
 
     output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/trajectory_" + robot_name_ + ".txt";
 
@@ -74,6 +79,25 @@ public:
     grid_width_ = static_cast<int>(square_size_ / grid_resolution_);
     grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
     occupancy_grid_.assign(grid_width_ * grid_height_, 0);
+
+    // Attempt to load provided waypoints if a file is specified.
+    if (!waypoints_file_.empty()) {
+      std::ifstream infile(waypoints_file_);
+      if (!infile.is_open()) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to open waypoints file: %s", waypoints_file_.c_str());
+      } else {
+        std::string line;
+        while (std::getline(infile, line)) {
+          std::istringstream iss(line);
+          double wx, wy, wz;
+          if (iss >> wx >> wy >> wz) {
+            provided_waypoints_.push_back(std::make_tuple(wx, wy, wz));
+          }
+        }
+        infile.close();
+        RCLCPP_INFO(this->get_logger(), "Loaded %zu provided waypoints.", provided_waypoints_.size());
+      }
+    }
 
     // Subscribe to the binary octomap.
     octomap_sub_ = this->create_subscription<octomap_msgs::msg::Octomap>(
@@ -126,6 +150,10 @@ private:
   // Inflation radius parameter.
   double inflation_radius_;
 
+  // New: File name for required waypoints and storage for them.
+  std::string waypoints_file_;
+  std::vector<std::tuple<double, double, double>> provided_waypoints_;
+
   // ROS publishers/subscribers/timer.
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
@@ -139,7 +167,7 @@ private:
   std::uniform_real_distribution<double> y_dist_;
 
   // Storage for the planned trajectory.
-  // Now each waypoint is a 4-tuple: (x, y, z, timestamp)
+  // Each waypoint: (x, y, z, timestamp)
   std::vector<std::tuple<double, double, double, double>> trajectory_;
 
   // Octomap callback: update the occupancy grid.
@@ -222,7 +250,7 @@ private:
     return cells;
   }
 
-  // Overloaded check_line_free_bresenham that works with 4-tuple waypoints.
+  // Check if the line between two waypoints is free.
   bool check_line_free_bresenham(const std::tuple<double,double,double,double>& p1,
                                  const std::tuple<double,double,double,double>& p2,
                                  double infl)
@@ -262,92 +290,205 @@ private:
     return check_line_free_bresenham(p1, p2, inflation_radius_);
   }
 
-  // Generate a trajectory using recursive backtracking.
-  // Now each waypoint is stored as (x, y, z, timestamp).
+  // Main function to plan the trajectory.
+  // If provided waypoints exist, plan in segments (start->wpt1->wpt2->...->random extension);
+  // otherwise, use the original random trajectory generation.
   std::vector<std::tuple<double, double, double, double>> plan_trajectory()
   {
-    std::vector<std::tuple<double, double, double, double>> traj;
+    std::vector<std::tuple<double, double, double, double>> full_traj;
     // Start from the given starting point with time 0.0.
-    traj.push_back(std::make_tuple(start_x_, start_y_, start_z_, 0.0));
-    
-    // Compute step parameters based on desired trajectory length.
-    num_waypoints_ = static_cast<int>(std::ceil(trajectory_length_ / max_step_)) + 1;
-    double target_step = trajectory_length_ / static_cast<double>(num_waypoints_ - 1);
-    double min_step = target_step;
-    double max_step_for_dist = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
-    int max_attempts_per_waypoint = 500;
+    full_traj.push_back(std::make_tuple(start_x_, start_y_, start_z_, 0.0));
 
-    // Prepare random distributions for turning and stepping.
-    std::uniform_real_distribution<double> turn_dist(-max_turn_angle_rad_, max_turn_angle_rad_);
-    std::uniform_real_distribution<double> step_dist(min_step, max_step_for_dist);
+    // We'll track the current state as we build the trajectory.
+    double curr_x = start_x_, curr_y = start_y_, curr_time = 0.0, curr_theta = start_yaw_;
 
-    // Recursive lambda for backtracking.
-    // Note: now we carry current_time as an extra parameter.
-    std::function<bool(int, double, double, double, double, std::vector<std::tuple<double,double,double,double>> &)> backtrackTrajectory;
-    backtrackTrajectory = [&](int idx, double current_x, double current_y, double current_theta, double current_time,
-                                std::vector<std::tuple<double,double,double,double>> &current_traj) -> bool {
-      if (idx == num_waypoints_) {
-        return true; // Full trajectory has been generated.
+    // Helper lambda to compute time increment for a segment between two points.
+    auto compute_dt = [this](double x0, double y0, double x1, double y1, double current_theta) -> double {
+      double dx = x1 - x0, dy = y1 - y0;
+      double distance = std::sqrt(dx*dx + dy*dy);
+      double t_linear = distance / max_linear_velocity_;
+      double new_heading = std::atan2(dy, dx);
+      double dtheta = std::fabs(new_heading - current_theta);
+      if (dtheta > M_PI) {
+        dtheta = 2 * M_PI - dtheta;
       }
-      for (int attempt = 0; attempt < max_attempts_per_waypoint; ++attempt) {
-        double dtheta = turn_dist(rng_);
-        double new_theta = current_theta + dtheta;
-        double step = step_dist(rng_);
-        double next_x = current_x + step * std::cos(new_theta);
-        double next_y = current_y + step * std::sin(new_theta);
-
-        // Compute time increment for this segment.
-        double dx = next_x - current_x;
-        double dy = next_y - current_y;
-        double distance = std::sqrt(dx*dx + dy*dy);
-        double t_linear = distance / max_linear_velocity_;
-        double new_heading = std::atan2(dy, dx);
-        double dtheta_abs = std::fabs(new_heading - current_theta);
-        if (dtheta_abs > M_PI) {
-          dtheta_abs = 2 * M_PI - dtheta_abs;
-        }
-        double t_angular = (dtheta_abs / max_turn_angle_rad_) * t_linear;
-        double dt = t_linear + t_angular;
-        double new_time = current_time + dt;
-
-        auto candidate = std::make_tuple(next_x, next_y, z_height_, new_time);
-
-        // Check that the candidate is within the planning area.
-        if (next_x < grid_origin_x_ || next_x > grid_origin_x_ + square_size_ ||
-            next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_)
-          continue;
-        // Check that the candidate is free.
-        if (!is_free(next_x, next_y, z_height_, inflation_radius_))
-          continue;
-        // Check that the connecting line is free.
-        if (!check_line_free_bresenham(current_traj.back(), candidate, inflation_radius_))
-          continue;
-
-        // Candidate is valid; add it to the trajectory.
-        current_traj.push_back(candidate);
-        if (backtrackTrajectory(idx + 1, next_x, next_y, new_theta, new_time, current_traj))
-          return true;
-        // Backtrack if the candidate did not lead to a complete trajectory.
-        current_traj.pop_back();
-      }
-      return false; // No candidate worked for this index.
+      double t_angular = (dtheta / max_turn_angle_rad_) * t_linear;
+      return t_linear + t_angular;
     };
 
-    bool success = backtrackTrajectory(1, start_x_, start_y_, start_yaw_, 0.0, traj);
-    if (!success) {
-      RCLCPP_ERROR(this->get_logger(), "Backtracking failed to generate a complete trajectory.");
-    } else {
-      double total_length = 0.0;
-      for (size_t i = 1; i < traj.size(); i++) {
-        double dx = std::get<0>(traj[i]) - std::get<0>(traj[i - 1]);
-        double dy = std::get<1>(traj[i]) - std::get<1>(traj[i - 1]);
-        total_length += std::sqrt(dx*dx + dy*dy);
+    // Lambda for planning a segment with a forced goal using recursive backtracking.
+    // The base case: if a direct line from current state to goal is free, then return the goal.
+    auto plan_segment = [&](double goal_x, double goal_y, double goal_z) -> std::vector<std::tuple<double,double,double,double>> {
+      std::vector<std::tuple<double,double,double,double>> seg;
+      // Start state is current state.
+      seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+
+      double seg_dx = goal_x - curr_x, seg_dy = goal_y - curr_y;
+      double seg_distance = std::sqrt(seg_dx*seg_dx + seg_dy*seg_dy);
+      // Determine expected number of steps for this segment.
+      int expected_steps = std::max(2, static_cast<int>(std::ceil(seg_distance / max_step_)));
+      double target_step = seg_distance / (expected_steps - 1);
+      double min_step = target_step;
+      double max_step_seg = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
+      int max_attempts_per_step = 500;
+
+      // Define a recursive lambda.
+      std::function<bool(int, double, double, double, double, std::vector<std::tuple<double,double,double,double>> &)> backtrackSegment;
+      backtrackSegment = [&](int step_idx, double cur_x, double cur_y, double cur_theta, double cur_time,
+                               std::vector<std::tuple<double,double,double,double>> &current_seg) -> bool {
+        // If a direct connection from current point to goal is free, then append goal and finish.
+        std::tuple<double,double,double,double> current_pt = std::make_tuple(cur_x, cur_y, start_z_, cur_time);
+        std::tuple<double,double,double,double> goal_pt = std::make_tuple(goal_x, goal_y, goal_z, 0.0); // timestamp to be computed
+        if (check_line_free_bresenham(current_pt, goal_pt, inflation_radius_)) {
+          double dt = compute_dt(cur_x, cur_y, goal_x, goal_y, cur_theta);
+          double new_time = cur_time + dt;
+          current_seg.push_back(std::make_tuple(goal_x, goal_y, goal_z, new_time));
+          return true;
+        }
+        // Otherwise, try generating an intermediate candidate.
+        std::uniform_real_distribution<double> turn_dist(-max_turn_angle_rad_, max_turn_angle_rad_);
+        std::uniform_real_distribution<double> step_dist(min_step, max_step_seg);
+        for (int attempt = 0; attempt < max_attempts_per_step; ++attempt) {
+          double dtheta = turn_dist(rng_);
+          double new_theta = cur_theta + dtheta;
+          double step = step_dist(rng_);
+          double next_x = cur_x + step * std::cos(new_theta);
+          double next_y = cur_y + step * std::sin(new_theta);
+          // Check planning area boundaries.
+          if (next_x < grid_origin_x_ || next_x > grid_origin_x_ + square_size_ ||
+              next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_)
+            continue;
+          // Check candidate cell free.
+          if (!is_free(next_x, next_y, start_z_, inflation_radius_))
+            continue;
+          // Check line between current and candidate.
+          std::tuple<double,double,double,double> candidate = std::make_tuple(next_x, next_y, start_z_, 0.0);
+          if (!check_line_free_bresenham(current_seg.back(), candidate, inflation_radius_))
+            continue;
+          // Compute time increment.
+          double dt = compute_dt(cur_x, cur_y, next_x, next_y, cur_theta);
+          double new_time = cur_time + dt;
+          candidate = std::make_tuple(next_x, next_y, start_z_, new_time);
+          current_seg.push_back(candidate);
+          if (backtrackSegment(step_idx + 1, next_x, next_y, new_theta, new_time, current_seg))
+            return true;
+          // Backtrack.
+          current_seg.pop_back();
+        }
+        return false;
+      };
+
+      bool success = backtrackSegment(1, curr_x, curr_y, curr_theta, curr_time, seg);
+      if (!success) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to plan segment to waypoint (%.2f, %.2f, %.2f)", goal_x, goal_y, goal_z);
       }
-      RCLCPP_INFO(this->get_logger(),
-                  "Planned trajectory length: %.2f m with %zu waypoints",
-                  total_length, traj.size());
+      return seg;
+    };
+
+    // Lambda for planning a random segment (without forced endpoint) for the remaining trajectory.
+    auto plan_random_segment = [&](double remaining_length) -> std::vector<std::tuple<double,double,double,double>> {
+      std::vector<std::tuple<double,double,double,double>> seg;
+      seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+      // Compute number of steps based on remaining length.
+      int num_steps = std::max(2, static_cast<int>(std::ceil(remaining_length / max_step_)) + 1);
+      double target_step = remaining_length / (num_steps - 1);
+      double min_step_rand = target_step;
+      double max_step_rand = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
+      int max_attempts_per_step = 500;
+      
+      std::function<bool(int, double, double, double, double, std::vector<std::tuple<double,double,double,double>> &)> backtrackRandom;
+      backtrackRandom = [&](int idx, double cur_x, double cur_y, double cur_theta, double cur_time,
+                              std::vector<std::tuple<double,double,double,double>> &current_seg) -> bool {
+        if (idx == num_steps) {
+          return true;
+        }
+        std::uniform_real_distribution<double> turn_dist(-max_turn_angle_rad_, max_turn_angle_rad_);
+        std::uniform_real_distribution<double> step_dist(min_step_rand, max_step_rand);
+        for (int attempt = 0; attempt < max_attempts_per_step; ++attempt) {
+          double dtheta = turn_dist(rng_);
+          double new_theta = cur_theta + dtheta;
+          double step = step_dist(rng_);
+          double next_x = cur_x + step * std::cos(new_theta);
+          double next_y = cur_y + step * std::sin(new_theta);
+          if (next_x < grid_origin_x_ || next_x > grid_origin_x_ + square_size_ ||
+              next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_)
+            continue;
+          if (!is_free(next_x, next_y, start_z_, inflation_radius_))
+            continue;
+          std::tuple<double,double,double,double> candidate = std::make_tuple(next_x, next_y, start_z_, 0.0);
+          if (!check_line_free_bresenham(current_seg.back(), candidate, inflation_radius_))
+            continue;
+          double dt = compute_dt(cur_x, cur_y, next_x, next_y, cur_theta);
+          double new_time = cur_time + dt;
+          candidate = std::make_tuple(next_x, next_y, start_z_, new_time);
+          current_seg.push_back(candidate);
+          if (backtrackRandom(idx + 1, next_x, next_y, new_theta, new_time, current_seg))
+            return true;
+          current_seg.pop_back();
+        }
+        return false;
+      };
+
+      bool success = backtrackRandom(1, curr_x, curr_y, curr_theta, curr_time, seg);
+      if (!success) {
+        RCLCPP_ERROR(this->get_logger(), "Random segment backtracking failed.");
+      }
+      return seg;
+    };
+
+    double total_length = 0.0;
+    // If provided waypoints exist, plan segments from current state to each.
+    if (!provided_waypoints_.empty()) {
+      for (const auto &pt : provided_waypoints_) {
+        double goal_x = std::get<0>(pt);
+        double goal_y = std::get<1>(pt);
+        double goal_z = std::get<2>(pt);
+        auto seg = plan_segment(goal_x, goal_y, goal_z);
+        // Append seg (skip the first duplicate point).
+        for (size_t i = 1; i < seg.size(); ++i) {
+          full_traj.push_back(seg[i]);
+        }
+        // Update current state.
+        curr_x = goal_x;
+        curr_y = goal_y;
+        curr_time = std::get<3>(seg.back());
+        // Update heading based on the last segment.
+        if (seg.size() >= 2) {
+          double prev_x = std::get<0>(seg[seg.size()-2]);
+          double prev_y = std::get<1>(seg[seg.size()-2]);
+          curr_theta = std::atan2(goal_y - prev_y, goal_x - prev_x);
+        }
+        // Accumulate length.
+        // (For simplicity, we recalc full_traj length below.)
+      }
     }
-    return traj;
+    // Compute accumulated length so far.
+    for (size_t i = 1; i < full_traj.size(); i++) {
+      double dx = std::get<0>(full_traj[i]) - std::get<0>(full_traj[i - 1]);
+      double dy = std::get<1>(full_traj[i]) - std::get<1>(full_traj[i - 1]);
+      total_length += std::sqrt(dx*dx + dy*dy);
+    }
+
+    // If the total desired trajectory length is not yet reached, plan a final random segment.
+    if (total_length < trajectory_length_) {
+      double remaining_length = trajectory_length_ - total_length;
+      auto seg = plan_random_segment(remaining_length);
+      // Append (skipping duplicate start).
+      for (size_t i = 1; i < seg.size(); ++i) {
+        full_traj.push_back(seg[i]);
+      }
+    }
+    // Log final length.
+    double final_length = 0.0;
+    for (size_t i = 1; i < full_traj.size(); i++) {
+      double dx = std::get<0>(full_traj[i]) - std::get<0>(full_traj[i - 1]);
+      double dy = std::get<1>(full_traj[i]) - std::get<1>(full_traj[i - 1]);
+      final_length += std::sqrt(dx*dx + dy*dy);
+    }
+    RCLCPP_INFO(this->get_logger(),
+                "Planned trajectory length: %.2f m with %zu waypoints",
+                final_length, full_traj.size());
+    return full_traj;
   }
 
   // Publish the trajectory as a Path message and a visualization Marker.
@@ -393,9 +534,7 @@ private:
   }
 
   // Save the trajectory to a file.
-  // Now each line is: "x y z t" where t is the computed timestamp.
-  // Save the trajectory to a file.
-  // Now each line is: "y x z t" where x and y are swapped to match the Unreal Engine coordinate system.
+  // Each line is: "y x z t" where x and y are swapped to match the Unreal Engine coordinate system.
   void save_trajectory_to_file(const std::vector<std::tuple<double, double, double, double>> &traj)
   {
     std::ofstream ofs(output_file_path_);
@@ -403,17 +542,15 @@ private:
       RCLCPP_ERROR(this->get_logger(), "Unable to open file %s for writing", output_file_path_.c_str());
       return;
     }
-    // Write each waypoint as "y x z t"
     for (const auto &pt : traj) {
-      ofs << std::get<1>(pt) << " "   // Write Y as first coordinate
-          << std::get<0>(pt) << " "   // Write X as second coordinate
-          << std::get<2>(pt) << " "   // Z remains unchanged
-          << std::get<3>(pt) << "\n"; // Timestamp as last value
+      ofs << std::get<1>(pt) << " "   // Y first
+          << std::get<0>(pt) << " "   // X second
+          << std::get<2>(pt) << " "   // Z remains
+          << std::get<3>(pt) << "\n"; // Timestamp last
     }
     ofs.close();
     RCLCPP_INFO(this->get_logger(), "Trajectory saved to %s", output_file_path_.c_str());
   }
-
 
   // Timer callback: generate (if not already generated) and publish the trajectory.
   void timer_callback()
