@@ -393,6 +393,8 @@ private:
 
   // Save the trajectory to a file.
   // Now each line is: "x y z t" where t is the computed timestamp.
+  // Save the trajectory to a file.
+  // Now each line is: "y x z t" where x and y are swapped to match the Unreal Engine coordinate system.
   void save_trajectory_to_file(const std::vector<std::tuple<double, double, double, double>> &traj)
   {
     std::ofstream ofs(output_file_path_);
@@ -400,16 +402,17 @@ private:
       RCLCPP_ERROR(this->get_logger(), "Unable to open file %s for writing", output_file_path_.c_str());
       return;
     }
-    // Write each waypoint as "x y z t"
+    // Write each waypoint as "y x z t"
     for (const auto &pt : traj) {
-      ofs << std::get<0>(pt) << " "
-          << std::get<1>(pt) << " "
-          << std::get<2>(pt) << " "
-          << std::get<3>(pt) << "\n";
+      ofs << std::get<1>(pt) << " "   // Write Y as first coordinate
+          << std::get<0>(pt) << " "   // Write X as second coordinate
+          << std::get<2>(pt) << " "   // Z remains unchanged
+          << std::get<3>(pt) << "\n"; // Timestamp as last value
     }
     ofs.close();
     RCLCPP_INFO(this->get_logger(), "Trajectory saved to %s", output_file_path_.c_str());
   }
+
 
   // Timer callback: generate (if not already generated) and publish the trajectory.
   void timer_callback()

@@ -56,7 +56,7 @@ adjusted_waypoints = [airsim.Vector3r(wp.x_val, wp.y_val, z) for wp in waypoints
 
 # Fly along the path
 print("Flying on path...")
-client.moveOnPathAsync(adjusted_waypoints, 12, 120,
+client.moveOnPathAsync(adjusted_waypoints, 3, 120,
                        airsim.DrivetrainType.ForwardOnly,
                        airsim.YawMode(False, 0), 20, 1,
                        vehicle_name=drone_name).join()
