@@ -141,6 +141,19 @@ install(TARGETS trajectory_planner_node_time_horizon
 )
 
 
+ament_auto_add_executable(octomap_slicer_gridmap
+  src/octomap_slicer_gridmap.cpp
+)
+
+target_link_libraries(octomap_slicer_gridmap
+  ${OCTOMAP_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
+install(TARGETS octomap_slicer_gridmap
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
