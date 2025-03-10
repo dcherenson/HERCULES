@@ -28,18 +28,17 @@ public:
   TrajectoryPlanner() : Node("trajectory_planner")
   {
     // Declare parameters.
-    this->declare_parameter("output_file_path", "/home/sgarimella34/multi-robot-coordination/trajectory_data/trajectory_drone_test.txt");
-    this->declare_parameter("z_height", 20.0);
+    this->declare_parameter("z_height", -0.25);
     this->declare_parameter("trajectory_length", 200.0); // meters
     this->declare_parameter("square_size", 500.0);         // planning area side (meters)
-    // this->declare_parameter("num_waypoints", 50);          // total number of waypoints
     this->declare_parameter("max_step", 5.0);                // maximum allowed step length
     this->declare_parameter("max_linear_velocity", 2.0);     // maximum linear velocity
+    this->declare_parameter("robot_name", "Husky1");
 
     // Starting point parameters.
     this->declare_parameter("start_x", 0.0);
     this->declare_parameter("start_y", 0.0);
-    this->declare_parameter("start_z", 20.0); // default same as z_height
+    this->declare_parameter("start_z", -0.25); // default same as z_height
 
     // Unicycle-like constraints.
     this->declare_parameter("start_yaw", 0.0);            // initial heading in degrees
@@ -52,7 +51,6 @@ public:
     this->get_parameter("z_height", z_height_);
     this->get_parameter("trajectory_length", trajectory_length_);
     this->get_parameter("square_size", square_size_);
-    // this->get_parameter("num_waypoints", num_waypoints_);
     this->get_parameter("max_step", max_step_);
     this->get_parameter("max_linear_velocity", max_linear_velocity_);
     this->get_parameter("start_x", start_x_);
@@ -61,7 +59,9 @@ public:
     this->get_parameter("start_yaw", start_yaw_deg_);
     this->get_parameter("max_turn_angle_deg", max_turn_angle_deg_);
     this->get_parameter("inflation_radius", inflation_radius_);
-    this->get_parameter("output_file_path", output_file_path_);
+    this->get_parameter("robot_name", robot_name_);
+
+    output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/trajectory_" + robot_name_ + ".txt";
 
     // Convert degrees to radians where needed.
     start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
@@ -109,6 +109,7 @@ private:
   std::vector<int8_t> occupancy_grid_;
 
   std::string output_file_path_;
+  std::string robot_name_;
   bool trajectory_saved_ = false;
 
   // Starting point parameters.
