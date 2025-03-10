@@ -28,9 +28,9 @@ public:
   TrajectoryPlanner() : Node("trajectory_planner")
   {
     // Declare parameters.
-    this->declare_parameter("output_file_path", "/home/sgarimella34/multi-robot-coordination/trajectory_data/trajectory.txt");
-    this->declare_parameter("z_height", -0.25);
-    this->declare_parameter("trajectory_length", 1000.0); // meters
+    this->declare_parameter("output_file_path", "/home/sgarimella34/multi-robot-coordination/trajectory_data/trajectory_drone_test.txt");
+    this->declare_parameter("z_height", 20.0);
+    this->declare_parameter("trajectory_length", 200.0); // meters
     this->declare_parameter("square_size", 500.0);         // planning area side (meters)
     // this->declare_parameter("num_waypoints", 50);          // total number of waypoints
     this->declare_parameter("max_step", 5.0);                // maximum allowed step length
@@ -39,7 +39,7 @@ public:
     // Starting point parameters.
     this->declare_parameter("start_x", 0.0);
     this->declare_parameter("start_y", 0.0);
-    this->declare_parameter("start_z", -0.25); // default same as z_height
+    this->declare_parameter("start_z", 20.0); // default same as z_height
 
     // Unicycle-like constraints.
     this->declare_parameter("start_yaw", 0.0);            // initial heading in degrees
