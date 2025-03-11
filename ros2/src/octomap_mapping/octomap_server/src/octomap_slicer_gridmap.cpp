@@ -27,7 +27,10 @@ public:
       std::bind(&OctomapToOccupancyGridNode::octomapCallback, this, std::placeholders::_1));
 
     // Publisher for the occupancy grid (projected map)
-    publisher_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("sliced_projected_map", 10);
+    rclcpp::QoS qos(10);
+    qos.transient_local();
+    publisher_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("sliced_projected_map", qos);
+
   }
 
 private:
