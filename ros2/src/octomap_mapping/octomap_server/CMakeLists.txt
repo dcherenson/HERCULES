@@ -113,30 +113,44 @@ rclcpp_components_register_node(octomap_saver
 )
 
 
-ament_auto_add_executable(trajectory_planner_node
-  src/trajectory_planner_node.cpp
+ament_auto_add_executable(trajectory_planner_octomap_node
+  src/trajectory_planner_octomap_node.cpp
 )
 
-target_link_libraries(trajectory_planner_node
+target_link_libraries(trajectory_planner_octomap_node
   ${OCTOMAP_LIBRARIES}
   ${PCL_LIBRARIES}
 )
 
-install(TARGETS trajectory_planner_node
+install(TARGETS trajectory_planner_octomap_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
 
-ament_auto_add_executable(trajectory_planner_node_time_horizon
-  src/trajectory_planner_node_time_horizon.cpp
+ament_auto_add_executable(trajectory_planner_OGM_node
+  src/trajectory_planner_OGM_node.cpp
 )
 
-target_link_libraries(trajectory_planner_node_time_horizon
+target_link_libraries(trajectory_planner_OGM_node
   ${OCTOMAP_LIBRARIES}
   ${PCL_LIBRARIES}
 )
 
-install(TARGETS trajectory_planner_node_time_horizon
+install(TARGETS trajectory_planner_OGM_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+
+ament_auto_add_executable(trajectory_planner_octomap_node_time_horizon
+  src/trajectory_planner_octomap_node_time_horizon.cpp
+)
+
+target_link_libraries(trajectory_planner_octomap_node_time_horizon
+  ${OCTOMAP_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
+install(TARGETS trajectory_planner_octomap_node_time_horizon
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -166,6 +180,7 @@ ament_auto_package(
 )
 
 install(PROGRAMS
-  scripts/octomap_eraser_cli.py
+  scripts/octomap_eraser_cli.py 
+  scripts/publish_saved_ogm.py
   DESTINATION lib/${PROJECT_NAME}
 )
