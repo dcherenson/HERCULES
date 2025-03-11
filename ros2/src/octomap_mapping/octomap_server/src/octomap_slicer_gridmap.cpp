@@ -3,10 +3,11 @@
 #include <tuple>
 #include <cmath>
 #include <limits>
+#include <algorithm>
 
 #include "rclcpp/rclcpp.hpp"
 #include "octomap_msgs/msg/octomap.hpp"
-#include "octomap_msgs/conversions.h"  // for fullMsgToMap
+#include "octomap_msgs/conversions.h"  // for binaryMsgToMap
 #include "octomap/octomap.h"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 
@@ -16,8 +17,9 @@ public:
   OctomapToOccupancyGridNode()
   : Node("octomap_to_occupancy_grid_node")
   {
-    // Declare and get the altitude at which to slice the octomap
+    // Declare and get parameters:
     slice_altitude_ = this->declare_parameter("slice_altitude", 0.0);
+    inflation_radius_m_ = this->declare_parameter("inflation_radius", 2.5);  // in meters
 
     // Subscribe to the octomap topic (adjust topic name as needed)
     subscription_ = this->create_subscription<octomap_msgs::msg::Octomap>(
@@ -32,9 +34,8 @@ private:
   void octomapCallback(const octomap_msgs::msg::Octomap::SharedPtr msg)
   {
     // Convert the received Octomap message to an octomap::OcTree pointer.
-    // fullMsgToMap returns an AbstractOcTree pointer that we dynamic_cast to an OcTree.
+    // Use binaryMsgToMap because the message is in binary format.
     octomap::OcTree* tree = dynamic_cast<octomap::OcTree*>(octomap_msgs::binaryMsgToMap(*msg));
-
     if (!tree) {
       RCLCPP_ERROR(this->get_logger(), "Failed to convert Octomap message to OcTree");
       return;
@@ -59,7 +60,7 @@ private:
       if (std::fabs(it.getZ() - slice_altitude_) <= tol) {
         double x = it.getX();
         double y = it.getY();
-        // Use the octomap helper to check occupancy (by default, nodes with > 0.5 probability are considered occupied)
+        // Use the octomap helper to check occupancy (nodes with > 0.5 probability are considered occupied)
         bool occupied = tree->isNodeOccupied(*it);
 
         min_x = std::min(min_x, x);
@@ -84,16 +85,13 @@ private:
     // Prepare the occupancy grid message.
     nav_msgs::msg::OccupancyGrid grid;
     grid.header.stamp = this->now();
-    // Use the same frame_id as the incoming octomap
     grid.header.frame_id = msg->header.frame_id;
     grid.info.resolution = resolution;
     grid.info.width = width;
     grid.info.height = height;
-    // Set the origin of the grid to the minimum x,y found (z is 0 for a 2D map)
     grid.info.origin.position.x = min_x;
     grid.info.origin.position.y = min_y;
     grid.info.origin.position.z = 0.0;
-    // Set the orientation to identity (no rotation)
     grid.info.origin.orientation.x = 0.0;
     grid.info.origin.orientation.y = 0.0;
     grid.info.origin.orientation.z = 0.0;
@@ -108,7 +106,6 @@ private:
       bool occ;
       std::tie(x, y, occ) = cell;
       if (occ) {
-        // Determine the column and row in the grid.
         int col = std::floor((x - min_x) / resolution);
         int row = std::floor((y - min_y) / resolution);
         int index = row * width + col;
@@ -118,16 +115,55 @@ private:
       }
     }
 
-    // Publish the occupancy grid.
+    // ------------------ Inflation (Drawing a border around obstacles) ------------------
+    // Determine inflation radius in grid cells.
+    int inflation_radius_cells = std::ceil(inflation_radius_m_ / resolution);
+    // Make a copy of the current grid data to compute inflation from obstacles only.
+    std::vector<int8_t> inflated_data = grid.data;
+    
+    // For each occupied cell, mark its neighbors (within the inflation radius) with an inflation value.
+    // We'll use 50 as the inflation value (can be interpreted as a different color in visualization).
+    for (int row = 0; row < height; row++) {
+      for (int col = 0; col < width; col++) {
+        int index = row * width + col;
+        if (grid.data[index] == 100) { // cell is occupied
+          // Iterate over neighboring cells within inflation_radius_cells
+          for (int drow = -inflation_radius_cells; drow <= inflation_radius_cells; drow++) {
+            for (int dcol = -inflation_radius_cells; dcol <= inflation_radius_cells; dcol++) {
+              int nrow = row + drow;
+              int ncol = col + dcol;
+              // Check bounds
+              if (nrow >= 0 && nrow < height && ncol >= 0 && ncol < width) {
+                // Compute Euclidean distance in cell units
+                float distance = std::sqrt(drow * drow + dcol * dcol);
+                if (distance <= inflation_radius_cells) {
+                  int nindex = nrow * width + ncol;
+                  // Only update free cells (0) so that obstacles remain as 100.
+                  if (grid.data[nindex] == 0) {
+                    inflated_data[nindex] = 50;  // Inflation value (different color)
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    // Replace the grid data with the inflated version.
+    grid.data = inflated_data;
+    // ----------------------------------------------------------------------------------
+
+    // Publish the occupancy grid with inflation.
     publisher_->publish(grid);
 
-    // Clean up the tree allocated by fullMsgToMap.
+    // Clean up the tree allocated by binaryMsgToMap.
     delete tree;
   }
 
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr subscription_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher_;
   double slice_altitude_;
+  double inflation_radius_m_;
 };
 
 int main(int argc, char ** argv)
