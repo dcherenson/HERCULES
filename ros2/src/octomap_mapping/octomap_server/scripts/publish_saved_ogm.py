@@ -85,13 +85,13 @@ class MapPublisher(Node):
 
                 if occ > occupied_thresh:
                     if occ >= 0.9:
-                        value = 100
+                        value = 0
                     else:
                         value = 50
                 elif occ < free_thresh:
-                    value = 0
+                    value = 100
                 else:
-                    value = -1
+                    value = 100
                 data[y, x] = value
 
         # ROS occupancy grids are defined with the origin at the bottom-left.
