@@ -13,9 +13,13 @@ import numpy as np
 class MapPublisher(Node):
     def __init__(self):
         super().__init__('custom_map_server')
-        # Declare a parameter for the YAML file path
+        
+        # Declare parameters
         self.declare_parameter('yaml_file', '/home/sgarimella34/multi-robot-coordination/trajectory_data/occupancy_grid_maps/ogm_test1.yaml')
+        self.declare_parameter('continuous_publish', True)
+
         yaml_file = self.get_parameter('yaml_file').value
+        self.continuous_publish = self.get_parameter('continuous_publish').value
 
         # Load the YAML file
         try:
@@ -67,13 +71,6 @@ class MapPublisher(Node):
         self.occupancy_grid.info.origin.orientation = q
 
         # Convert the image to occupancy data.
-        # Each pixel is normalized to [0,1] and, if needed, inverted using the negate flag.
-        # Then we apply thresholds:
-        #   - If occ > occupied_thresh:
-        #         if occ >= 0.9: value = 100 (fully occupied)
-        #         else:          value = 50  (partially occupied)
-        #   - If occ < free_thresh: value = 0 (free)
-        #   - Else: unknown (-1)
         rows, cols = map_image.shape
         data = np.empty((rows, cols), dtype=np.int8)
 
@@ -94,15 +91,21 @@ class MapPublisher(Node):
                     value = 100
                 data[y, x] = value
 
-        # ROS occupancy grids are defined with the origin at the bottom-left.
-        # Flip the data vertically.
+        # Flip the data vertically (ROS occupancy grids have origin at bottom-left).
         data = np.flipud(data)
         self.occupancy_grid.data = data.flatten().tolist()
 
-        # Create a publisher on the desired topic "sliced_projected_map"
+        # Create a publisher on the topic "sliced_projected_map"
         self.publisher = self.create_publisher(OccupancyGrid, 'sliced_projected_map', 10)
-        # Publish the map periodically (for example, every second)
-        self.timer = self.create_timer(1.0, self.publish_map)
+
+        if self.continuous_publish:
+            # Publish continuously every second
+            self.timer = self.create_timer(1.0, self.publish_map)
+        else:
+            # Publish only once and shutdown
+            self.publish_map()
+            self.get_logger().info("Map published once. Exiting...")
+            rclpy.shutdown()
 
     def publish_map(self):
         self.occupancy_grid.header.stamp = self.get_clock().now().to_msg()
@@ -112,9 +115,23 @@ class MapPublisher(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = MapPublisher()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+
+    if not node.continuous_publish:
+        # If publishing once, exit before entering spin loop
+        node.destroy_node()
+        if rclpy.ok():  # Ensure ROS is still running before shutting down
+            rclpy.shutdown()
+        return
+
+    # If continuous, keep spinning
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
 
 if __name__ == '__main__':
     main()

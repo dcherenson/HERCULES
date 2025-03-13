@@ -24,7 +24,7 @@ using namespace std::chrono_literals;
 
 class TrajectoryPlanner : public rclcpp::Node {
 public:
-  TrajectoryPlanner() : Node("trajectory_planner")
+  TrajectoryPlanner() : Node("trajectory_planner"), occupancy_grid_received_(false)
   {
     // Declare parameters.
     this->declare_parameter("z_height", -0.25);
@@ -152,6 +152,9 @@ private:
   std::string waypoints_file_;
   std::vector<std::tuple<double, double, double>> provided_waypoints_;
 
+  // Flag to check if occupancy grid has been received.
+  bool occupancy_grid_received_;
+
   // ROS publishers/subscribers/timer.
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
@@ -195,6 +198,7 @@ private:
         }
       }
     }
+    occupancy_grid_received_ = true;
     RCLCPP_INFO(this->get_logger(), "Occupancy grid updated from occupancy grid map.");
   }
 
@@ -548,6 +552,12 @@ private:
   // Timer callback: generate (if not already generated) and publish the trajectory.
   void timer_callback()
   {
+    // Only plan the trajectory if an occupancy grid has been received.
+    if (!occupancy_grid_received_) {
+      RCLCPP_WARN(this->get_logger(), "No occupancy grid received yet; skipping trajectory planning.");
+      return;
+    }
+    
     if (trajectory_.empty()) {
       trajectory_ = plan_trajectory();
     }

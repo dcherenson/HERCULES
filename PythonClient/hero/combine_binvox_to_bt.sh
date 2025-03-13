@@ -1,10 +1,10 @@
 #!/bin/bash
 # Set the directory containing your binvox files
-BINVOX_DIR="/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_test"
+BINVOX_DIR="/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_1mcubed"
 # Set the path to your modified binvox2bt executable
 BINVOX2BT="/home/sgarimella34/octomap/bin/binvox2bt_unique_offsets"
 # Define the output file for the combined octree
-OUTPUT_FILE="/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_test/test1_4tiles.bt"
+OUTPUT_FILE="/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_1mcubed/test1_1mcubed_ausenv.bt"
 
 # Initialize command with any global options (e.g., --mark-free)
 CMD="$BINVOX2BT --mark-free"

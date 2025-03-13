@@ -3,5 +3,11 @@
         pkg="octomap_server"
         exec="octomap_slicer_gridmap"
         name="octomap_slicer"
-        output="screen" />
+        output="screen">
+        
+        <!-- Define parameters -->
+        <param name="slice_altitude" type="double" value="0.0"/>
+        <param name="inflation_radius" type="double" value="2.5"/>
+
+    </node>
 </launch>

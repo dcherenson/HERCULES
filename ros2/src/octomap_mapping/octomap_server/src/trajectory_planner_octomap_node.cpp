@@ -26,7 +26,7 @@ using namespace std::chrono_literals;
 
 class TrajectoryPlanner : public rclcpp::Node {
 public:
-  TrajectoryPlanner() : Node("trajectory_planner")
+  TrajectoryPlanner() : Node("trajectory_planner"), octomap_received_(false)
   {
     // Declare parameters.
     this->declare_parameter("z_height", -0.25);
@@ -154,6 +154,9 @@ private:
   std::string waypoints_file_;
   std::vector<std::tuple<double, double, double>> provided_waypoints_;
 
+  // Flag to check if an octomap has been received.
+  bool octomap_received_;
+
   // ROS publishers/subscribers/timer.
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
@@ -198,6 +201,8 @@ private:
           }
         }
       }
+      // Set the flag indicating an octomap has been received.
+      octomap_received_ = true;
       RCLCPP_INFO(this->get_logger(), "Occupancy grid updated");
     } catch (const std::exception &e) {
       RCLCPP_ERROR(this->get_logger(), "Error decoding Octomap: %s", e.what());
@@ -458,8 +463,6 @@ private:
           double prev_y = std::get<1>(seg[seg.size()-2]);
           curr_theta = std::atan2(goal_y - prev_y, goal_x - prev_x);
         }
-        // Accumulate length.
-        // (For simplicity, we recalc full_traj length below.)
       }
     }
     // Compute accumulated length so far.
@@ -555,6 +558,12 @@ private:
   // Timer callback: generate (if not already generated) and publish the trajectory.
   void timer_callback()
   {
+    // Only plan if an octomap has been received.
+    if (!octomap_received_) {
+      RCLCPP_WARN(this->get_logger(), "No octomap received yet; skipping trajectory planning.");
+      return;
+    }
+
     if (trajectory_.empty()) {
       trajectory_ = plan_trajectory();
     }
