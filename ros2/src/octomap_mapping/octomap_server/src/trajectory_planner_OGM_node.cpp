@@ -13,7 +13,6 @@
 #include <iostream>
 #include <queue>
 #include <limits>
-#include <unordered_map>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -172,7 +171,8 @@ private:
   // Trajectory storage.
   std::vector<std::tuple<double, double, double, double>> trajectory_;
 
-  // ------------------ Smoothing Functions (for random segments only) ------------------
+  // ------------------ Smoothing Function ------------------
+  // Applies iterative smoothing to a raw vector of 2D points.
   std::vector<std::pair<double,double>> smoothPath(const std::vector<std::pair<double,double>> &path,
                                                      int iterations = 50, double alpha = 0.1)
   {
@@ -187,12 +187,16 @@ private:
     }
     return smoothed;
   }
-  // ------------------------------------------------------------------------------------
+  // --------------------------------------------------------
 
+  // ------------------ Additional Refinement for Sharp Turns ------------------
+  // For each intermediate point, if the turning angle (change in heading) is above a threshold,
+  // pull that point toward the average of its neighbors.
   std::vector<std::pair<double,double>> refineSharpTurns(const std::vector<std::pair<double,double>> &path,
                                                           double turn_threshold)
   {
     std::vector<std::pair<double,double>> refined = path;
+    // Process only intermediate points.
     for (size_t i = 1; i < refined.size() - 1; ++i) {
       double dx1 = refined[i].first - refined[i-1].first;
       double dy1 = refined[i].second - refined[i-1].second;
@@ -203,188 +207,21 @@ private:
       if(mag1 < 1e-6 || mag2 < 1e-6) continue;
       double dot = dx1 * dx2 + dy1 * dy2;
       double angle = std::acos(std::clamp(dot/(mag1*mag2), -1.0, 1.0));
+      // If the turning angle is large (i.e. the path is very "kinky")
       if(angle > turn_threshold) {
+        // Replace this point with the average of its neighbors.
         refined[i].first = (refined[i-1].first + refined[i+1].first) / 2.0;
         refined[i].second = (refined[i-1].second + refined[i+1].second) / 2.0;
       }
     }
     return refined;
   }
-
-  // ------------------ New Heading-Aware A* Algorithm ------------------
-  // Plans a 2D path from (start_x, start_y, start_theta) to (goal_x, goal_y)
-  // while obeying the angular constraint (max_turn_angle_rad_).
-  // Returns a vector of trajectory waypoints (x, y, z, timestamp).
-  std::vector<std::tuple<double, double, double, double>> a_star_heading(double start_x, double start_y, double start_theta,
-                                                                         double goal_x, double goal_y)
-  {
-    // A node in the search tree.
-    struct Node {
-      double x, y, theta;
-      double g; // cost so far
-      double f; // total cost = g + heuristic
-      int disc_theta; // discretized heading
-      int cell_x, cell_y;
-      int parent_index;
-    };
-
-    // Key for visited states.
-    struct Key {
-      int cell_x;
-      int cell_y;
-      int disc_theta;
-      bool operator==(const Key &other) const {
-        return cell_x == other.cell_x && cell_y == other.cell_y && disc_theta == other.disc_theta;
-      }
-    };
-    struct KeyHash {
-      std::size_t operator()(const Key &k) const {
-        return ((std::hash<int>()(k.cell_x) ^ (std::hash<int>()(k.cell_y) << 1)) >> 1) ^ (std::hash<int>()(k.disc_theta) << 1);
-      }
-    };
-
-    // Discretize theta with 5° resolution.
-    double angle_res = M_PI / 36.0;
-    auto discretize_theta = [angle_res](double theta) -> int {
-      double norm = std::fmod(theta, 2*M_PI);
-      if (norm < 0) norm += 2*M_PI;
-      return static_cast<int>(std::round(norm / angle_res));
-    };
-
-    auto compute_cell = [this](double x, double y) -> std::pair<int,int> {
-      int cell_x = static_cast<int>(std::floor((x - grid_origin_x_) / grid_resolution_));
-      int cell_y = static_cast<int>(std::floor((y - grid_origin_y_) / grid_resolution_));
-      return {cell_x, cell_y};
-    };
-
-    auto heuristic = [goal_x, goal_y](double x, double y) {
-      return std::sqrt((x - goal_x)*(x - goal_x) + (y - goal_y)*(y - goal_y));
-    };
-
-    // Allowed steering changes (limited by max_turn_angle_rad_).
-    std::vector<double> steering_deltas = {
-      -max_turn_angle_rad_, -max_turn_angle_rad_/2.0, 0.0, max_turn_angle_rad_/2.0, max_turn_angle_rad_
-    };
-
-    double step = grid_resolution_; // fixed step length
-
-    // Priority queue item.
-    struct PQItem {
-      double f;
-      int index;
-      bool operator>(const PQItem &other) const {
-        return f > other.f;
-      }
-    };
-
-    std::vector<Node> nodes;
-    nodes.reserve(10000);
-    auto [start_cell_x, start_cell_y] = compute_cell(start_x, start_y);
-    int start_disc_theta = discretize_theta(start_theta);
-    Node start_node {start_x, start_y, start_theta, 0.0, heuristic(start_x, start_y), start_disc_theta,
-                     start_cell_x, start_cell_y, -1};
-    nodes.push_back(start_node);
-
-    std::priority_queue<PQItem, std::vector<PQItem>, std::greater<PQItem>> open;
-    open.push({start_node.f, 0});
-
-    std::unordered_map<Key, double, KeyHash> best_cost;
-    Key start_key {start_cell_x, start_cell_y, start_disc_theta};
-    best_cost[start_key] = 0.0;
-
-    int goal_cell_x, goal_cell_y;
-    std::tie(goal_cell_x, goal_cell_y) = compute_cell(goal_x, goal_y);
-
-    int goal_index = -1;
-    while (!open.empty()) {
-      auto current_item = open.top();
-      open.pop();
-      int current_index = current_item.index;
-      Node current = nodes[current_index];
-      // Check if we reached the goal cell.
-      if (current.cell_x == goal_cell_x && current.cell_y == goal_cell_y) {
-        goal_index = current_index;
-        break;
-      }
-      // Expand neighbors.
-      for (double delta : steering_deltas) {
-        double new_theta = current.theta + delta;
-        double new_x = current.x + step * std::cos(new_theta);
-        double new_y = current.y + step * std::sin(new_theta);
-        if (new_x < grid_origin_x_ || new_x > grid_origin_x_ + square_size_ ||
-            new_y < grid_origin_y_ || new_y > grid_origin_y_ + square_size_)
-          continue;
-        auto [new_cell_x, new_cell_y] = compute_cell(new_x, new_y);
-        if (new_cell_x < 0 || new_cell_x >= grid_width_ || new_cell_y < 0 || new_cell_y >= grid_height_)
-          continue;
-        if (occupancy_grid_[new_cell_y * grid_width_ + new_cell_x] != 0)
-          continue;
-        // Check line collision using the existing function.
-        if (!check_line_free_bresenham(std::make_tuple(current.x, current.y, start_z_, 0.0),
-                                       std::make_tuple(new_x, new_y, start_z_, 0.0), inflation_radius_))
-          continue;
-        double new_g = current.g + step;
-        int new_disc_theta = discretize_theta(new_theta);
-        Key new_key {new_cell_x, new_cell_y, new_disc_theta};
-        if (best_cost.find(new_key) != best_cost.end() && best_cost[new_key] <= new_g)
-          continue;
-        best_cost[new_key] = new_g;
-        double new_f = new_g + heuristic(new_x, new_y);
-        Node new_node {new_x, new_y, new_theta, new_g, new_f, new_disc_theta,
-                       new_cell_x, new_cell_y, current_index};
-        int new_index = nodes.size();
-        nodes.push_back(new_node);
-        open.push({new_f, new_index});
-      }
-    }
-
-    std::vector<std::tuple<double,double,double,double>> path;
-    if (goal_index == -1) {
-      RCLCPP_ERROR(this->get_logger(), "A* with heading failed to find a path to waypoint (%.2f, %.2f)", goal_x, goal_y);
-      path.push_back(std::make_tuple(start_x, start_y, start_z_, 0.0));
-      return path;
-    }
-    // Reconstruct the path.
-    std::vector<Node> rev_path;
-    int idx = goal_index;
-    while (idx != -1) {
-      rev_path.push_back(nodes[idx]);
-      idx = nodes[idx].parent_index;
-    }
-    std::reverse(rev_path.begin(), rev_path.end());
-    // Convert the path into trajectory waypoints with timestamps.
-    double time_acc = 0.0;
-    double current_theta = start_theta;
-    double prev_x = rev_path.front().x;
-    double prev_y = rev_path.front().y;
-    for (size_t i = 0; i < rev_path.size(); i++) {
-      if (i == 0) {
-        path.push_back(std::make_tuple(rev_path[i].x, rev_path[i].y, start_z_, time_acc));
-      } else {
-        double dx = rev_path[i].x - prev_x;
-        double dy = rev_path[i].y - prev_y;
-        double distance = std::sqrt(dx*dx + dy*dy);
-        double t_linear = distance / max_linear_velocity_;
-        double new_heading = std::atan2(dy, dx);
-        double dtheta = std::fabs(new_heading - current_theta);
-        if (dtheta > M_PI)
-          dtheta = 2 * M_PI - dtheta;
-        double t_angular = (dtheta / max_turn_angle_rad_) * t_linear;
-        double dt = t_linear + t_angular;
-        time_acc += dt;
-        path.push_back(std::make_tuple(rev_path[i].x, rev_path[i].y, start_z_, time_acc));
-        current_theta = std::atan2(rev_path[i].y - prev_y, rev_path[i].x - prev_x);
-        prev_x = rev_path[i].x;
-        prev_y = rev_path[i].y;
-      }
-    }
-    return path;
-  }
-  // ------------------------------------------------------------------------
+  // --------------------------------------------------------
 
   // Callback: update occupancy grid.
   void occupancy_grid_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
   {
+    // Only run this callback once after receiving a non-empty occupancy grid.
     if (occupancy_grid_received_) {
       RCLCPP_INFO(this->get_logger(), "Occupancy grid already received; ignoring new message.");
       return;
@@ -393,6 +230,7 @@ private:
       RCLCPP_WARN(this->get_logger(), "Received empty occupancy grid; waiting for valid data.");
       return;
     }
+
     std::fill(occupancy_grid_.begin(), occupancy_grid_.end(), 0);
     for (int j = 0; j < grid_height_; j++) {
       for (int i = 0; i < grid_width_; i++) {
@@ -415,7 +253,7 @@ private:
     RCLCPP_INFO(this->get_logger(), "Occupancy grid updated from occupancy grid map.");
   }
 
-  // Bresenham algorithm.
+  // Bresenham algorithm (unchanged).
   std::vector<std::pair<int,int>> bresenham(int x0, int y0, int x1, int y1) {
     std::vector<std::pair<int,int>> cells;
     int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
@@ -469,6 +307,95 @@ private:
     return check_line_free_bresenham(p1, p2, inflation_radius_);
   }
 
+  // ---------------------- A* Algorithm Implementation ----------------------
+  // Searches for a path (grid cells) from (start_x, start_y) to (goal_x, goal_y)
+  std::vector<std::pair<int,int>> a_star(int start_x, int start_y, int goal_x, int goal_y)
+  {
+      struct PQItem {
+          double f;
+          int x;
+          int y;
+      };
+      struct cmp {
+          bool operator()(const PQItem &a, const PQItem &b) {
+              return a.f > b.f;
+          }
+      };
+      std::priority_queue<PQItem, std::vector<PQItem>, cmp> open;
+      
+      auto index = [this](int x, int y) { return y * grid_width_ + x; };
+      const double INF = 1e9;
+      std::vector<bool> closed(grid_width_ * grid_height_, false);
+      std::vector<double> g_cost(grid_width_ * grid_height_, INF);
+      std::vector<int> parent_x(grid_width_ * grid_height_, -1);
+      std::vector<int> parent_y(grid_width_ * grid_height_, -1);
+      
+      auto heuristic = [goal_x, goal_y](int x, int y) -> double {
+          return std::sqrt((x - goal_x) * (x - goal_x) + (y - goal_y) * (y - goal_y));
+      };
+      
+      int start_idx = index(start_x, start_y);
+      g_cost[start_idx] = 0.0;
+      open.push({heuristic(start_x, start_y), start_x, start_y});
+      
+      std::vector<std::pair<int,int>> directions = {
+          {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+          {1, 1}, {1, -1}, {-1, 1}, {-1, -1}
+      };
+      
+      bool found = false;
+      while (!open.empty()) {
+          auto current = open.top();
+          open.pop();
+          int cx = current.x, cy = current.y;
+          int c_idx = index(cx, cy);
+          if (closed[c_idx])
+              continue;
+          closed[c_idx] = true;
+          if (cx == goal_x && cy == goal_y) {
+              found = true;
+              break;
+          }
+          for (auto d : directions) {
+              int nx = cx + d.first, ny = cy + d.second;
+              if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+                  continue;
+              int n_idx = index(nx, ny);
+              if (occupancy_grid_[n_idx] != 0)
+                  continue;
+              if (closed[n_idx])
+                  continue;
+              double step_cost = (d.first != 0 && d.second != 0) ? std::sqrt(2.0) : 1.0;
+              double tentative_g = g_cost[c_idx] + step_cost;
+              if (tentative_g < g_cost[n_idx]) {
+                  g_cost[n_idx] = tentative_g;
+                  parent_x[n_idx] = cx;
+                  parent_y[n_idx] = cy;
+                  double f = tentative_g + heuristic(nx, ny);
+                  open.push({f, nx, ny});
+              }
+          }
+      }
+      
+      std::vector<std::pair<int,int>> path;
+      if (!found) {
+          return path;
+      }
+      int cx = goal_x, cy = goal_y;
+      while (!(cx == start_x && cy == start_y)) {
+          path.push_back({cx, cy});
+          int idx_val = index(cx, cy);
+          int px = parent_x[idx_val];
+          int py = parent_y[idx_val];
+          cx = px;
+          cy = py;
+      }
+      path.push_back({start_x, start_y});
+      std::reverse(path.begin(), path.end());
+      return path;
+  }
+  // ------------------------------------------------------------------------
+
   // ---------------------- Trajectory Planning ----------------------
   std::vector<std::tuple<double, double, double, double>> plan_trajectory()
   {
@@ -492,39 +419,79 @@ private:
           return t_linear + t_angular;
       };
 
-      // Modified segment planning using heading-based A* (for provided waypoints).
+      // A* based segment planning from the current state to a forced waypoint.
+      // This version smooths the raw A* path and then refines sharp turns.
       auto plan_segment = [&](double goal_x, double goal_y, double goal_z)
           -> std::vector<std::tuple<double,double,double,double>> {
           std::vector<std::tuple<double,double,double,double>> seg;
-          // Validate start and goal cells.
+          seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+
           int start_cell_x = static_cast<int>(std::floor((curr_x - grid_origin_x_) / grid_resolution_));
           int start_cell_y = static_cast<int>(std::floor((curr_y - grid_origin_y_) / grid_resolution_));
           int goal_cell_x  = static_cast<int>(std::floor((goal_x - grid_origin_x_) / grid_resolution_));
           int goal_cell_y  = static_cast<int>(std::floor((goal_y - grid_origin_y_) / grid_resolution_));
+
+          // Validate cells.
           if (start_cell_x < 0 || start_cell_x >= grid_width_ ||
               start_cell_y < 0 || start_cell_y >= grid_height_) {
-              RCLCPP_ERROR(this->get_logger(), "Start cell out of bounds in heading A* planning.");
-              seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+              RCLCPP_ERROR(this->get_logger(), "Start cell out of bounds in A* planning.");
               return seg;
           }
           if (goal_cell_x < 0 || goal_cell_x >= grid_width_ ||
               goal_cell_y < 0 || goal_cell_y >= grid_height_) {
-              RCLCPP_ERROR(this->get_logger(), "Goal cell out of bounds in heading A* planning.");
-              seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+              RCLCPP_ERROR(this->get_logger(), "Goal cell out of bounds in A* planning.");
               return seg;
           }
           if (occupancy_grid_[start_cell_y * grid_width_ + start_cell_x] != 0) {
-              RCLCPP_ERROR(this->get_logger(), "Start cell is occupied in heading A* planning.");
-              seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+              RCLCPP_ERROR(this->get_logger(), "Start cell is occupied in A* planning.");
               return seg;
           }
           if (occupancy_grid_[goal_cell_y * grid_width_ + goal_cell_x] != 0) {
-              RCLCPP_ERROR(this->get_logger(), "Goal cell is occupied in heading A* planning.");
-              seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+              RCLCPP_ERROR(this->get_logger(), "Goal cell is occupied in A* planning.");
               return seg;
           }
-          // Use the heading-based A* search.
-          seg = a_star_heading(curr_x, curr_y, curr_theta, goal_x, goal_y);
+
+          auto path_cells = a_star(start_cell_x, start_cell_y, goal_cell_x, goal_cell_y);
+          if (path_cells.empty()) {
+              RCLCPP_ERROR(this->get_logger(), "A* failed to find a path to waypoint (%.2f, %.2f, %.2f)", goal_x, goal_y, goal_z);
+              return seg;
+          }
+
+          // Convert grid cells to world coordinates.
+          std::vector<std::pair<double,double>> raw_path;
+          raw_path.push_back({curr_x, curr_y});
+          for (size_t i = 1; i < path_cells.size(); ++i) {
+              int cell_x = path_cells[i].first;
+              int cell_y = path_cells[i].second;
+              double wx = grid_origin_x_ + (cell_x + 0.5) * grid_resolution_;
+              double wy = grid_origin_y_ + (cell_y + 0.5) * grid_resolution_;
+              raw_path.push_back({wx, wy});
+          }
+          // Apply initial smoothing.
+          auto smooth_path_result = smoothPath(raw_path, 50, 0.1);
+          // Further refine sharp turns. (Threshold set to 1.0 rad; repeat a few times.)
+          double turn_threshold = 1.0; // about 57 degrees
+          auto refined_path = smooth_path_result;
+          for (int iter = 0; iter < 5; ++iter) {
+              refined_path = refineSharpTurns(refined_path, turn_threshold);
+          }
+
+          double prev_x = refined_path.front().first;
+          double prev_y = refined_path.front().second;
+          double time_acc = curr_time;
+          double current_theta = curr_theta;
+
+          // Convert the refined (smoothed) points into trajectory waypoints.
+          for (size_t i = 1; i < refined_path.size(); ++i) {
+              double wx = refined_path[i].first;
+              double wy = refined_path[i].second;
+              double dt = compute_dt(prev_x, prev_y, wx, wy, current_theta);
+              time_acc += dt;
+              seg.push_back(std::make_tuple(wx, wy, start_z_, time_acc));
+              current_theta = std::atan2(wy - prev_y, wx - prev_x);
+              prev_x = wx;
+              prev_y = wy;
+          }
           return seg;
       };
 
@@ -575,14 +542,13 @@ private:
       };
 
       double total_length = 0.0;
-      // If provided waypoints exist, plan segments using heading-aware A*.
+      // If provided waypoints exist, plan segments via A*.
       if (!provided_waypoints_.empty()) {
           for (const auto &pt : provided_waypoints_) {
               double goal_x = std::get<0>(pt);
               double goal_y = std::get<1>(pt);
               double goal_z = std::get<2>(pt);
               auto seg = plan_segment(goal_x, goal_y, goal_z);
-              // Append segment (skip duplicating the first point).
               for (size_t i = 1; i < seg.size(); ++i)
                   full_traj.push_back(seg[i]);
               curr_x = goal_x;
@@ -693,7 +659,7 @@ private:
           save_trajectory_to_file(trajectory_);
           trajectory_saved_ = true;
       }
-      // Publish provided waypoints as markers.
+      // Publish waypoints as large markers if provided.
       if (!provided_waypoints_.empty()) {
           visualization_msgs::msg::Marker waypoint_marker;
           waypoint_marker.header.stamp = this->now();
