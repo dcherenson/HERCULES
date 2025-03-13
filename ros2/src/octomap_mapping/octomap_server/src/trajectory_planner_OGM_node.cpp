@@ -218,6 +218,40 @@ private:
   }
   // --------------------------------------------------------
 
+  // ------------------ Sparsification Function ------------------
+  // Removes intermediate waypoints for nearly straight segments.
+  std::vector<std::pair<double,double>> sparsifyPath(const std::vector<std::pair<double,double>> &path, double angle_threshold = 0.05)
+  {
+      if (path.size() < 3)
+          return path;
+      std::vector<std::pair<double,double>> sparsified;
+      sparsified.push_back(path.front());
+      for (size_t i = 1; i < path.size() - 1; ++i) {
+          const auto &prev = sparsified.back();
+          const auto &curr = path[i];
+          const auto &next = path[i+1];
+          double dx1 = curr.first - prev.first;
+          double dy1 = curr.second - prev.second;
+          double dx2 = next.first - curr.first;
+          double dy2 = next.second - curr.second;
+          double mag1 = std::sqrt(dx1*dx1 + dy1*dy1);
+          double mag2 = std::sqrt(dx2*dx2 + dy2*dy2);
+          if (mag1 < 1e-6 || mag2 < 1e-6) {
+              sparsified.push_back(curr);
+              continue;
+          }
+          double dot = dx1 * dx2 + dy1 * dy2;
+          double angle = std::acos(std::clamp(dot / (mag1*mag2), -1.0, 1.0));
+          // If the change in angle is significant, keep the current point.
+          if (angle > angle_threshold) {
+              sparsified.push_back(curr);
+          }
+      }
+      sparsified.push_back(path.back());
+      return sparsified;
+  }
+  // --------------------------------------------------------
+
   // Callback: update occupancy grid.
   void occupancy_grid_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
   {
@@ -420,7 +454,7 @@ private:
       };
 
       // A* based segment planning from the current state to a forced waypoint.
-      // This version smooths the raw A* path and then refines sharp turns.
+      // This version smooths the raw A* path, refines sharp turns, and then sparsifies waypoints for straight segments.
       auto plan_segment = [&](double goal_x, double goal_y, double goal_z)
           -> std::vector<std::tuple<double,double,double,double>> {
           std::vector<std::tuple<double,double,double,double>> seg;
@@ -475,16 +509,18 @@ private:
           for (int iter = 0; iter < 5; ++iter) {
               refined_path = refineSharpTurns(refined_path, turn_threshold);
           }
+          // Sparsify waypoints for nearly straight line segments.
+          auto sparsified_path = sparsifyPath(refined_path, 0.05);
 
-          double prev_x = refined_path.front().first;
-          double prev_y = refined_path.front().second;
+          double prev_x = sparsified_path.front().first;
+          double prev_y = sparsified_path.front().second;
           double time_acc = curr_time;
           double current_theta = curr_theta;
 
-          // Convert the refined (smoothed) points into trajectory waypoints.
-          for (size_t i = 1; i < refined_path.size(); ++i) {
-              double wx = refined_path[i].first;
-              double wy = refined_path[i].second;
+          // Convert the sparsified (smoothed) points into trajectory waypoints.
+          for (size_t i = 1; i < sparsified_path.size(); ++i) {
+              double wx = sparsified_path[i].first;
+              double wy = sparsified_path[i].second;
               double dt = compute_dt(prev_x, prev_y, wx, wy, current_theta);
               time_acc += dt;
               seg.push_back(std::make_tuple(wx, wy, start_z_, time_acc));
