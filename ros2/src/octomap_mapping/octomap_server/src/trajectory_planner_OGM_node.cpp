@@ -610,53 +610,121 @@ private:
             return seg;
         };
 
-        // Random segment planning
+        // Random segment planning using a kinodynamic RRT with outward exploration
         auto plan_random_segment = [&](double remaining_length)
             -> std::vector<std::tuple<double, double, double, double>>
         {
-            std::vector<std::tuple<double, double, double, double>> seg;
-            seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
-            int num_steps = std::max(2, static_cast<int>(std::ceil(remaining_length / max_step_)) + 1);
-            double target_step = remaining_length / (num_steps - 1);
-            double min_step_rand = target_step;
-            double max_step_rand = std::min({1.5 * target_step, max_step_, max_linear_velocity_});
-            int max_attempts_per_step = 500;
-
-            std::function<bool(int, double, double, double, double,
-                               std::vector<std::tuple<double, double, double, double>> &)>
-                backtrackRandom;
-            backtrackRandom = [&](int idx, double cur_x, double cur_y, double cur_theta, double cur_time,
-                                  std::vector<std::tuple<double, double, double, double>> &current_seg) -> bool
+            // Define the node structure.
+            struct Node
             {
-                if (idx == num_steps)
-                    return true;
-                std::uniform_real_distribution<double> turn_dist(-max_turn_angle_rad_, max_turn_angle_rad_);
-                std::uniform_real_distribution<double> step_dist(min_step_rand, max_step_rand);
-                for (int attempt = 0; attempt < max_attempts_per_step; ++attempt)
-                {
-                    double dtheta = turn_dist(rng_);
-                    double new_theta = cur_theta + dtheta;
-                    double step = step_dist(rng_);
-                    double next_x = cur_x + step * std::cos(new_theta);
-                    double next_y = cur_y + step * std::sin(new_theta);
-                    if (next_x < grid_origin_x_ || next_x > grid_origin_x_ + square_size_ ||
-                        next_y < grid_origin_y_ || next_y > grid_origin_y_ + square_size_)
-                        continue;
-                    if (!check_line_free_bresenham(current_seg.back(), std::make_tuple(next_x, next_y, start_z_, 0.0), inflation_radius_))
-                        continue;
-                    double dt = compute_dt(cur_x, cur_y, next_x, next_y, cur_theta);
-                    double new_time = cur_time + dt;
-                    current_seg.push_back(std::make_tuple(next_x, next_y, start_z_, new_time));
-                    if (backtrackRandom(idx + 1, next_x, next_y, new_theta, new_time, current_seg))
-                        return true;
-                    current_seg.pop_back();
-                }
-                return false;
+                double x, y, theta, time, cost;
+                int parent;
             };
 
-            bool success = backtrackRandom(1, curr_x, curr_y, curr_theta, curr_time, seg);
-            if (!success)
-                RCLCPP_ERROR(this->get_logger(), "Random segment backtracking failed.");
+            std::vector<Node> tree;
+            // Root: current state.
+            Node root = {curr_x, curr_y, curr_theta, curr_time, 0.0, -1};
+            tree.push_back(root);
+
+            int max_iterations = 5000;
+            bool reached = false;
+            int goal_index = -1;
+            double dt = 0.2;                 // time step for propagation (tune as needed)
+            double v = max_linear_velocity_; // use robot's speed
+
+            for (int iter = 0; iter < max_iterations; iter++)
+            {
+                // Sample a random state (x_rand, y_rand) uniformly in the planning area.
+                double x_rand = x_dist_(rng_);
+                double y_rand = y_dist_(rng_);
+
+                // Find the nearest node in the tree (Euclidean distance).
+                int nearest_index = 0;
+                double min_dist = std::numeric_limits<double>::max();
+                for (int i = 0; i < tree.size(); i++)
+                {
+                    double dx = tree[i].x - x_rand;
+                    double dy = tree[i].y - y_rand;
+                    double dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist < min_dist)
+                    {
+                        min_dist = dist;
+                        nearest_index = i;
+                    }
+                }
+                Node nearest = tree[nearest_index];
+
+                // Compute desired heading from nearest node to the random sample.
+                double theta_des = std::atan2(y_rand - nearest.y, x_rand - nearest.x);
+                double dtheta = theta_des - nearest.theta;
+                // Normalize dtheta to [-pi, pi].
+                while (dtheta > M_PI)
+                    dtheta -= 2 * M_PI;
+                while (dtheta < -M_PI)
+                    dtheta += 2 * M_PI;
+                // Clamp dtheta to the maximum turning rate.
+                if (dtheta > max_turn_angle_rad_)
+                    dtheta = max_turn_angle_rad_;
+                if (dtheta < -max_turn_angle_rad_)
+                    dtheta = -max_turn_angle_rad_;
+                double new_theta = nearest.theta + dtheta;
+
+                // Propagate the state using a simple unicycle model.
+                double step = v * dt; // distance traveled in dt
+                double new_x = nearest.x + step * std::cos(new_theta);
+                double new_y = nearest.y + step * std::sin(new_theta);
+                double new_time = nearest.time + dt;
+                double new_cost = nearest.cost + step;
+
+                // Check bounds.
+                if (new_x < grid_origin_x_ || new_x > grid_origin_x_ + square_size_ ||
+                    new_y < grid_origin_y_ || new_y > grid_origin_y_ + square_size_)
+                {
+                    continue;
+                }
+                // Collision check: ensure the segment from nearest node to new node is free.
+                if (!check_line_free_bresenham(std::make_tuple(nearest.x, nearest.y, start_z_, 0.0),
+                                               std::make_tuple(new_x, new_y, start_z_, 0.0)))
+                {
+                    continue;
+                }
+
+                // Create the new node and add it to the tree.
+                Node new_node = {new_x, new_y, new_theta, new_time, new_cost, nearest_index};
+                tree.push_back(new_node);
+
+                // Check if the accumulated cost meets the remaining trajectory length.
+                if (new_cost >= remaining_length)
+                {
+                    reached = true;
+                    goal_index = tree.size() - 1;
+                    break;
+                }
+            }
+
+            std::vector<std::tuple<double, double, double, double>> seg;
+            if (!reached)
+            {
+                RCLCPP_ERROR(this->get_logger(), "Kinodynamic RRT failed to generate a segment of desired length after %d iterations", max_iterations);
+                seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+                return seg;
+            }
+
+            // Backtrack from the goal node to the root.
+            std::vector<Node> path;
+            int idx = goal_index;
+            while (idx != -1)
+            {
+                path.push_back(tree[idx]);
+                idx = tree[idx].parent;
+            }
+            std::reverse(path.begin(), path.end());
+
+            // Convert the nodes into the trajectory waypoint tuple.
+            for (const auto &node : path)
+            {
+                seg.push_back(std::make_tuple(node.x, node.y, start_z_, node.time));
+            }
             return seg;
         };
 
