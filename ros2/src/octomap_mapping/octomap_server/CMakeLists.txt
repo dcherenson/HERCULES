@@ -13,6 +13,11 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+####################
+# JSON LIBRARY DEPENDENCY
+####################
+find_package(nlohmann_json REQUIRED)
+
 find_package(PCL REQUIRED)
 include_directories(${PCL_INCLUDE_DIRS})
 
@@ -126,7 +131,7 @@ install(TARGETS trajectory_planner_octomap_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-
+# TRAJECTORY PLANNER OGM NODE__________
 ament_auto_add_executable(trajectory_planner_OGM_node
   src/trajectory_planner_OGM_node.cpp
 )
@@ -134,12 +139,13 @@ ament_auto_add_executable(trajectory_planner_OGM_node
 target_link_libraries(trajectory_planner_OGM_node
   ${OCTOMAP_LIBRARIES}
   ${PCL_LIBRARIES}
+  nlohmann_json::nlohmann_json
 )
 
 install(TARGETS trajectory_planner_OGM_node
   DESTINATION lib/${PROJECT_NAME}
 )
-
+# TRAJECTORY PLANNER OGM NODE end_______
 
 ament_auto_add_executable(trajectory_planner_octomap_node_time_horizon
   src/trajectory_planner_octomap_node_time_horizon.cpp

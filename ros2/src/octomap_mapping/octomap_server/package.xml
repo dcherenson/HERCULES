@@ -14,7 +14,8 @@
   <author>Armin Hornung</author>
 
   <buildtool_depend>ament_cmake_auto</buildtool_depend>
-
+  
+  <depend>nlohmann_json</depend>
   <depend>geometry_msgs</depend>
   <depend>liboctomap-dev</depend>
   <depend>libpcl-all-dev</depend>
