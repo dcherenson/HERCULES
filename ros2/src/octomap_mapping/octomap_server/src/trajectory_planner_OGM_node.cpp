@@ -86,7 +86,7 @@ public:
         grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
         occupancy_grid_.assign(grid_width_ * grid_height_, 0);
 
-        // load waypoints for each robot from the json file
+        // load vehicle parameters from the json file
         std::ifstream settings_ifs(settings_file_);
         if (!settings_ifs.is_open())
         {
@@ -105,29 +105,46 @@ public:
             }
             settings_ifs.close();
 
-            // Use the robot_name_ (already loaded) to access the proper section.
-            if (settings_json.contains("Vehicles") && settings_json["Vehicles"].contains(robot_name_))
+            if (settings_json.contains("Vehicles"))
             {
-                auto vehicle_data = settings_json["Vehicles"][robot_name_];
-                if (vehicle_data.contains("Checkpoints") && vehicle_data["Checkpoints"].is_array())
+                for (auto &[veh_name, veh_data] : settings_json["Vehicles"].items())
                 {
-                    for (const auto &checkpoint : vehicle_data["Checkpoints"])
+                    VehicleInfo info;
+                    info.name = veh_name;
+                    info.start_x = veh_data.value("X", 0.0);
+                    info.start_y = veh_data.value("Y", 0.0);
+                    info.start_z = veh_data.value("Z", 0.0);
+                    info.start_yaw = veh_data.value("Yaw", 0.0);
+                    info.trajectory_length = veh_data.value("TrajectoryLength", trajectory_length_); // fallback if missing
+                    if (veh_data.contains("Checkpoints") && veh_data["Checkpoints"].is_array())
                     {
-                        double cx = checkpoint.value("x", 0.0);
-                        double cy = checkpoint.value("y", 0.0);
-                        double cz = checkpoint.value("z", 0.0);
-                        provided_waypoints_.push_back(std::make_tuple(cx, cy, cz));
+                        for (const auto &checkpoint : veh_data["Checkpoints"])
+                        {
+                            double cx = checkpoint.value("x", 0.0);
+                            double cy = checkpoint.value("y", 0.0);
+                            double cz = checkpoint.value("z", 0.0);
+                            info.checkpoints.push_back(std::make_tuple(cx, cy, cz));
+                        }
                     }
-                    RCLCPP_INFO(this->get_logger(), "Loaded %zu checkpoints from settings file for %s", provided_waypoints_.size(), robot_name_.c_str());
+                    vehicles_.push_back(info);
                 }
-                else
+                // Sort vehicles_ by the numeric part of their names (e.g., Husky1, Husky2, ...)
+                std::sort(vehicles_.begin(), vehicles_.end(), [](const VehicleInfo &a, const VehicleInfo &b)
+                          {
+            auto extractNumber = [](const std::string& s) -> int {
+                std::string num;
+                for (char c : s)
                 {
-                    RCLCPP_WARN(this->get_logger(), "No valid Checkpoints array found for %s", robot_name_.c_str());
+                    if (std::isdigit(c))
+                        num.push_back(c);
                 }
+                return num.empty() ? 0 : std::stoi(num);
+            };
+            return extractNumber(a.name) < extractNumber(b.name); });
             }
             else
             {
-                RCLCPP_WARN(this->get_logger(), "Vehicle %s not found in settings file", robot_name_.c_str());
+                RCLCPP_WARN(this->get_logger(), "No Vehicles section found in settings file");
             }
         }
 
@@ -137,8 +154,8 @@ public:
             std::bind(&TrajectoryPlanner::occupancy_grid_callback, this, std::placeholders::_1));
 
         // Publishers.
-        path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
-        marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/trajectory_marker", 10);
+        // path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
+        // marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/trajectory_marker", 10);
 
         // Timer.
         timer_ = this->create_wall_timer(1s, std::bind(&TrajectoryPlanner::timer_callback, this));
@@ -167,6 +184,23 @@ private:
     std::string robot_name_;
     bool trajectory_saved_ = false;
 
+    // For storing trajectories for each robot.
+    std::map<std::string, std::vector<std::tuple<double, double, double, double>>> plannedTrajectories_;
+
+    // A copy of the original occupancy grid that gets updated as trajectories are planned.
+    std::vector<int8_t> dynamic_occupancy_grid_;
+    std::map<std::string, rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr> trajectory_publishers_;
+    std::map<std::string, rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr> marker_publishers_;
+
+    struct VehicleInfo
+    {
+        std::string name;
+        double trajectory_length;
+        double start_x, start_y, start_z, start_yaw;
+        std::vector<std::tuple<double, double, double>> checkpoints;
+    };
+    std::vector<VehicleInfo> vehicles_;
+
     // Starting point.
     double start_x_;
     double start_y_;
@@ -189,8 +223,8 @@ private:
 
     // ROS interfaces.
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
+    // rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    // rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     // Random generators.
@@ -629,7 +663,7 @@ private:
             int max_iterations = 5000;
             bool reached = false;
             int goal_index = -1;
-            double dt = 0.2;                 // time step for propagation (tune as needed)
+            double dt = 1.0;                 // time step for propagation (tune as needed)
             double v = max_linear_velocity_; // use robot's speed
 
             for (int iter = 0; iter < max_iterations; iter++)
@@ -779,7 +813,7 @@ private:
     // ------------------------------------------------------------------------
 
     // Publish trajectory as a Path and visualization Marker.
-    void publish_trajectory(const std::vector<std::tuple<double, double, double, double>> &traj)
+    /* void publish_trajectory(const std::vector<std::tuple<double, double, double, double>> &traj)
     {
         auto now = this->now();
         nav_msgs::msg::Path path_msg;
@@ -819,7 +853,7 @@ private:
             marker.points.push_back(p);
         }
         marker_pub_->publish(marker);
-    }
+    } */
 
     // Save trajectory to file.
     void save_trajectory_to_file(const std::vector<std::tuple<double, double, double, double>> &traj)
@@ -841,6 +875,137 @@ private:
         RCLCPP_INFO(this->get_logger(), "Trajectory saved to %s", output_file_path_.c_str());
     }
 
+    void update_dynamic_occupancy_grid(const std::vector<std::tuple<double, double, double, double>> &traj)
+    {
+        double inflation = 0.5; // 0.5 m inflation radius
+        int infl_cells = static_cast<int>(std::ceil(inflation / grid_resolution_));
+
+        // For each waypoint in the trajectory, update the dynamic grid.
+        for (const auto &pt : traj)
+        {
+            double x = std::get<0>(pt);
+            double y = std::get<1>(pt);
+            // Convert world coordinates to grid indices.
+            int cell_x = static_cast<int>(std::floor((x - grid_origin_x_) / grid_resolution_));
+            int cell_y = static_cast<int>(std::floor((y - grid_origin_y_) / grid_resolution_));
+            for (int dx = -infl_cells; dx <= infl_cells; ++dx)
+            {
+                for (int dy = -infl_cells; dy <= infl_cells; ++dy)
+                {
+                    int nx = cell_x + dx;
+                    int ny = cell_y + dy;
+                    if (nx >= 0 && nx < grid_width_ && ny >= 0 && ny < grid_height_)
+                    {
+                        // Mark the cell as occupied.
+                        dynamic_occupancy_grid_[ny * grid_width_ + nx] = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    void plan_all_trajectories()
+    {
+        // Initialize dynamic_occupancy_grid_ as a copy of the original occupancy_grid_
+        dynamic_occupancy_grid_ = occupancy_grid_;
+
+        // Loop over vehicles in sorted order (vehicles_ is already populated and sorted).
+        for (const auto &veh : vehicles_)
+        {
+            // Set current planning parameters from the vehicle info.
+            robot_name_ = veh.name;
+            trajectory_length_ = veh.trajectory_length;
+            start_x_ = veh.start_x;
+            start_y_ = veh.start_y;
+            start_z_ = veh.start_z;
+            start_yaw_deg_ = veh.start_yaw;
+            start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
+            provided_waypoints_ = veh.checkpoints;
+
+            // Reset the current trajectory.
+            trajectory_.clear();
+
+            // Plan the trajectory for this vehicle.
+            trajectory_ = plan_trajectory();
+
+            // Save the planned trajectory.
+            plannedTrajectories_[veh.name] = trajectory_;
+
+            // Update the dynamic occupancy grid with this trajectory.
+            // (This function “inflates” the trajectory by 0.5 m in space.
+            // In a more complete implementation, you would also store time intervals
+            // to allow overlapping spatial areas if times do not conflict.)
+            update_dynamic_occupancy_grid(trajectory_);
+
+            // Publish this vehicle's trajectory on a topic named "<veh.name>_trajectory"
+            publish_trajectory_for_robot(veh.name, trajectory_);
+
+            // Publish checkpoint markers as large green spheres
+            publish_checkpoints_for_robot(veh.name, veh.checkpoints);
+        }
+    }
+
+    void publish_trajectory_for_robot(const std::string &robot,
+                                      const std::vector<std::tuple<double, double, double, double>> &traj)
+    {
+        auto now = this->now();
+        nav_msgs::msg::Path path_msg;
+        path_msg.header.stamp = now;
+        path_msg.header.frame_id = "map";
+
+        for (const auto &pt : traj)
+        {
+            geometry_msgs::msg::PoseStamped pose;
+            pose.header = path_msg.header;
+            pose.pose.position.x = std::get<0>(pt);
+            pose.pose.position.y = std::get<1>(pt);
+            pose.pose.position.z = std::get<2>(pt);
+            pose.pose.orientation.w = 1.0;
+            path_msg.poses.push_back(pose);
+        }
+
+        // Check if a publisher already exists for this robot; if not, create one.
+        if (trajectory_publishers_.find(robot) == trajectory_publishers_.end())
+        {
+            trajectory_publishers_[robot] = this->create_publisher<nav_msgs::msg::Path>(robot + "_trajectory", 10);
+        }
+        trajectory_publishers_[robot]->publish(path_msg);
+    }
+
+    void publish_checkpoints_for_robot(const std::string &robot,
+                                       const std::vector<std::tuple<double, double, double>> &checkpoints)
+    {
+        visualization_msgs::msg::Marker marker;
+        marker.header.stamp = this->now();
+        marker.header.frame_id = "map";
+        marker.ns = robot + "_checkpoints";
+        marker.id = 1;
+        marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.scale.x = 2.0;
+        marker.scale.y = 2.0;
+        marker.scale.z = 2.0;
+        marker.color.a = 1.0;
+        marker.color.r = 0.0;
+        marker.color.g = 1.0;
+        marker.color.b = 0.0;
+
+        for (const auto &pt : checkpoints)
+        {
+            geometry_msgs::msg::Point p;
+            p.x = std::get<0>(pt);
+            p.y = std::get<1>(pt);
+            p.z = std::get<2>(pt);
+            marker.points.push_back(p);
+        }
+        // Use or create a persistent publisher for this robot.
+        if (marker_publishers_.find(robot) == marker_publishers_.end())
+        {
+            marker_publishers_[robot] = this->create_publisher<visualization_msgs::msg::Marker>(robot + "_checkpoints", 10);
+        }
+        marker_publishers_[robot]->publish(marker);
+    }
+
     // Timer callback: plan (if not already done) and publish the trajectory and waypoints.
     void timer_callback()
     {
@@ -849,43 +1014,10 @@ private:
             RCLCPP_WARN(this->get_logger(), "No occupancy grid received yet; skipping trajectory planning.");
             return;
         }
-        if (trajectory_.empty())
-        {
-            trajectory_ = plan_trajectory();
-        }
-        publish_trajectory(trajectory_);
-        if (!trajectory_saved_)
-        {
-            save_trajectory_to_file(trajectory_);
-            trajectory_saved_ = true;
-        }
-        // Publish waypoints as large markers if provided.
-        if (!provided_waypoints_.empty())
-        {
-            visualization_msgs::msg::Marker waypoint_marker;
-            waypoint_marker.header.stamp = this->now();
-            waypoint_marker.header.frame_id = "map";
-            waypoint_marker.ns = "waypoints";
-            waypoint_marker.id = 1;
-            waypoint_marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
-            waypoint_marker.action = visualization_msgs::msg::Marker::ADD;
-            waypoint_marker.scale.x = 2.0;
-            waypoint_marker.scale.y = 2.0;
-            waypoint_marker.scale.z = 2.0;
-            waypoint_marker.color.a = 1.0;
-            waypoint_marker.color.r = 0.0;
-            waypoint_marker.color.g = 1.0;
-            waypoint_marker.color.b = 0.0;
-            for (const auto &pt : provided_waypoints_)
-            {
-                geometry_msgs::msg::Point p;
-                p.x = std::get<0>(pt);
-                p.y = std::get<1>(pt);
-                p.z = std::get<2>(pt);
-                waypoint_marker.points.push_back(p);
-            }
-            marker_pub_->publish(waypoint_marker);
-        }
+        // Plan trajectories for all vehicles sequentially.
+        plan_all_trajectories();
+        // Optionally, cancel the timer if you plan only once.
+        timer_->cancel();
     }
 };
 
