@@ -53,9 +53,6 @@ public:
         // New parameter for obstacle inflation (meters).
         this->declare_parameter("inflation_radius", 5.0);
 
-        // file with required waypoints.
-        // this->declare_parameter("waypoints_file", "/home/sgarimella34/multi-robot-coordination/trajectory_data/checkpoints.txt");
-
         this->declare_parameter("settings_file", "/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json");
         std::string settings_file_;
 
@@ -89,25 +86,7 @@ public:
         grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
         occupancy_grid_.assign(grid_width_ * grid_height_, 0);
 
-        // Attempt to load provided waypoints from txt file
-        /* if (!waypoints_file_.empty()) {
-          std::ifstream infile(waypoints_file_);
-          if (!infile.is_open()) {
-            RCLCPP_ERROR(this->get_logger(), "Failed to open waypoints file: %s", waypoints_file_.c_str());
-          } else {
-            std::string line;
-            while (std::getline(infile, line)) {
-              std::istringstream iss(line);
-              double wx, wy, wz;
-              if (iss >> wx >> wy >> wz) {
-                provided_waypoints_.push_back(std::make_tuple(wx, wy, wz));
-              }
-            }
-            infile.close();
-            RCLCPP_INFO(this->get_logger(), "Loaded %zu provided waypoints.", provided_waypoints_.size());
-          }
-        } */
-
+        // load waypoints for each robot from the json file
         std::ifstream settings_ifs(settings_file_);
         if (!settings_ifs.is_open())
         {
@@ -203,7 +182,6 @@ private:
     double inflation_radius_;
 
     // Waypoints.
-    // std::string waypoints_file_;
     std::vector<std::tuple<double, double, double>> provided_waypoints_;
 
     // Flag to ensure the occupancy grid callback runs only once.
@@ -355,7 +333,7 @@ private:
         RCLCPP_INFO(this->get_logger(), "Occupancy grid updated from occupancy grid map.");
     }
 
-    // Bresenham algorithm (unchanged).
+    // Bresenham algorithm
     std::vector<std::pair<int, int>> bresenham(int x0, int y0, int x1, int y1)
     {
         std::vector<std::pair<int, int>> cells;
@@ -632,7 +610,7 @@ private:
             return seg;
         };
 
-        // Random segment planning (unchanged).
+        // Random segment planning
         auto plan_random_segment = [&](double remaining_length)
             -> std::vector<std::tuple<double, double, double, double>>
         {
