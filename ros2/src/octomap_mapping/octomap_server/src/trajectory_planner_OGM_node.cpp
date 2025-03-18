@@ -432,12 +432,18 @@ private:
                 {
                     double dist = std::sqrt(dx * dx + dy * dy) * grid_resolution_;
                     if (dist > effective_infl)
+                    {
                         continue;
+                    }
                     int nx = cx + dx, ny = cy + dy;
                     if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+                    {
                         continue;
-                    if (occupancy_grid_[ny * grid_width_ + nx] != 0)
+                    }
+                    if (dynamic_occupancy_grid_[ny * grid_width_ + nx] != 0)
+                    {
                         return false;
+                    }
                 }
             }
         }
@@ -514,7 +520,7 @@ private:
                     continue;
                 }
                 int n_idx = index(nx, ny);
-                if (occupancy_grid_[n_idx] != 0)
+                if (dynamic_occupancy_grid_[n_idx] != 0)
                 {
                     continue;
                 }
