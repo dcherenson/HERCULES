@@ -899,6 +899,10 @@ private:
             // Publish the updated occupancy grid.
             publish_updated_occupancy_grid();
 
+            // *** NEW: Update output file path based on vehicle name and save trajectory ***
+            output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+            save_trajectory_to_file(seg_pair.second);
+
             // Save and publish the sparse trajectory.
             plannedTrajectories_[veh.name] = seg_pair.second;
             publish_trajectory_for_robot(veh.name, seg_pair.second);
