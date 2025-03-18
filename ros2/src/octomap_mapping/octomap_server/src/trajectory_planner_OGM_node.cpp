@@ -196,6 +196,7 @@ private:
     std::map<std::string, rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr> trajectory_publishers_;
     std::map<std::string, rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr> marker_publishers_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr updated_ogm_pub_;
+    std::vector<double> dynamic_time_grid_;
 
     struct VehicleInfo
     {
@@ -345,23 +346,23 @@ private:
         // Store the original occupancy grid message.
         original_ogm_ = *msg;
 
-        // Use the message's resolution, but define our planning grid using your own square_size_.
+        // Define your planning grid using your own parameters.
         grid_resolution_ = msg->info.resolution;
         grid_width_ = static_cast<int>(square_size_ / grid_resolution_);
         grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
-        // Here we set our planning grid origin to be centered (as before)
         grid_origin_x_ = -square_size_ / 2.0;
         grid_origin_y_ = -square_size_ / 2.0;
 
         occupancy_grid_.resize(grid_width_ * grid_height_, 0);
-        // Map each planning grid cell to a corresponding cell in the occupancy grid message.
+        dynamic_time_grid_.resize(grid_width_ * grid_height_, std::numeric_limits<double>::infinity());
+
+        // Map each planning cell to the occupancy grid message.
         for (int j = 0; j < grid_height_; j++)
         {
             for (int i = 0; i < grid_width_; i++)
             {
                 double world_x = grid_origin_x_ + (i + 0.5) * grid_resolution_;
                 double world_y = grid_origin_y_ + (j + 0.5) * grid_resolution_;
-                // Convert world coordinates to occupancy grid message indices.
                 int cell_x = static_cast<int>(std::floor((world_x - msg->info.origin.position.x) / msg->info.resolution));
                 int cell_y = static_cast<int>(std::floor((world_y - msg->info.origin.position.y) / msg->info.resolution));
                 int idx = j * grid_width_ + i;
@@ -369,12 +370,15 @@ private:
                     cell_y >= 0 && cell_y < static_cast<int>(msg->info.height))
                 {
                     int msg_index = cell_y * msg->info.width + cell_x;
-                    // Mark as free (0) if the message value is 0, else as an obstacle (100).
+                    // Use 0 for free, nonzero for obstacles.
                     occupancy_grid_[idx] = (msg->data[msg_index] == 0 ? 0 : 100);
+                    // For obstacles, mark the time as -1; free cells get infinity.
+                    dynamic_time_grid_[idx] = (occupancy_grid_[idx] != 0 ? -1.0 : std::numeric_limits<double>::infinity());
                 }
                 else
                 {
                     occupancy_grid_[idx] = 0;
+                    dynamic_time_grid_[idx] = std::numeric_limits<double>::infinity();
                 }
             }
         }
@@ -420,29 +424,40 @@ private:
         int y1 = static_cast<int>((std::get<1>(p2) - grid_origin_y_) / grid_resolution_);
         auto line_cells = bresenham(x0, y0, x1, y1);
 
+        double t1 = std::get<3>(p1);
+        double t2 = std::get<3>(p2);
+        int N = line_cells.size();
+        double time_tolerance = 3.0; // increased tolerance to 3 seconds
+
         double effective_infl = infl + grid_resolution_ / 2.0;
         int infl_cells = static_cast<int>(std::ceil(effective_infl / grid_resolution_));
 
-        for (auto cell : line_cells)
+        for (size_t i = 0; i < line_cells.size(); i++)
         {
-            int cx = cell.first, cy = cell.second;
+            int cx = line_cells[i].first;
+            int cy = line_cells[i].second;
+            // Compute expected time for this cell (linear interpolation)
+            double f = (N > 1) ? static_cast<double>(i) / (N - 1) : 0.0;
+            double expected_time = t1 + f * (t2 - t1);
             for (int dx = -infl_cells; dx <= infl_cells; ++dx)
             {
                 for (int dy = -infl_cells; dy <= infl_cells; ++dy)
                 {
                     double dist = std::sqrt(dx * dx + dy * dy) * grid_resolution_;
                     if (dist > effective_infl)
-                    {
                         continue;
-                    }
                     int nx = cx + dx, ny = cy + dy;
                     if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
-                    {
                         continue;
-                    }
-                    if (dynamic_occupancy_grid_[ny * grid_width_ + nx] != 0)
-                    {
+                    int idx = ny * grid_width_ + nx;
+                    // Permanent obstacles: timestamp == -1 means always blocked.
+                    if (dynamic_time_grid_[idx] == -1.0)
                         return false;
+                    // If the cell is scheduled for occupancy, allow passage only if the difference is large.
+                    if (dynamic_time_grid_[idx] != std::numeric_limits<double>::infinity())
+                    {
+                        if (std::fabs(dynamic_time_grid_[idx] - expected_time) < time_tolerance)
+                            return false;
                     }
                 }
             }
@@ -860,22 +875,18 @@ private:
 
     void update_dynamic_occupancy_grid(const std::vector<std::tuple<double, double, double, double>> &traj)
     {
-        // Assume dynamic occupancy grid is already a copy of occupancy grid.
-        // Set the inflation radius (in meters)
+        // Set the inflation radius in meters.
         double inflation = 0.5;
-        // Compute the inflation in number of cells
         int infl_cells = static_cast<int>(std::ceil(inflation / grid_resolution_));
 
-        // For each waypoint in the trajectory, inflate the area around it.
+        // For each waypoint in the trajectory, update neighboring cells.
         for (const auto &pt : traj)
         {
             double x = std::get<0>(pt);
             double y = std::get<1>(pt);
-            // Convert world coordinates to grid indices.
+            double t = std::get<3>(pt);
             int cell_x = static_cast<int>(std::floor((x - grid_origin_x_) / grid_resolution_));
             int cell_y = static_cast<int>(std::floor((y - grid_origin_y_) / grid_resolution_));
-
-            // Loop over the neighboring cells
             for (int dx = -infl_cells; dx <= infl_cells; ++dx)
             {
                 for (int dy = -infl_cells; dy <= infl_cells; ++dy)
@@ -884,15 +895,15 @@ private:
                     int ny = cell_y + dy;
                     if (nx >= 0 && nx < grid_width_ && ny >= 0 && ny < grid_height_)
                     {
-                        // Compute the Euclidean distance from the waypoint (in meters)
                         double distance = std::sqrt((dx * grid_resolution_) * (dx * grid_resolution_) +
                                                     (dy * grid_resolution_) * (dy * grid_resolution_));
                         if (distance <= inflation)
                         {
                             int index = ny * grid_width_ + nx;
-                            // Only mark free cells (0) as inflated (50)
-                            if (dynamic_occupancy_grid_[index] == 0)
+                            // Only update if the cell is free (timestamp == infinity).
+                            if (dynamic_time_grid_[index] == std::numeric_limits<double>::infinity())
                             {
+                                dynamic_time_grid_[index] = t; // store the predicted time of occupancy
                                 dynamic_occupancy_grid_[index] = 50;
                             }
                         }
