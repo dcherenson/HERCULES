@@ -7,7 +7,7 @@
         output="screen">
         
         <!-- Define parameters -->
-        <param name="slice_altitude" type="float" value="0.5"/>
+        <param name="slice_altitude" type="float" value="35.0"/>
         <param name="inflation_radius" type="float" value="2.5"/>
 
     </node>

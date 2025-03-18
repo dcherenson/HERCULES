@@ -862,7 +862,12 @@ private:
     {
         // Assume dynamic occupancy grid is already a copy of occupancy grid.
         // Set the inflation radius (in meters)
-        double inflation = 0.5;
+        double inflation = 0.5; // if set via parameter, this value may be 0.0
+        if (inflation <= 0.0)
+        {
+            // Do nothing if inflation is 0.
+            return;
+        }
         // Compute the inflation in number of cells
         int infl_cells = static_cast<int>(std::ceil(inflation / grid_resolution_));
 
