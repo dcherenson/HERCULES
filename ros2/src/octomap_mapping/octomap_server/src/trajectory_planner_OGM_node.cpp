@@ -341,27 +341,44 @@ private:
             RCLCPP_WARN(this->get_logger(), "Received empty occupancy grid; waiting for valid data.");
             return;
         }
-        // Store the full original OGM message.
-        original_ogm_ = *msg;
-        // Use the message's info fields for our planning grid.
-        grid_resolution_ = msg->info.resolution;
-        grid_width_ = msg->info.width;
-        grid_height_ = msg->info.height;
-        grid_origin_x_ = msg->info.origin.position.x;
-        grid_origin_y_ = msg->info.origin.position.y;
 
-        // Resize our occupancy_grid_ vector to match the original OGM.
+        // Store the original occupancy grid message.
+        original_ogm_ = *msg;
+
+        // Use the message's resolution, but define our planning grid using your own square_size_.
+        grid_resolution_ = msg->info.resolution;
+        grid_width_ = static_cast<int>(square_size_ / grid_resolution_);
+        grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
+        // Here we set our planning grid origin to be centered (as before)
+        grid_origin_x_ = -square_size_ / 2.0;
+        grid_origin_y_ = -square_size_ / 2.0;
+
         occupancy_grid_.resize(grid_width_ * grid_height_, 0);
-        // Copy the data exactly (marking obstacles as 100 and free as 0).
+        // Map each planning grid cell to a corresponding cell in the occupancy grid message.
         for (int j = 0; j < grid_height_; j++)
         {
             for (int i = 0; i < grid_width_; i++)
             {
+                double world_x = grid_origin_x_ + (i + 0.5) * grid_resolution_;
+                double world_y = grid_origin_y_ + (j + 0.5) * grid_resolution_;
+                // Convert world coordinates to occupancy grid message indices.
+                int cell_x = static_cast<int>(std::floor((world_x - msg->info.origin.position.x) / msg->info.resolution));
+                int cell_y = static_cast<int>(std::floor((world_y - msg->info.origin.position.y) / msg->info.resolution));
                 int idx = j * grid_width_ + i;
-                // Assuming the original OGM uses 0 for free and nonzero for obstacles.
-                occupancy_grid_[idx] = (msg->data[idx] == 0 ? 0 : 100);
+                if (cell_x >= 0 && cell_x < static_cast<int>(msg->info.width) &&
+                    cell_y >= 0 && cell_y < static_cast<int>(msg->info.height))
+                {
+                    int msg_index = cell_y * msg->info.width + cell_x;
+                    // Mark as free (0) if the message value is 0, else as an obstacle (100).
+                    occupancy_grid_[idx] = (msg->data[msg_index] == 0 ? 0 : 100);
+                }
+                else
+                {
+                    occupancy_grid_[idx] = 0;
+                }
             }
         }
+
         occupancy_grid_received_ = true;
         RCLCPP_INFO(this->get_logger(), "Occupancy grid updated from occupancy grid map.");
     }
@@ -914,8 +931,20 @@ private:
     {
         nav_msgs::msg::OccupancyGrid updated_ogm_msg;
         updated_ogm_msg.header.stamp = this->now();
-        updated_ogm_msg.header.frame_id = original_ogm_.header.frame_id; // use original frame
-        updated_ogm_msg.info = original_ogm_.info;                       // copy the entire info (width, height, resolution, origin)
+        // Set the frame_id explicitly
+        updated_ogm_msg.header.frame_id = "map";
+
+        // Update the info to match your planning grid dimensions.
+        updated_ogm_msg.info.resolution = grid_resolution_;
+        updated_ogm_msg.info.width = grid_width_;
+        updated_ogm_msg.info.height = grid_height_;
+
+        // Set the origin to your planning grid's origin.
+        updated_ogm_msg.info.origin.position.x = grid_origin_x_;
+        updated_ogm_msg.info.origin.position.y = grid_origin_y_;
+        updated_ogm_msg.info.origin.position.z = 0.0; // or set as needed
+
+        // Publish your updated occupancy grid data.
         updated_ogm_msg.data = dynamic_occupancy_grid_;
         updated_ogm_pub_->publish(updated_ogm_msg);
     }
