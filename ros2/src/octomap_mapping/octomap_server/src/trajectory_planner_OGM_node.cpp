@@ -51,7 +51,7 @@ public:
         this->declare_parameter("max_turn_angle_deg", 45.0); // max turn angle between consecutive waypoints in degrees
 
         // New parameter for obstacle inflation (meters).
-        this->declare_parameter("inflation_radius", 5.0);
+        this->declare_parameter("inflation_radius", 2.5);
 
         this->declare_parameter("settings_file", "/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json");
         std::string settings_file_;
@@ -497,7 +497,9 @@ private:
             int cx = current.x, cy = current.y;
             int c_idx = index(cx, cy);
             if (closed[c_idx])
+            {
                 continue;
+            }
             closed[c_idx] = true;
             if (cx == goal_x && cy == goal_y)
             {
@@ -508,12 +510,18 @@ private:
             {
                 int nx = cx + d.first, ny = cy + d.second;
                 if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+                {
                     continue;
+                }
                 int n_idx = index(nx, ny);
                 if (occupancy_grid_[n_idx] != 0)
+                {
                     continue;
+                }
                 if (closed[n_idx])
+                {
                     continue;
+                }
                 double step_cost = (d.first != 0 && d.second != 0) ? std::sqrt(2.0) : 1.0;
                 double tentative_g = g_cost[c_idx] + step_cost;
                 if (tentative_g < g_cost[n_idx])
@@ -846,7 +854,7 @@ private:
 
     void update_dynamic_occupancy_grid(const std::vector<std::tuple<double, double, double, double>> &traj)
     {
-        // Assume dynamic_occupancy_grid_ is already a copy of occupancy_grid_.
+        // Assume dynamic occupancy grid is already a copy of occupancy grid.
         // Set the inflation radius (in meters)
         double inflation = 0.5;
         // Compute the inflation in number of cells
@@ -890,7 +898,7 @@ private:
 
     void plan_all_trajectories()
     {
-        // Initialize dynamic_occupancy_grid_ as a copy of the original occupancy grid.
+        // Initialize dynamic occupancy grid as a copy of the original occupancy grid.
         dynamic_occupancy_grid_ = occupancy_grid_;
 
         // Loop over vehicles in sorted order.
