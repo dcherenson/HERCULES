@@ -154,8 +154,7 @@ public:
             std::bind(&TrajectoryPlanner::occupancy_grid_callback, this, std::placeholders::_1));
 
         // Publishers.
-        // path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
-        // marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/trajectory_marker", 10);
+        updated_ogm_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/updated_occupancy_grid", 10);
 
         // Timer.
         timer_ = this->create_wall_timer(1s, std::bind(&TrajectoryPlanner::timer_callback, this));
@@ -168,6 +167,11 @@ public:
     }
 
 private:
+    using TrajVec = std::vector<std::tuple<double, double, double, double>>;
+    using TrajPair = std::pair<TrajVec, TrajVec>; // first = dense version, second = sparse version
+
+    nav_msgs::msg::OccupancyGrid original_ogm_;
+
     // Parameters and variables.
     double z_height_;
     double trajectory_length_;
@@ -191,6 +195,7 @@ private:
     std::vector<int8_t> dynamic_occupancy_grid_;
     std::map<std::string, rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr> trajectory_publishers_;
     std::map<std::string, rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr> marker_publishers_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr updated_ogm_pub_;
 
     struct VehicleInfo
     {
@@ -223,8 +228,6 @@ private:
 
     // ROS interfaces.
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_;
-    // rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
-    // rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     // Random generators.
@@ -328,7 +331,6 @@ private:
     // Callback: update occupancy grid.
     void occupancy_grid_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
     {
-        // Only run this callback once after receiving a non-empty occupancy grid.
         if (occupancy_grid_received_)
         {
             RCLCPP_INFO(this->get_logger(), "Occupancy grid already received; ignoring new message.");
@@ -339,28 +341,25 @@ private:
             RCLCPP_WARN(this->get_logger(), "Received empty occupancy grid; waiting for valid data.");
             return;
         }
+        // Store the full original OGM message.
+        original_ogm_ = *msg;
+        // Use the message's info fields for our planning grid.
+        grid_resolution_ = msg->info.resolution;
+        grid_width_ = msg->info.width;
+        grid_height_ = msg->info.height;
+        grid_origin_x_ = msg->info.origin.position.x;
+        grid_origin_y_ = msg->info.origin.position.y;
 
-        std::fill(occupancy_grid_.begin(), occupancy_grid_.end(), 0);
+        // Resize our occupancy_grid_ vector to match the original OGM.
+        occupancy_grid_.resize(grid_width_ * grid_height_, 0);
+        // Copy the data exactly (marking obstacles as 100 and free as 0).
         for (int j = 0; j < grid_height_; j++)
         {
             for (int i = 0; i < grid_width_; i++)
             {
-                double world_x = grid_origin_x_ + (i + 0.5) * grid_resolution_;
-                double world_y = grid_origin_y_ + (j + 0.5) * grid_resolution_;
-                int cell_x = static_cast<int>(std::floor((world_x - msg->info.origin.position.x) / msg->info.resolution));
-                int cell_y = static_cast<int>(std::floor((world_y - msg->info.origin.position.y) / msg->info.resolution));
                 int idx = j * grid_width_ + i;
-                if (cell_x >= 0 && cell_x < static_cast<int>(msg->info.width) &&
-                    cell_y >= 0 && cell_y < static_cast<int>(msg->info.height))
-                {
-                    int msg_index = cell_y * msg->info.width + cell_x;
-                    int8_t occ_value = msg->data[msg_index];
-                    occupancy_grid_[idx] = (occ_value == 0 ? 0 : 1);
-                }
-                else
-                {
-                    occupancy_grid_[idx] = 0;
-                }
+                // Assuming the original OGM uses 0 for free and nonzero for obstacles.
+                occupancy_grid_[idx] = (msg->data[idx] == 0 ? 0 : 100);
             }
         }
         occupancy_grid_received_ = true;
@@ -533,15 +532,23 @@ private:
     // ------------------------------------------------------------------------
 
     // ---------------------- Trajectory Planning ----------------------
-    std::vector<std::tuple<double, double, double, double>> plan_trajectory()
+    std::pair<std::vector<std::tuple<double, double, double, double>>,
+              std::vector<std::tuple<double, double, double, double>>>
+    plan_trajectory()
     {
-        std::vector<std::tuple<double, double, double, double>> full_traj;
-        // Start from the initial state.
-        full_traj.push_back(std::make_tuple(start_x_, start_y_, start_z_, 0.0));
+        using TrajVec = std::vector<std::tuple<double, double, double, double>>;
+        // dense_traj will be used for updating the occupancy grid.
+        TrajVec dense_traj;
+        // sparse_traj will be used for publishing and saving.
+        TrajVec sparse_traj;
+
+        // Add initial state to both.
+        dense_traj.push_back(std::make_tuple(start_x_, start_y_, start_z_, 0.0));
+        sparse_traj.push_back(std::make_tuple(start_x_, start_y_, start_z_, 0.0));
 
         double curr_x = start_x_, curr_y = start_y_, curr_time = 0.0, curr_theta = start_yaw_;
 
-        // Helper: compute time increment for a segment.
+        // Lambda to compute time increment along a segment.
         auto compute_dt = [this](double x0, double y0, double x1, double y1, double current_theta) -> double
         {
             double dx = x1 - x0, dy = y1 - y0;
@@ -550,60 +557,28 @@ private:
             double new_heading = std::atan2(dy, dx);
             double dtheta = std::fabs(new_heading - current_theta);
             if (dtheta > M_PI)
-            {
                 dtheta = 2 * M_PI - dtheta;
-            }
             double t_angular = (dtheta / max_turn_angle_rad_) * t_linear;
             return t_linear + t_angular;
         };
 
-        // A* based segment planning from the current state to a forced waypoint.
-        // This version smooths the raw A* path, refines sharp turns, and then sparsifies waypoints for straight segments.
-        auto plan_segment = [&](double goal_x, double goal_y, double goal_z)
-            -> std::vector<std::tuple<double, double, double, double>>
+        // Lambda: plan a segment from current state to a given goal.
+        // It returns a pair: (dense segment, sparse segment)
+        auto plan_segment = [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double goal_x, double goal_y, double goal_z) -> std::pair<TrajVec, TrajVec>
         {
-            std::vector<std::tuple<double, double, double, double>> seg;
-            seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+            TrajVec seg_dense, seg_sparse;
+            // Start the segment at the current state.
+            seg_dense.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+            seg_sparse.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
 
+            // Build a raw path from A*
+            std::vector<std::pair<double, double>> raw_path;
+            raw_path.push_back({curr_x, curr_y});
             int start_cell_x = static_cast<int>(std::floor((curr_x - grid_origin_x_) / grid_resolution_));
             int start_cell_y = static_cast<int>(std::floor((curr_y - grid_origin_y_) / grid_resolution_));
             int goal_cell_x = static_cast<int>(std::floor((goal_x - grid_origin_x_) / grid_resolution_));
             int goal_cell_y = static_cast<int>(std::floor((goal_y - grid_origin_y_) / grid_resolution_));
-
-            // Validate cells.
-            if (start_cell_x < 0 || start_cell_x >= grid_width_ ||
-                start_cell_y < 0 || start_cell_y >= grid_height_)
-            {
-                RCLCPP_ERROR(this->get_logger(), "Start cell out of bounds in A* planning.");
-                return seg;
-            }
-            if (goal_cell_x < 0 || goal_cell_x >= grid_width_ ||
-                goal_cell_y < 0 || goal_cell_y >= grid_height_)
-            {
-                RCLCPP_ERROR(this->get_logger(), "Goal cell out of bounds in A* planning.");
-                return seg;
-            }
-            if (occupancy_grid_[start_cell_y * grid_width_ + start_cell_x] != 0)
-            {
-                RCLCPP_ERROR(this->get_logger(), "Start cell is occupied in A* planning.");
-                return seg;
-            }
-            if (occupancy_grid_[goal_cell_y * grid_width_ + goal_cell_x] != 0)
-            {
-                RCLCPP_ERROR(this->get_logger(), "Goal cell is occupied in A* planning.");
-                return seg;
-            }
-
             auto path_cells = a_star(start_cell_x, start_cell_y, goal_cell_x, goal_cell_y);
-            if (path_cells.empty())
-            {
-                RCLCPP_ERROR(this->get_logger(), "A* failed to find a path to waypoint (%.2f, %.2f, %.2f)", goal_x, goal_y, goal_z);
-                return seg;
-            }
-
-            // Convert grid cells to world coordinates.
-            std::vector<std::pair<double, double>> raw_path;
-            raw_path.push_back({curr_x, curr_y});
             for (size_t i = 1; i < path_cells.size(); ++i)
             {
                 int cell_x = path_cells[i].first;
@@ -612,67 +587,79 @@ private:
                 double wy = grid_origin_y_ + (cell_y + 0.5) * grid_resolution_;
                 raw_path.push_back({wx, wy});
             }
-            // Apply initial smoothing.
+
+            // Smooth the raw path.
             auto smooth_path_result = smoothPath(raw_path, 50, 0.1);
-            // Further refine sharp turns. (Threshold set to 1.0 rad; repeat a few times.)
-            double turn_threshold = 1.0; // about 57 degrees
+            double turn_threshold = 1.0;
             auto refined_path = smooth_path_result;
             for (int iter = 0; iter < 5; ++iter)
             {
                 refined_path = refineSharpTurns(refined_path, turn_threshold);
             }
-            // Sparsify waypoints for nearly straight line segments.
-            auto sparsified_path = sparsifyPath(refined_path, 0.05);
 
-            double prev_x = sparsified_path.front().first;
-            double prev_y = sparsified_path.front().second;
-            double time_acc = curr_time;
-            double current_theta = curr_theta;
-
-            // Convert the sparsified (smoothed) points into trajectory waypoints.
-            for (size_t i = 1; i < sparsified_path.size(); ++i)
+            // Build the dense segment from the refined (unsparsified) path.
             {
-                double wx = sparsified_path[i].first;
-                double wy = sparsified_path[i].second;
-                double dt = compute_dt(prev_x, prev_y, wx, wy, current_theta);
-                time_acc += dt;
-                seg.push_back(std::make_tuple(wx, wy, start_z_, time_acc));
-                current_theta = std::atan2(wy - prev_y, wx - prev_x);
-                prev_x = wx;
-                prev_y = wy;
+                double prev_x = refined_path.front().first;
+                double prev_y = refined_path.front().second;
+                double time_acc = curr_time;
+                double current_theta = curr_theta;
+                // For each point in the refined path, add to the dense segment.
+                for (size_t i = 1; i < refined_path.size(); ++i)
+                {
+                    double wx = refined_path[i].first;
+                    double wy = refined_path[i].second;
+                    double dt_val = compute_dt(prev_x, prev_y, wx, wy, current_theta);
+                    time_acc += dt_val;
+                    seg_dense.push_back(std::make_tuple(wx, wy, start_z_, time_acc));
+                    current_theta = std::atan2(wy - prev_y, wx - prev_x);
+                    prev_x = wx;
+                    prev_y = wy;
+                }
             }
-            return seg;
+
+            // Build the sparse segment by applying sparsification.
+            {
+                auto sparsified_path = sparsifyPath(refined_path, 0.05);
+                double prev_x = sparsified_path.front().first;
+                double prev_y = sparsified_path.front().second;
+                double time_acc = curr_time;
+                double current_theta = curr_theta;
+                // For each point in the sparsified path, add to the sparse segment.
+                for (size_t i = 1; i < sparsified_path.size(); ++i)
+                {
+                    double wx = sparsified_path[i].first;
+                    double wy = sparsified_path[i].second;
+                    double dt_val = compute_dt(prev_x, prev_y, wx, wy, current_theta);
+                    time_acc += dt_val;
+                    seg_sparse.push_back(std::make_tuple(wx, wy, start_z_, time_acc));
+                    current_theta = std::atan2(wy - prev_y, wx - prev_x);
+                    prev_x = wx;
+                    prev_y = wy;
+                }
+            }
+            return std::make_pair(seg_dense, seg_sparse);
         };
 
-        // Random segment planning using a kinodynamic RRT with outward exploration
-        auto plan_random_segment = [&](double remaining_length)
-            -> std::vector<std::tuple<double, double, double, double>>
+        // Lambda: plan a random segment if the trajectory is too short.
+        auto plan_random_segment = [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double remaining_length) -> std::pair<TrajVec, TrajVec>
         {
-            // Define the node structure.
             struct Node
             {
                 double x, y, theta, time, cost;
                 int parent;
             };
-
             std::vector<Node> tree;
-            // Root: current state.
             Node root = {curr_x, curr_y, curr_theta, curr_time, 0.0, -1};
             tree.push_back(root);
-
             int max_iterations = 5000;
             bool reached = false;
             int goal_index = -1;
-            double dt = 1.0;                 // time step for propagation (tune as needed)
-            double v = max_linear_velocity_; // use robot's speed
-
+            double dt_val = 1.0;
+            double v = max_linear_velocity_;
             for (int iter = 0; iter < max_iterations; iter++)
             {
-                // Sample a random state (x_rand, y_rand) uniformly in the planning area.
                 double x_rand = x_dist_(rng_);
                 double y_rand = y_dist_(rng_);
-
-                // Find the nearest node in the tree (Euclidean distance).
                 int nearest_index = 0;
                 double min_dist = std::numeric_limits<double>::max();
                 for (int i = 0; i < tree.size(); i++)
@@ -687,47 +674,30 @@ private:
                     }
                 }
                 Node nearest = tree[nearest_index];
-
-                // Compute desired heading from nearest node to the random sample.
                 double theta_des = std::atan2(y_rand - nearest.y, x_rand - nearest.x);
                 double dtheta = theta_des - nearest.theta;
-                // Normalize dtheta to [-pi, pi].
                 while (dtheta > M_PI)
                     dtheta -= 2 * M_PI;
                 while (dtheta < -M_PI)
                     dtheta += 2 * M_PI;
-                // Clamp dtheta to the maximum turning rate.
                 if (dtheta > max_turn_angle_rad_)
                     dtheta = max_turn_angle_rad_;
                 if (dtheta < -max_turn_angle_rad_)
                     dtheta = -max_turn_angle_rad_;
                 double new_theta = nearest.theta + dtheta;
-
-                // Propagate the state using a simple unicycle model.
-                double step = v * dt; // distance traveled in dt
+                double step = v * dt_val;
                 double new_x = nearest.x + step * std::cos(new_theta);
                 double new_y = nearest.y + step * std::sin(new_theta);
-                double new_time = nearest.time + dt;
+                double new_time = nearest.time + dt_val;
                 double new_cost = nearest.cost + step;
-
-                // Check bounds.
                 if (new_x < grid_origin_x_ || new_x > grid_origin_x_ + square_size_ ||
                     new_y < grid_origin_y_ || new_y > grid_origin_y_ + square_size_)
-                {
                     continue;
-                }
-                // Collision check: ensure the segment from nearest node to new node is free.
                 if (!check_line_free_bresenham(std::make_tuple(nearest.x, nearest.y, start_z_, 0.0),
                                                std::make_tuple(new_x, new_y, start_z_, 0.0)))
-                {
                     continue;
-                }
-
-                // Create the new node and add it to the tree.
                 Node new_node = {new_x, new_y, new_theta, new_time, new_cost, nearest_index};
                 tree.push_back(new_node);
-
-                // Check if the accumulated cost meets the remaining trajectory length.
                 if (new_cost >= remaining_length)
                 {
                     reached = true;
@@ -735,16 +705,14 @@ private:
                     break;
                 }
             }
-
-            std::vector<std::tuple<double, double, double, double>> seg;
+            TrajVec dense_rand, sparse_rand;
             if (!reached)
             {
-                RCLCPP_ERROR(this->get_logger(), "Kinodynamic RRT failed to generate a segment of desired length after %d iterations", max_iterations);
-                seg.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
-                return seg;
+                RCLCPP_ERROR(this->get_logger(), "Kinodynamic RRT failed after %d iterations", max_iterations);
+                dense_rand.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+                sparse_rand.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+                return std::make_pair(dense_rand, sparse_rand);
             }
-
-            // Backtrack from the goal node to the root.
             std::vector<Node> path;
             int idx = goal_index;
             while (idx != -1)
@@ -753,17 +721,41 @@ private:
                 idx = tree[idx].parent;
             }
             std::reverse(path.begin(), path.end());
-
-            // Convert the nodes into the trajectory waypoint tuple.
             for (const auto &node : path)
             {
-                seg.push_back(std::make_tuple(node.x, node.y, start_z_, node.time));
+                dense_rand.push_back(std::make_tuple(node.x, node.y, start_z_, node.time));
             }
-            return seg;
+            // Generate sparse version from dense_rand by sparsifying the (x,y) points.
+            std::vector<std::pair<double, double>> densePoints;
+            for (const auto &pt : dense_rand)
+            {
+                densePoints.push_back({std::get<0>(pt), std::get<1>(pt)});
+            }
+            auto sparsified_points = sparsifyPath(densePoints, 0.05);
+            {
+                double prev_x = sparsified_points.front().first;
+                double prev_y = sparsified_points.front().second;
+                double time_acc = std::get<3>(dense_rand.front());
+                double current_theta = curr_theta;
+                sparse_rand.push_back(std::make_tuple(prev_x, prev_y, start_z_, time_acc));
+                for (size_t i = 1; i < sparsified_points.size(); i++)
+                {
+                    double wx = sparsified_points[i].first;
+                    double wy = sparsified_points[i].second;
+                    double dt_new = compute_dt(prev_x, prev_y, wx, wy, current_theta);
+                    time_acc += dt_new;
+                    sparse_rand.push_back(std::make_tuple(wx, wy, start_z_, time_acc));
+                    current_theta = std::atan2(wy - prev_y, wx - prev_x);
+                    prev_x = wx;
+                    prev_y = wy;
+                }
+            }
+            return std::make_pair(dense_rand, sparse_rand);
         };
 
-        double total_length = 0.0;
-        // If provided waypoints exist, plan segments via A*.
+        // Build the overall trajectory by merging segments.
+        std::vector<std::tuple<double, double, double, double>> dense_full_traj = dense_traj;
+        std::vector<std::tuple<double, double, double, double>> sparse_full_traj = sparse_traj;
         if (!provided_waypoints_.empty())
         {
             for (const auto &pt : provided_waypoints_)
@@ -771,89 +763,49 @@ private:
                 double goal_x = std::get<0>(pt);
                 double goal_y = std::get<1>(pt);
                 double goal_z = std::get<2>(pt);
-                auto seg = plan_segment(goal_x, goal_y, goal_z);
-                for (size_t i = 1; i < seg.size(); ++i)
-                    full_traj.push_back(seg[i]);
+                auto seg_pair = plan_segment(goal_x, goal_y, goal_z);
+                // Append segments (avoid duplicating the starting state).
+                dense_full_traj.insert(dense_full_traj.end(), seg_pair.first.begin() + 1, seg_pair.first.end());
+                sparse_full_traj.insert(sparse_full_traj.end(), seg_pair.second.begin() + 1, seg_pair.second.end());
                 curr_x = goal_x;
                 curr_y = goal_y;
-                curr_time = std::get<3>(seg.back());
-                if (seg.size() >= 2)
+                curr_time = std::get<3>(seg_pair.second.back());
+                if (seg_pair.second.size() >= 2)
                 {
-                    double prev_x = std::get<0>(seg[seg.size() - 2]);
-                    double prev_y = std::get<1>(seg[seg.size() - 2]);
+                    double prev_x = std::get<0>(seg_pair.second[seg_pair.second.size() - 2]);
+                    double prev_y = std::get<1>(seg_pair.second[seg_pair.second.size() - 2]);
                     curr_theta = std::atan2(goal_y - prev_y, goal_x - prev_x);
                 }
             }
         }
-        // Compute accumulated trajectory length.
-        for (size_t i = 1; i < full_traj.size(); i++)
+        // Compute total length from the sparse trajectory (for logging).
+        double total_length = 0.0;
+        for (size_t i = 1; i < sparse_full_traj.size(); i++)
         {
-            double dx = std::get<0>(full_traj[i]) - std::get<0>(full_traj[i - 1]);
-            double dy = std::get<1>(full_traj[i]) - std::get<1>(full_traj[i - 1]);
+            double dx = std::get<0>(sparse_full_traj[i]) - std::get<0>(sparse_full_traj[i - 1]);
+            double dy = std::get<1>(sparse_full_traj[i]) - std::get<1>(sparse_full_traj[i - 1]);
             total_length += std::sqrt(dx * dx + dy * dy);
         }
-        // If more trajectory is needed, add a random segment.
         if (total_length < trajectory_length_)
         {
             double remaining_length = trajectory_length_ - total_length;
-            auto seg = plan_random_segment(remaining_length);
-            for (size_t i = 1; i < seg.size(); ++i)
-                full_traj.push_back(seg[i]);
+            auto rand_seg_pair = plan_random_segment(remaining_length);
+            dense_full_traj.insert(dense_full_traj.end(), rand_seg_pair.first.begin() + 1, rand_seg_pair.first.end());
+            sparse_full_traj.insert(sparse_full_traj.end(), rand_seg_pair.second.begin() + 1, rand_seg_pair.second.end());
         }
         double final_length = 0.0;
-        for (size_t i = 1; i < full_traj.size(); i++)
+        for (size_t i = 1; i < sparse_full_traj.size(); i++)
         {
-            double dx = std::get<0>(full_traj[i]) - std::get<0>(full_traj[i - 1]);
-            double dy = std::get<1>(full_traj[i]) - std::get<1>(full_traj[i - 1]);
+            double dx = std::get<0>(sparse_full_traj[i]) - std::get<0>(sparse_full_traj[i - 1]);
+            double dy = std::get<1>(sparse_full_traj[i]) - std::get<1>(sparse_full_traj[i - 1]);
             final_length += std::sqrt(dx * dx + dy * dy);
         }
-        RCLCPP_INFO(this->get_logger(), "Planned trajectory length: %.2f m with %zu waypoints", final_length, full_traj.size());
-        return full_traj;
+        RCLCPP_INFO(this->get_logger(), "Planned trajectory length: %.2f m with %zu waypoints",
+                    final_length, sparse_full_traj.size());
+        return std::make_pair(dense_full_traj, sparse_full_traj);
     }
+
     // ------------------------------------------------------------------------
-
-    // Publish trajectory as a Path and visualization Marker.
-    /* void publish_trajectory(const std::vector<std::tuple<double, double, double, double>> &traj)
-    {
-        auto now = this->now();
-        nav_msgs::msg::Path path_msg;
-        path_msg.header.stamp = now;
-        path_msg.header.frame_id = "map";
-
-        for (const auto &pt : traj)
-        {
-            geometry_msgs::msg::PoseStamped pose;
-            pose.header = path_msg.header;
-            pose.pose.position.x = std::get<0>(pt);
-            pose.pose.position.y = std::get<1>(pt);
-            pose.pose.position.z = std::get<2>(pt);
-            pose.pose.orientation.w = 1.0;
-            path_msg.poses.push_back(pose);
-        }
-        path_pub_->publish(path_msg);
-
-        visualization_msgs::msg::Marker marker;
-        marker.header = path_msg.header;
-        marker.ns = "trajectory";
-        marker.id = 0;
-        marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
-        marker.action = visualization_msgs::msg::Marker::ADD;
-        marker.scale.x = 0.1;
-        marker.color.a = 1.0;
-        marker.color.r = 1.0;
-        marker.color.g = 0.0;
-        marker.color.b = 0.0;
-
-        for (const auto &pt : traj)
-        {
-            geometry_msgs::msg::Point p;
-            p.x = std::get<0>(pt);
-            p.y = std::get<1>(pt);
-            p.z = std::get<2>(pt);
-            marker.points.push_back(p);
-        }
-        marker_pub_->publish(marker);
-    } */
 
     // Save trajectory to file.
     void save_trajectory_to_file(const std::vector<std::tuple<double, double, double, double>> &traj)
@@ -877,10 +829,13 @@ private:
 
     void update_dynamic_occupancy_grid(const std::vector<std::tuple<double, double, double, double>> &traj)
     {
-        double inflation = 0.5; // 0.5 m inflation radius
+        // Assume dynamic_occupancy_grid_ is already a copy of occupancy_grid_.
+        // Set the inflation radius (in meters)
+        double inflation = 0.5;
+        // Compute the inflation in number of cells
         int infl_cells = static_cast<int>(std::ceil(inflation / grid_resolution_));
 
-        // For each waypoint in the trajectory, update the dynamic grid.
+        // For each waypoint in the trajectory, inflate the area around it.
         for (const auto &pt : traj)
         {
             double x = std::get<0>(pt);
@@ -888,6 +843,8 @@ private:
             // Convert world coordinates to grid indices.
             int cell_x = static_cast<int>(std::floor((x - grid_origin_x_) / grid_resolution_));
             int cell_y = static_cast<int>(std::floor((y - grid_origin_y_) / grid_resolution_));
+
+            // Loop over the neighboring cells
             for (int dx = -infl_cells; dx <= infl_cells; ++dx)
             {
                 for (int dy = -infl_cells; dy <= infl_cells; ++dy)
@@ -896,8 +853,18 @@ private:
                     int ny = cell_y + dy;
                     if (nx >= 0 && nx < grid_width_ && ny >= 0 && ny < grid_height_)
                     {
-                        // Mark the cell as occupied.
-                        dynamic_occupancy_grid_[ny * grid_width_ + nx] = 1;
+                        // Compute the Euclidean distance from the waypoint (in meters)
+                        double distance = std::sqrt((dx * grid_resolution_) * (dx * grid_resolution_) +
+                                                    (dy * grid_resolution_) * (dy * grid_resolution_));
+                        if (distance <= inflation)
+                        {
+                            int index = ny * grid_width_ + nx;
+                            // Only mark free cells (0) as inflated (50)
+                            if (dynamic_occupancy_grid_[index] == 0)
+                            {
+                                dynamic_occupancy_grid_[index] = 50;
+                            }
+                        }
                     }
                 }
             }
@@ -906,10 +873,10 @@ private:
 
     void plan_all_trajectories()
     {
-        // Initialize dynamic_occupancy_grid_ as a copy of the original occupancy_grid_
+        // Initialize dynamic_occupancy_grid_ as a copy of the original occupancy grid.
         dynamic_occupancy_grid_ = occupancy_grid_;
 
-        // Loop over vehicles in sorted order (vehicles_ is already populated and sorted).
+        // Loop over vehicles in sorted order.
         for (const auto &veh : vehicles_)
         {
             // Set current planning parameters from the vehicle info.
@@ -924,25 +891,29 @@ private:
 
             // Reset the current trajectory.
             trajectory_.clear();
+            // Plan the trajectory (dense and sparse versions)
+            auto seg_pair = plan_trajectory(); // returns pair: (dense, sparse)
 
-            // Plan the trajectory for this vehicle.
-            trajectory_ = plan_trajectory();
+            // Use the dense trajectory for occupancy grid update.
+            update_dynamic_occupancy_grid(seg_pair.first);
+            // Publish the updated occupancy grid.
+            publish_updated_occupancy_grid();
 
-            // Save the planned trajectory.
-            plannedTrajectories_[veh.name] = trajectory_;
-
-            // Update the dynamic occupancy grid with this trajectory.
-            // (This function “inflates” the trajectory by 0.5 m in space.
-            // In a more complete implementation, you would also store time intervals
-            // to allow overlapping spatial areas if times do not conflict.)
-            update_dynamic_occupancy_grid(trajectory_);
-
-            // Publish this vehicle's trajectory on a topic named "<veh.name>_trajectory"
-            publish_trajectory_for_robot(veh.name, trajectory_);
-
-            // Publish checkpoint markers as large green spheres
+            // Save and publish the sparse trajectory.
+            plannedTrajectories_[veh.name] = seg_pair.second;
+            publish_trajectory_for_robot(veh.name, seg_pair.second);
             publish_checkpoints_for_robot(veh.name, veh.checkpoints);
         }
+    }
+
+    void publish_updated_occupancy_grid()
+    {
+        nav_msgs::msg::OccupancyGrid updated_ogm_msg;
+        updated_ogm_msg.header.stamp = this->now();
+        updated_ogm_msg.header.frame_id = original_ogm_.header.frame_id; // use original frame
+        updated_ogm_msg.info = original_ogm_.info;                       // copy the entire info (width, height, resolution, origin)
+        updated_ogm_msg.data = dynamic_occupancy_grid_;
+        updated_ogm_pub_->publish(updated_ogm_msg);
     }
 
     void publish_trajectory_for_robot(const std::string &robot,
