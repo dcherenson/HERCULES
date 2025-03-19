@@ -56,7 +56,10 @@ public:
         this->declare_parameter("settings_file", "/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json");
         std::string settings_file_;
 
+        this->declare_parameter("trajectory_inflation_radius", 0.5);
+
         // Retrieve parameters.
+        this->get_parameter("trajectory_inflation_radius", trajectory_inflation_radius_);
         this->get_parameter("settings_file", settings_file_);
         this->get_parameter("z_height", z_height_);
         this->get_parameter("trajectory_length", trajectory_length_);
@@ -182,6 +185,7 @@ private:
     double grid_resolution_;
     double grid_origin_x_, grid_origin_y_;
     int grid_width_, grid_height_;
+    double trajectory_inflation_radius_;
     std::vector<int8_t> occupancy_grid_;
 
     std::string output_file_path_;
@@ -860,9 +864,8 @@ private:
 
     void update_dynamic_occupancy_grid(const std::vector<std::tuple<double, double, double, double>> &traj)
     {
-        // Assume dynamic occupancy grid is already a copy of occupancy grid.
-        // Set the inflation radius (in meters)
-        double inflation = 0.5; // if set via parameter, this value may be 0.0
+        // Use the trajectory inflation radius parameter instead of hardcoded 0.5
+        double inflation = trajectory_inflation_radius_;
         if (inflation <= 0.0)
         {
             // Do nothing if inflation is 0.

@@ -17,9 +17,13 @@ class MapPublisher(Node):
         # Declare parameters
         self.declare_parameter('yaml_file', '/home/sgarimella34/multi-robot-coordination/trajectory_data/occupancy_grid_maps/ogm_test1.yaml')
         self.declare_parameter('continuous_publish', True)
+        self.declare_parameter('ogm_topic', 'sliced_OGM_0m_altitude')  # Topic name parameter
+        self.declare_parameter('altitude', 0.0)  # New parameter for the OGM altitude
 
         yaml_file = self.get_parameter('yaml_file').value
         self.continuous_publish = self.get_parameter('continuous_publish').value
+        topic_name = self.get_parameter('ogm_topic').value  # Retrieve topic name parameter
+        altitude = self.get_parameter('altitude').value     # Retrieve altitude parameter
 
         # Load the YAML file
         try:
@@ -59,7 +63,7 @@ class MapPublisher(Node):
         self.occupancy_grid.info.height = map_image.shape[0]
         self.occupancy_grid.info.origin.position.x = float(origin[0])
         self.occupancy_grid.info.origin.position.y = float(origin[1])
-        self.occupancy_grid.info.origin.position.z = 0.0
+        self.occupancy_grid.info.origin.position.z = float(altitude)  # Use altitude parameter here
 
         # Convert yaw (origin[2]) to a quaternion for the map's orientation
         yaw = float(origin[2])
@@ -76,7 +80,7 @@ class MapPublisher(Node):
 
         for y in range(rows):
             for x in range(cols):
-                occ = map_image[y, x] / 255.0  # normalize to [0,1]
+                occ = map_image[y, x] / 255.0  # Normalize to [0,1]
                 if negate:
                     occ = 1.0 - occ
 
@@ -95,8 +99,8 @@ class MapPublisher(Node):
         data = np.flipud(data)
         self.occupancy_grid.data = data.flatten().tolist()
 
-        # Create a publisher on the topic "sliced_projected_map"
-        self.publisher = self.create_publisher(OccupancyGrid, 'sliced_projected_map', 10)
+        # Create a publisher on the topic specified by the parameter "ogm_topic"
+        self.publisher = self.create_publisher(OccupancyGrid, topic_name, 10)
 
         if self.continuous_publish:
             # Publish continuously every second
@@ -110,7 +114,7 @@ class MapPublisher(Node):
     def publish_map(self):
         self.occupancy_grid.header.stamp = self.get_clock().now().to_msg()
         self.publisher.publish(self.occupancy_grid)
-        self.get_logger().info("Published occupancy grid map on 'sliced_projected_map'")
+        self.get_logger().info("Published occupancy grid map on configured topic")
 
 def main(args=None):
     rclpy.init(args=args)
@@ -119,7 +123,7 @@ def main(args=None):
     if not node.continuous_publish:
         # If publishing once, exit before entering spin loop
         node.destroy_node()
-        if rclpy.ok():  # Ensure ROS is still running before shutting down
+        if rclpy.ok():
             rclpy.shutdown()
         return
 
@@ -130,8 +134,6 @@ def main(args=None):
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-
-
 
 if __name__ == '__main__':
     main()
