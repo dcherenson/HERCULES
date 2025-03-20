@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <algorithm>
+#include <string>
 
 #include "rclcpp/rclcpp.hpp"
 #include "octomap_msgs/msg/octomap.hpp"
@@ -20,7 +21,7 @@ public:
     // Declare and get parameters:
     slice_altitude_ = this->declare_parameter("slice_altitude", 0.0);
     inflation_radius_m_ = this->declare_parameter("inflation_radius", 2.5); // in meters
-    unknown_flag_ = this->declare_parameter("unknown_flag", false);         // if true, pre-fill grid with -1 (unknown)
+    unknown_flag_ = this->declare_parameter("unknown_flag", false);         // if true, pre-fill grid with unknown (10)
 
     // Subscribe to the octomap topic (adjust topic name as needed)
     subscription_ = this->create_subscription<octomap_msgs::msg::Octomap>(
@@ -85,9 +86,9 @@ private:
     grid.info.origin.position.z = 0.0;
     grid.info.origin.orientation.w = 1.0;
 
-    // Determine default cell value based on the unknown_flag.
-    // If unknown_flag is true, cells are pre-filled as unknown (-1), else free (0).
-    int8_t default_value = unknown_flag_ ? -1 : 0;
+    // Determine default cell value based on unknown_flag.
+    // If unknown_flag is true, cells are pre-filled as unknown (10), else free (0).
+    int8_t default_value = unknown_flag_ ? 10 : 0;
     grid.data.assign(width * height, default_value);
 
     // Gather data from leaves that are at the specified slice altitude.
@@ -177,7 +178,7 @@ private:
   nav_msgs::msg::OccupancyGrid::SharedPtr last_grid_;
   double slice_altitude_;
   double inflation_radius_m_;
-  bool unknown_flag_; // if true, mark unobserved/free space as unknown (-1); if false, as free (0)
+  bool unknown_flag_; // if true, mark unobserved/free space as unknown (10); if false, as free (0)
 };
 
 int main(int argc, char **argv)

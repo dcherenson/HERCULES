@@ -15,9 +15,9 @@ class MapPublisher(Node):
         super().__init__('custom_map_server')
         
         # Declare parameters
-        self.declare_parameter('yaml_file', '/home/sgarimella34/multi-robot-coordination/trajectory_data/occupancy_grid_maps/ogm_test1.yaml')
+        self.declare_parameter('yaml_file', '/home/sgarimella34/multi-robot-coordination/trajectory_data/occupancy_grid_maps/Ausenv_ground_OGM_0p5m.yaml')
         self.declare_parameter('continuous_publish', True)
-        self.declare_parameter('ogm_topic', 'sliced_OGM_0m_altitude')  # Topic name parameter
+        self.declare_parameter('ogm_topic', 'Ausenv_0mAlt_OGM_0p5m')  # Topic name parameter
         self.declare_parameter('altitude', 0.0)  # New parameter for the OGM altitude
 
         yaml_file = self.get_parameter('yaml_file').value
@@ -81,18 +81,22 @@ class MapPublisher(Node):
         for y in range(rows):
             for x in range(cols):
                 occ = map_image[y, x] / 255.0  # Normalize to [0,1]
+                
+                # If NEGATE in yaml, do this
                 if negate:
                     occ = 1.0 - occ
 
                 if occ > occupied_thresh:
-                    if occ >= 0.9:
-                        value = 0
+                    if (occ >= 0.88):
+                        value = -1
                     else:
                         value = 50
                 elif occ < free_thresh:
                     value = 100
                 else:
                     value = 100
+                
+                
                 data[y, x] = value
 
         # Flip the data vertically (ROS occupancy grids have origin at bottom-left).
