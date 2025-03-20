@@ -661,8 +661,8 @@ private:
             return std::make_pair(seg_dense, seg_sparse);
         };
 
-        // Lambda: plan a random segment if trajectory is too short (using kinodynamic RRT).
-        // Lambda: plan a random segment if trajectory is too short (using kinodynamic RRT).
+        // Lambda: plan a random segment if trajectory is too short (using kinodynamic RRT)
+        // with precomputation of unknown cell centers.
         auto plan_random_segment = [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double remaining_length)
             -> std::pair<std::vector<std::tuple<double, double, double, double>>,
                          std::vector<std::tuple<double, double, double, double>>>
@@ -682,45 +682,39 @@ private:
             double dt_val = 2.0; // you might consider reducing this for finer resolution
             double v = max_linear_velocity_;
 
+            // -------------------------------
+            // Precompute the unknown cell centers once.
+            std::vector<std::pair<double, double>> unknown_cells;
+            for (int j = 0; j < grid_height_; j++)
+            {
+                for (int i = 0; i < grid_width_; i++)
+                {
+                    int idx = j * grid_width_ + i;
+                    if (dynamic_occupancy_grid_[idx] == -1)
+                    {
+                        double wx = grid_origin_x_ + (i + 0.5) * grid_resolution_;
+                        double wy = grid_origin_y_ + (j + 0.5) * grid_resolution_;
+                        unknown_cells.push_back({wx, wy});
+                    }
+                }
+            }
+            // -------------------------------
+
             for (int iter = 0; iter < max_iterations; iter++)
             {
-                // ----- Biased Sampling toward Unknown Cells (Approach 1) -----
                 double bias_probability = 0.7; // Tune this probability as needed.
                 double sample_choice = std::uniform_real_distribution<double>(0.0, 1.0)(rng_);
                 double x_rand, y_rand;
-                if (sample_choice < bias_probability)
+                if (sample_choice < bias_probability && !unknown_cells.empty())
                 {
-                    // Gather centers of unknown cells.
-                    std::vector<std::pair<double, double>> unknown_cells;
-                    for (int j = 0; j < grid_height_; j++)
-                    {
-                        for (int i = 0; i < grid_width_; i++)
-                        {
-                            int idx = j * grid_width_ + i;
-                            if (dynamic_occupancy_grid_[idx] == -1)
-                            {
-                                double wx = grid_origin_x_ + (i + 0.5) * grid_resolution_;
-                                double wy = grid_origin_y_ + (j + 0.5) * grid_resolution_;
-                                unknown_cells.push_back({wx, wy});
-                            }
-                        }
-                    }
-                    if (!unknown_cells.empty())
-                    {
-                        int rand_idx = std::uniform_int_distribution<int>(0, unknown_cells.size() - 1)(rng_);
-                        x_rand = unknown_cells[rand_idx].first;
-                        y_rand = unknown_cells[rand_idx].second;
-                    }
-                    else
-                    {
-                        // Fallback to uniform sampling if no unknown cells are available.
-                        x_rand = x_dist_(rng_);
-                        y_rand = y_dist_(rng_);
-                    }
+                    // Sample from precomputed unknown cells.
+                    int rand_idx = std::uniform_int_distribution<int>(0, unknown_cells.size() - 1)(rng_);
+                    x_rand = unknown_cells[rand_idx].first;
+                    y_rand = unknown_cells[rand_idx].second;
                 }
                 else
                 {
-                    // Regular uniform sampling.
+                    // Fallback: regular uniform sampling.
                     x_rand = x_dist_(rng_);
                     y_rand = y_dist_(rng_);
                 }
@@ -760,14 +754,14 @@ private:
                 // Compute the pure distance cost (without any bonus)
                 double distance_cost = nearest.cost + step;
 
-                // Check that new_x, new_y are within bounds
+                // Check that new_x, new_y are within bounds.
                 if (new_x < grid_origin_x_ || new_x > grid_origin_x_ + square_size_ ||
                     new_y < grid_origin_y_ || new_y > grid_origin_y_ + square_size_)
                 {
                     continue;
                 }
 
-                // Check if the line from nearest to new point is free (unknown and free cells are allowed)
+                // Check if the line from nearest to the new point is free (unknown and free cells are allowed).
                 if (!check_line_free_bresenham(std::make_tuple(nearest.x, nearest.y, start_z_, 0.0),
                                                std::make_tuple(new_x, new_y, start_z_, 0.0)))
                 {
