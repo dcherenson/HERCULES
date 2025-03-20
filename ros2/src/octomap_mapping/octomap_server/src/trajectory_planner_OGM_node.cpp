@@ -205,6 +205,20 @@ private:
     // For drone planning – holds the drone OGM updated with both UGV and drone exploration.
     std::vector<int8_t> dynamic_drone_grid_;
 
+    // For ground OGM:
+    int original_width_ground_ = 0;
+    int original_height_ground_ = 0;
+    double original_origin_x_ground_ = 0.0;
+    double original_origin_y_ground_ = 0.0;
+    std::vector<int8_t> original_ogm_ground_;
+
+    // For drone OGM:
+    int original_width_drone_ = 0;
+    int original_height_drone_ = 0;
+    double original_origin_x_drone_ = 0.0;
+    double original_origin_y_drone_ = 0.0;
+    std::vector<int8_t> original_ogm_drone_;
+
     // -------------------- Parameters and Variables --------------------
     double z_height_;
     double trajectory_length_;
@@ -280,14 +294,25 @@ private:
             return;
         }
 
-        // Store the original occupancy grid message (if needed).
-        // Use the message's resolution and update planning grid.
+        // *** Store original map info for publishing ***
+        original_width_ground_ = msg->info.width;
+        original_height_ground_ = msg->info.height;
+        original_origin_x_ground_ = msg->info.origin.position.x;
+        original_origin_y_ground_ = msg->info.origin.position.y;
+        original_ogm_ground_ = msg->data;
+
+        // Use the message's resolution for both planning and publishing.
         grid_resolution_ = msg->info.resolution;
+
+        // *** Compute planning grid parameters based on square_size_ and the original map center ***
+        double map_center_x = original_origin_x_ground_ + (original_width_ground_ * grid_resolution_) / 2.0;
+        double map_center_y = original_origin_y_ground_ + (original_height_ground_ * grid_resolution_) / 2.0;
         grid_width_ = static_cast<int>(square_size_ / grid_resolution_);
         grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
-        grid_origin_x_ = -square_size_ / 2.0;
-        grid_origin_y_ = -square_size_ / 2.0;
+        grid_origin_x_ = map_center_x - square_size_ / 2.0;
+        grid_origin_y_ = map_center_y - square_size_ / 2.0;
 
+        // Build planning grid (using your current logic but with the planning grid parameters)
         occupancy_grid_ground_.resize(grid_width_ * grid_height_, 0);
         for (int j = 0; j < grid_height_; j++)
         {
@@ -306,7 +331,7 @@ private:
                 }
                 else
                 {
-                    occupancy_grid_ground_[idx] = -1; // or leave it as unknown
+                    occupancy_grid_ground_[idx] = -1; // unknown
                 }
             }
         }
@@ -327,13 +352,26 @@ private:
             RCLCPP_WARN(this->get_logger(), "Received empty drone occupancy grid; waiting for valid data.");
             return;
         }
-        // Update drone occupancy grid.
+
+        // --- Store original drone map info for publishing ---
+        original_width_drone_ = msg->info.width;
+        original_height_drone_ = msg->info.height;
+        original_origin_x_drone_ = msg->info.origin.position.x;
+        original_origin_y_drone_ = msg->info.origin.position.y;
+        original_ogm_drone_ = msg->data;
+
+        // --- Use the message's resolution for both planning and publishing ---
         grid_resolution_ = msg->info.resolution;
+
+        // --- Compute planning grid parameters based on square_size_ and the original map center ---
+        double map_center_x = original_origin_x_drone_ + (original_width_drone_ * grid_resolution_) / 2.0;
+        double map_center_y = original_origin_y_drone_ + (original_height_drone_ * grid_resolution_) / 2.0;
         grid_width_ = static_cast<int>(square_size_ / grid_resolution_);
         grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
-        grid_origin_x_ = -square_size_ / 2.0;
-        grid_origin_y_ = -square_size_ / 2.0;
+        grid_origin_x_ = map_center_x - square_size_ / 2.0;
+        grid_origin_y_ = map_center_y - square_size_ / 2.0;
 
+        // --- Build the planning grid from the original drone OGM ---
         occupancy_grid_drone_.resize(grid_width_ * grid_height_, 0);
         for (int j = 0; j < grid_height_; j++)
         {
@@ -352,7 +390,7 @@ private:
                 }
                 else
                 {
-                    occupancy_grid_drone_[idx] = -1;
+                    occupancy_grid_drone_[idx] = -1; // Mark cell as unknown if out-of-bounds.
                 }
             }
         }
@@ -933,19 +971,63 @@ private:
     }
 
     // Publishes the passed–in occupancy grid.
-    void publish_updated_occupancy_grid(const std::vector<int8_t> &grid, bool isDrone = false)
+    void publish_updated_occupancy_grid(const std::vector<int8_t> &planning_grid, bool isDrone = false)
     {
         nav_msgs::msg::OccupancyGrid msg;
         msg.header.stamp = this->now();
         msg.header.frame_id = "map";
         msg.info.resolution = grid_resolution_;
-        msg.info.width = grid_width_;
-        msg.info.height = grid_height_;
-        msg.info.origin.position.x = grid_origin_x_;
-        msg.info.origin.position.y = grid_origin_y_;
-        // For drone maps, use the drone altitude; for ground maps, use 0.0.
-        msg.info.origin.position.z = isDrone ? drone_altitude_ : 0.0;
-        msg.data = grid;
+
+        int orig_width = 0;
+        int orig_height = 0;
+        double orig_origin_x = 0.0;
+        double orig_origin_y = 0.0;
+        std::vector<int8_t> full_grid;
+
+        if (isDrone)
+        {
+            orig_width = original_width_drone_;
+            orig_height = original_height_drone_;
+            orig_origin_x = original_origin_x_drone_;
+            orig_origin_y = original_origin_y_drone_;
+            full_grid = original_ogm_drone_;
+            msg.info.origin.position.z = drone_altitude_;
+        }
+        else
+        {
+            orig_width = original_width_ground_;
+            orig_height = original_height_ground_;
+            orig_origin_x = original_origin_x_ground_;
+            orig_origin_y = original_origin_y_ground_;
+            full_grid = original_ogm_ground_;
+            msg.info.origin.position.z = 0.0;
+        }
+        msg.info.width = orig_width;
+        msg.info.height = orig_height;
+        msg.info.origin.position.x = orig_origin_x;
+        msg.info.origin.position.y = orig_origin_y;
+
+        // Determine the offset of the planning grid relative to the original grid.
+        int offset_x = static_cast<int>((grid_origin_x_ - orig_origin_x) / grid_resolution_);
+        int offset_y = static_cast<int>((grid_origin_y_ - orig_origin_y) / grid_resolution_);
+
+        // Overlay the planning (dynamic) grid into the original grid.
+        for (int j = 0; j < grid_height_; j++)
+        {
+            for (int i = 0; i < grid_width_; i++)
+            {
+                int orig_x = i + offset_x;
+                int orig_y = j + offset_y;
+                if (orig_x >= 0 && orig_x < orig_width &&
+                    orig_y >= 0 && orig_y < orig_height)
+                {
+                    int orig_idx = orig_y * orig_width + orig_x;
+                    int planning_idx = j * grid_width_ + i;
+                    full_grid[orig_idx] = planning_grid[planning_idx];
+                }
+            }
+        }
+        msg.data = full_grid;
 
         if (isDrone)
         {
