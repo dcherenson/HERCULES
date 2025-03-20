@@ -20,6 +20,7 @@ public:
     // Declare and get parameters:
     slice_altitude_ = this->declare_parameter("slice_altitude", 0.0);
     inflation_radius_m_ = this->declare_parameter("inflation_radius", 2.5); // in meters
+    unknown_flag_ = this->declare_parameter("unknown_flag", false);         // if true, pre-fill grid with -1 (unknown)
 
     // Subscribe to the octomap topic (adjust topic name as needed)
     subscription_ = this->create_subscription<octomap_msgs::msg::Octomap>(
@@ -62,7 +63,6 @@ private:
     double resolution = tree->getResolution();
     double tol = resolution / 2.0;
 
-    // ********** FIX: Use the full octomap bounds **********
     // Retrieve the full extents of the octomap.
     double full_min_x, full_min_y, full_min_z;
     double full_max_x, full_max_y, full_max_z;
@@ -83,14 +83,15 @@ private:
     grid.info.origin.position.x = full_min_x;
     grid.info.origin.position.y = full_min_y;
     grid.info.origin.position.z = 0.0;
-
     grid.info.origin.orientation.w = 1.0;
-    grid.data.assign(width * height, 0);
+
+    // Determine default cell value based on the unknown_flag.
+    // If unknown_flag is true, cells are pre-filled as unknown (-1), else free (0).
+    int8_t default_value = unknown_flag_ ? -1 : 0;
+    grid.data.assign(width * height, default_value);
 
     // Gather data from leaves that are at the specified slice altitude.
-    // (This vector only holds the leaves that match the slice condition.)
     std::vector<std::tuple<double, double, bool>> cellData;
-
     for (octomap::OcTree::leaf_iterator it = tree->begin_leafs(), end = tree->end_leafs();
          it != end; ++it)
     {
@@ -129,7 +130,7 @@ private:
       }
     }
 
-    // Optional: Apply inflation logic as before.
+    // Apply inflation logic.
     int inflation_radius_cells = std::ceil(inflation_radius_m_ / resolution);
     std::vector<int8_t> inflated_data = grid.data;
     for (int row = 0; row < height; row++)
@@ -151,7 +152,7 @@ private:
                 if (distance <= inflation_radius_cells)
                 {
                   int nindex = nrow * width + ncol;
-                  if (grid.data[nindex] == 0)
+                  if (grid.data[nindex] == default_value)
                   {
                     inflated_data[nindex] = 50;
                   }
@@ -176,6 +177,7 @@ private:
   nav_msgs::msg::OccupancyGrid::SharedPtr last_grid_;
   double slice_altitude_;
   double inflation_radius_m_;
+  bool unknown_flag_; // if true, mark unobserved/free space as unknown (-1); if false, as free (0)
 };
 
 int main(int argc, char **argv)
