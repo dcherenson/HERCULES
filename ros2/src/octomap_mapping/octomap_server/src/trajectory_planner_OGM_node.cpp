@@ -298,11 +298,11 @@ private:
                     cell_y >= 0 && cell_y < static_cast<int>(msg->info.height))
                 {
                     int msg_index = cell_y * msg->info.width + cell_x;
-                    occupancy_grid_ground_[idx] = (msg->data[msg_index] == 0 ? 0 : 100);
+                    occupancy_grid_ground_[idx] = msg->data[msg_index];
                 }
                 else
                 {
-                    occupancy_grid_ground_[idx] = 0;
+                    occupancy_grid_ground_[idx] = -1; // or leave it as unknown
                 }
             }
         }
@@ -344,11 +344,11 @@ private:
                     cell_y >= 0 && cell_y < static_cast<int>(msg->info.height))
                 {
                     int msg_index = cell_y * msg->info.width + cell_x;
-                    occupancy_grid_drone_[idx] = (msg->data[msg_index] == 0 ? 0 : 100);
+                    occupancy_grid_drone_[idx] = msg->data[msg_index];
                 }
                 else
                 {
-                    occupancy_grid_drone_[idx] = 0;
+                    occupancy_grid_drone_[idx] = -1;
                 }
             }
         }
@@ -403,12 +403,20 @@ private:
                 {
                     double dist = std::sqrt(dx * dx + dy * dy) * grid_resolution_;
                     if (dist > effective_infl)
+                    {
                         continue;
+                    }
                     int nx = cx + dx, ny = cy + dy;
                     if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+                    {
                         continue;
-                    if (dynamic_occupancy_grid_[ny * grid_width_ + nx] != 0)
+                    }
+
+                    int cell_val = dynamic_occupancy_grid_[ny * grid_width_ + nx];
+                    if (cell_val == 100 || cell_val == 50)
+                    {
                         return false;
+                    }
                 }
             }
         }
@@ -458,7 +466,9 @@ private:
             int cx = current.x, cy = current.y;
             int c_idx = index(cx, cy);
             if (closed[c_idx])
+            {
                 continue;
+            }
             closed[c_idx] = true;
             if (cx == goal_x && cy == goal_y)
             {
@@ -469,12 +479,18 @@ private:
             {
                 int nx = cx + d.first, ny = cy + d.second;
                 if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+                {
                     continue;
+                }
                 int n_idx = index(nx, ny);
-                if (dynamic_occupancy_grid_[n_idx] != 0)
+                if (dynamic_occupancy_grid_[n_idx] == 100 || dynamic_occupancy_grid_[n_idx] == 50)
+                {
                     continue;
+                }
                 if (closed[n_idx])
+                {
                     continue;
+                }
                 double step_cost = (d.first != 0 && d.second != 0) ? std::sqrt(2.0) : 1.0;
                 double tentative_g = g_cost[c_idx] + step_cost;
                 if (tentative_g < g_cost[n_idx])
@@ -608,7 +624,7 @@ private:
         {
             struct Node
             {
-                double x, y, theta, time, cost;
+                double x, y, theta, time, cost; // cost = accumulated distance (pure)
                 int parent;
             };
             std::vector<Node> tree;
@@ -617,8 +633,9 @@ private:
             int max_iterations = 100000;
             bool reached = false;
             int goal_index = -1;
-            double dt_val = 2.0;
+            double dt_val = 2.0; // you might consider reducing this for finer resolution
             double v = max_linear_velocity_;
+
             for (int iter = 0; iter < max_iterations; iter++)
             {
                 double x_rand = x_dist_(rng_);
@@ -652,22 +669,37 @@ private:
                 double new_x = nearest.x + step * std::cos(new_theta);
                 double new_y = nearest.y + step * std::sin(new_theta);
                 double new_time = nearest.time + dt_val;
-                double new_cost = nearest.cost + step;
+
+                // Compute the pure distance cost (without any bonus)
+                double distance_cost = nearest.cost + step;
+
+                // Check that new_x, new_y are within bounds
                 if (new_x < grid_origin_x_ || new_x > grid_origin_x_ + square_size_ ||
                     new_y < grid_origin_y_ || new_y > grid_origin_y_ + square_size_)
+                {
                     continue;
+                }
+
+                // Check if the line from nearest to new point is free (unknown and free cells are allowed)
                 if (!check_line_free_bresenham(std::make_tuple(nearest.x, nearest.y, start_z_, 0.0),
                                                std::make_tuple(new_x, new_y, start_z_, 0.0)))
+                {
                     continue;
-                Node new_node = {new_x, new_y, new_theta, new_time, new_cost, nearest_index};
+                }
+
+                // Create new node with pure distance cost.
+                Node new_node = {new_x, new_y, new_theta, new_time, distance_cost, nearest_index};
                 tree.push_back(new_node);
-                if (new_cost >= remaining_length)
+
+                // Use the pure distance cost to decide if we've reached the required remaining length.
+                if (distance_cost >= remaining_length)
                 {
                     reached = true;
                     goal_index = tree.size() - 1;
                     break;
                 }
             }
+
             TrajVec dense_rand, sparse_rand;
             if (!reached)
             {
@@ -676,6 +708,8 @@ private:
                 sparse_rand.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
                 return std::make_pair(dense_rand, sparse_rand);
             }
+
+            // Reconstruct the path
             std::vector<Node> path;
             int idx = goal_index;
             while (idx != -1)
@@ -688,7 +722,8 @@ private:
             {
                 dense_rand.push_back(std::make_tuple(node.x, node.y, start_z_, node.time));
             }
-            // Generate sparse version.
+
+            // Generate sparse version by sparsifying the (x,y) points.
             std::vector<std::pair<double, double>> densePoints;
             for (const auto &pt : dense_rand)
             {
@@ -713,6 +748,7 @@ private:
                     prev_y = wy;
                 }
             }
+
             return std::make_pair(dense_rand, sparse_rand);
         };
 
@@ -796,7 +832,9 @@ private:
             double mag1 = std::sqrt(dx1 * dx1 + dy1 * dy1);
             double mag2 = std::sqrt(dx2 * dx2 + dy2 * dy2);
             if (mag1 < 1e-6 || mag2 < 1e-6)
+            {
                 continue;
+            }
             double dot = dx1 * dx2 + dy1 * dy2;
             double angle = std::acos(std::clamp(dot / (mag1 * mag2), -1.0, 1.0));
             if (angle > turn_threshold)
@@ -866,10 +904,10 @@ private:
                         if (distance <= inflation)
                         {
                             int index = ny * grid_width_ + nx;
-                            // Only mark free cells (0) as inflated (50)
-                            if (dynamic_occupancy_grid_[index] == 0)
+                            // Update only cells that are unknown (-1) to 0 (explored)
+                            if (dynamic_occupancy_grid_[index] == -1)
                             {
-                                dynamic_occupancy_grid_[index] = 50;
+                                dynamic_occupancy_grid_[index] = 0;
                             }
                         }
                     }
