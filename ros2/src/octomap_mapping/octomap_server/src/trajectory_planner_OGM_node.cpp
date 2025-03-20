@@ -52,6 +52,12 @@ public:
         this->declare_parameter("start_yaw", 0.0);           // initial heading in degrees
         this->declare_parameter("max_turn_angle_deg", 45.0); // default for UGV
 
+        // Declare UGV and drone specific parameters.
+        this->declare_parameter("ugv_max_linear_velocity", 2.0);
+        this->declare_parameter("ugv_max_turn_angle_deg", 45.0);
+        this->declare_parameter("drone_max_linear_velocity", 3.0);
+        this->declare_parameter("drone_max_turn_angle_deg", 105.0);
+
         // New parameter for obstacle inflation (meters).
         this->declare_parameter("inflation_radius", 1.0);
 
@@ -76,6 +82,11 @@ public:
         this->get_parameter("inflation_radius", inflation_radius_);
         this->get_parameter("robot_name", robot_name_);
         this->get_parameter("drone_altitude", drone_altitude_);
+
+        this->get_parameter("ugv_max_linear_velocity", ugv_max_linear_velocity_);
+        this->get_parameter("ugv_max_turn_angle_deg", ugv_max_turn_angle_deg_);
+        this->get_parameter("drone_max_linear_velocity", drone_max_linear_velocity_);
+        this->get_parameter("drone_max_turn_angle_deg", drone_max_turn_angle_deg_);
 
         output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/trajectory_" + robot_name_ + ".txt";
 
@@ -118,8 +129,13 @@ public:
                 {
                     VehicleInfo info;
                     info.name = veh_name;
-                    info.start_x = veh_data.value("X", 0.0);
-                    info.start_y = veh_data.value("Y", 0.0);
+
+                    // X and Y swapped to adjust for coordinate transforms between hercules and ros2
+                    // info.start_x = veh_data.value("X", 0.0);
+                    // info.start_y = veh_data.value("Y", 0.0);
+                    info.start_x = veh_data.value("Y", 0.0);
+                    info.start_y = veh_data.value("X", 0.0);
+
                     info.start_z = veh_data.value("Z", 0.0);
                     info.start_yaw = veh_data.value("Yaw", 0.0);
                     info.trajectory_length = veh_data.value("TrajectoryLength", trajectory_length_);
@@ -244,6 +260,9 @@ private:
     // Turning constraints.
     double max_turn_angle_deg_;
     double max_turn_angle_rad_;
+
+    double ugv_max_linear_velocity_, ugv_max_turn_angle_deg_;
+    double drone_max_linear_velocity_, drone_max_turn_angle_deg_;
 
     // Waypoints provided from settings.
     std::vector<std::tuple<double, double, double>> provided_waypoints_;
@@ -1183,8 +1202,8 @@ private:
             if (isUGV(veh))
             {
                 // Set UGV planning parameters.
-                max_linear_velocity_ = 2.0;
-                max_turn_angle_deg_ = 45.0;
+                max_linear_velocity_ = ugv_max_linear_velocity_;
+                max_turn_angle_deg_ = ugv_max_turn_angle_deg_;
                 max_turn_angle_rad_ = max_turn_angle_deg_ * M_PI / 180.0;
 
                 // Set starting state from vehicle info.
@@ -1244,8 +1263,8 @@ private:
             if (isDrone(veh))
             {
                 // Set drone planning parameters.
-                max_linear_velocity_ = 3.0;
-                max_turn_angle_deg_ = 105.0;
+                max_linear_velocity_ = drone_max_linear_velocity_;
+                max_turn_angle_deg_ = drone_max_turn_angle_deg_;
                 max_turn_angle_rad_ = max_turn_angle_deg_ * M_PI / 180.0;
 
                 // Set starting state from vehicle info.
