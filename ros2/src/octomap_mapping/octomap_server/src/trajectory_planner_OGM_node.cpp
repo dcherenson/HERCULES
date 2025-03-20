@@ -39,8 +39,7 @@ public:
         // Declare parameters (default values for ground planning).
         this->declare_parameter("z_height", -0.25);
         this->declare_parameter("trajectory_length", 200.0); // meters
-        this->declare_parameter("square_size", 500.0);       // planning area side (meters)
-        this->declare_parameter("max_step", 5.0);            // maximum allowed step length
+        this->declare_parameter("square_size", 800.0);       // planning area side (meters)
         this->declare_parameter("max_linear_velocity", 2.0); // default for UGV
         this->declare_parameter("robot_name", "Husky1");
 
@@ -54,21 +53,20 @@ public:
         this->declare_parameter("max_turn_angle_deg", 45.0); // default for UGV
 
         // New parameter for obstacle inflation (meters).
-        this->declare_parameter("inflation_radius", 2.5);
+        this->declare_parameter("inflation_radius", 1.0);
 
         // Settings file and trajectory inflation parameter.
         this->declare_parameter("settings_file", "/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json");
         std::string settings_file_;
-        this->declare_parameter("trajectory_inflation_radius", 0.5);
+        this->declare_parameter("trajectory_exploration_radius", 0.5);
         this->declare_parameter("drone_altitude", 35.0); // meters
 
         // Retrieve parameters.
-        this->get_parameter("trajectory_inflation_radius", trajectory_inflation_radius_);
+        this->get_parameter("trajectory_exploration_radius", trajectory_exploration_radius_);
         this->get_parameter("settings_file", settings_file_);
         this->get_parameter("z_height", z_height_);
         this->get_parameter("trajectory_length", trajectory_length_);
         this->get_parameter("square_size", square_size_);
-        this->get_parameter("max_step", max_step_);
         this->get_parameter("max_linear_velocity", max_linear_velocity_);
         this->get_parameter("start_x", start_x_);
         this->get_parameter("start_y", start_y_);
@@ -168,7 +166,8 @@ public:
             std::bind(&TrajectoryPlanner::occupancy_grid_drone_callback, this, std::placeholders::_1));
 
         // Publisher for updated occupancy grid (can be used for both types).
-        updated_ogm_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/updated_occupancy_grid", 10);
+        updated_ogm_pub_ground_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("updated_ground_occupancy_grid", 10);
+        updated_ogm_pub_drone_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("updated_drone_occupancy_grid", 10);
 
         // Timer.
         timer_ = this->create_wall_timer(1s, std::bind(&TrajectoryPlanner::timer_callback, this));
@@ -201,17 +200,21 @@ private:
     // This dynamic occupancy grid (used during planning) will be set to either one.
     std::vector<int8_t> dynamic_occupancy_grid_;
 
+    // For UGV planning – holds the ground OGM updated with UGV trajectory exploration.
+    std::vector<int8_t> dynamic_ground_grid_;
+    // For drone planning – holds the drone OGM updated with both UGV and drone exploration.
+    std::vector<int8_t> dynamic_drone_grid_;
+
     // -------------------- Parameters and Variables --------------------
     double z_height_;
     double trajectory_length_;
     double square_size_;
     int num_waypoints_;
-    double max_step_;
     double max_linear_velocity_;
     double grid_resolution_;
     double grid_origin_x_, grid_origin_y_;
     int grid_width_, grid_height_;
-    double trajectory_inflation_radius_;
+    double trajectory_exploration_radius_;
     double inflation_radius_;
     std::string output_file_path_;
     std::string robot_name_;
@@ -235,7 +238,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_ground_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_drone_;
     rclcpp::TimerBase::SharedPtr timer_;
-    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr updated_ogm_pub_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr updated_ogm_pub_ground_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr updated_ogm_pub_drone_;
 
     std::map<std::string, rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr> trajectory_publishers_;
     std::map<std::string, rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr> marker_publishers_;
@@ -879,36 +883,48 @@ private:
     // -------------------- Occupancy Grid Update --------------------
     // This function updates dynamic_occupancy_grid_ by inflating the area around each waypoint in the trajectory.
     // (For UGV planning, these inflated cells are obstacles; for drone planning they mark the drone's own path.)
-    void update_dynamic_occupancy_grid(const std::vector<std::tuple<double, double, double, double>> &traj)
+    void update_dynamic_occupancy_grid(
+        const std::vector<std::tuple<double, double, double, double>> &traj,
+        std::vector<int8_t> &grid)
     {
-        double inflation = trajectory_inflation_radius_;
-        if (inflation <= 0.0)
+        // Use the exploration radius parameter (set via "trajectory_exploration_radius")
+        double radius = trajectory_exploration_radius_;
+        if (radius <= 0.0)
             return;
-        int infl_cells = static_cast<int>(std::ceil(inflation / grid_resolution_));
+
+        // Determine how many cells this radius corresponds to.
+        int cell_radius = static_cast<int>(std::ceil(radius / grid_resolution_));
+
+        // For each waypoint in the trajectory...
         for (const auto &pt : traj)
         {
-            double x = std::get<0>(pt);
-            double y = std::get<1>(pt);
-            int cell_x = static_cast<int>(std::floor((x - grid_origin_x_) / grid_resolution_));
-            int cell_y = static_cast<int>(std::floor((y - grid_origin_y_) / grid_resolution_));
-            for (int dx = -infl_cells; dx <= infl_cells; ++dx)
+            // Get the waypoint coordinates.
+            double wx = std::get<0>(pt);
+            double wy = std::get<1>(pt);
+            // Convert world coordinates to grid indices.
+            int cx = static_cast<int>(std::floor((wx - grid_origin_x_) / grid_resolution_));
+            int cy = static_cast<int>(std::floor((wy - grid_origin_y_) / grid_resolution_));
+
+            // Loop over the neighboring cells within cell_radius.
+            for (int dx = -cell_radius; dx <= cell_radius; ++dx)
             {
-                for (int dy = -infl_cells; dy <= infl_cells; ++dy)
+                for (int dy = -cell_radius; dy <= cell_radius; ++dy)
                 {
-                    int nx = cell_x + dx;
-                    int ny = cell_y + dy;
-                    if (nx >= 0 && nx < grid_width_ && ny >= 0 && ny < grid_height_)
+                    int nx = cx + dx;
+                    int ny = cy + dy;
+                    // Make sure we’re inside the grid.
+                    if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+                        continue;
+                    // Compute the Euclidean distance from the cell center to the waypoint.
+                    double dist = std::sqrt((dx * grid_resolution_) * (dx * grid_resolution_) +
+                                            (dy * grid_resolution_) * (dy * grid_resolution_));
+                    if (dist <= radius)
                     {
-                        double distance = std::sqrt((dx * grid_resolution_) * (dx * grid_resolution_) +
-                                                    (dy * grid_resolution_) * (dy * grid_resolution_));
-                        if (distance <= inflation)
+                        int index = ny * grid_width_ + nx;
+                        // Only update cells that are still unknown (-1) to 0 (explored)
+                        if (grid[index] == -1)
                         {
-                            int index = ny * grid_width_ + nx;
-                            // Update only cells that are unknown (-1) to 0 (explored)
-                            if (dynamic_occupancy_grid_[index] == -1)
-                            {
-                                dynamic_occupancy_grid_[index] = 0;
-                            }
+                            grid[index] = 0;
                         }
                     }
                 }
@@ -916,20 +932,29 @@ private:
         }
     }
 
-    // -------------------- Publishing Functions --------------------
-    void publish_updated_occupancy_grid()
+    // Publishes the passed–in occupancy grid.
+    void publish_updated_occupancy_grid(const std::vector<int8_t> &grid, bool isDrone = false)
     {
-        nav_msgs::msg::OccupancyGrid updated_ogm_msg;
-        updated_ogm_msg.header.stamp = this->now();
-        updated_ogm_msg.header.frame_id = "map";
-        updated_ogm_msg.info.resolution = grid_resolution_;
-        updated_ogm_msg.info.width = grid_width_;
-        updated_ogm_msg.info.height = grid_height_;
-        updated_ogm_msg.info.origin.position.x = grid_origin_x_;
-        updated_ogm_msg.info.origin.position.y = grid_origin_y_;
-        updated_ogm_msg.info.origin.position.z = 0.0;
-        updated_ogm_msg.data = dynamic_occupancy_grid_;
-        updated_ogm_pub_->publish(updated_ogm_msg);
+        nav_msgs::msg::OccupancyGrid msg;
+        msg.header.stamp = this->now();
+        msg.header.frame_id = "map";
+        msg.info.resolution = grid_resolution_;
+        msg.info.width = grid_width_;
+        msg.info.height = grid_height_;
+        msg.info.origin.position.x = grid_origin_x_;
+        msg.info.origin.position.y = grid_origin_y_;
+        // For drone maps, use the drone altitude; for ground maps, use 0.0.
+        msg.info.origin.position.z = isDrone ? drone_altitude_ : 0.0;
+        msg.data = grid;
+
+        if (isDrone)
+        {
+            updated_ogm_pub_drone_->publish(msg);
+        }
+        else
+        {
+            updated_ogm_pub_ground_->publish(msg);
+        }
     }
 
     void publish_trajectory_for_robot(const std::string &robot,
@@ -1027,7 +1052,11 @@ private:
             RCLCPP_WARN(this->get_logger(), "Ground occupancy grid not received yet; cannot plan UGV trajectories.");
             return;
         }
-        // ----------------- Plan UGV Trajectories -----------------
+
+        // ----- UGV Planning -----
+        // Copy the ground occupancy grid into the UGV dynamic grid.
+        dynamic_ground_grid_ = occupancy_grid_ground_;
+
         for (const auto &veh : vehicles_)
         {
             if (isUGV(veh))
@@ -1036,6 +1065,7 @@ private:
                 max_linear_velocity_ = 2.0;
                 max_turn_angle_deg_ = 45.0;
                 max_turn_angle_rad_ = max_turn_angle_deg_ * M_PI / 180.0;
+
                 // Set starting state from vehicle info.
                 robot_name_ = veh.name;
                 trajectory_length_ = veh.trajectory_length;
@@ -1045,12 +1075,15 @@ private:
                 start_yaw_deg_ = veh.start_yaw;
                 start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
                 provided_waypoints_ = veh.checkpoints;
-                // Use the ground occupancy grid.
-                dynamic_occupancy_grid_ = occupancy_grid_ground_;
+
+                // Use the UGV dynamic grid for planning.
+                // (Temporarily assign it to our global dynamic_occupancy_grid_ used by plan_trajectory.)
+                dynamic_occupancy_grid_ = dynamic_ground_grid_;
                 trajectory_.clear();
                 auto seg_pair = plan_trajectory();
-                update_dynamic_occupancy_grid(seg_pair.first);
-                publish_updated_occupancy_grid();
+                update_dynamic_occupancy_grid(seg_pair.first, dynamic_ground_grid_);
+                publish_updated_occupancy_grid(dynamic_ground_grid_, false);
+
                 output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
                 save_trajectory_to_file(seg_pair.second);
                 plannedTrajectories_[veh.name] = seg_pair.second;
@@ -1059,12 +1092,32 @@ private:
             }
         }
 
-        // ----------------- Plan Drone Trajectories -----------------
+        // ----- Drone Planning -----
         if (!occupancy_grid_received_drone_)
         {
             RCLCPP_WARN(this->get_logger(), "Drone occupancy grid not received yet; skipping drone planning.");
             return;
         }
+
+        // Copy the drone occupancy grid into the drone dynamic grid.
+        dynamic_drone_grid_ = occupancy_grid_drone_;
+
+        // Merge UGV-explored cells from dynamic_ground_grid_ into dynamic_drone_grid_.
+        // (Assuming both grids are the same size.)
+        if (dynamic_ground_grid_.size() == dynamic_drone_grid_.size())
+        {
+            for (size_t i = 0; i < dynamic_drone_grid_.size(); i++)
+            {
+                // 0 means explored free.
+                if (dynamic_ground_grid_[i] == 0)
+                    dynamic_drone_grid_[i] = 0;
+            }
+        }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(), "UGV and Drone grid sizes differ; cannot merge explored cells.");
+        }
+
         for (const auto &veh : vehicles_)
         {
             if (isDrone(veh))
@@ -1073,38 +1126,25 @@ private:
                 max_linear_velocity_ = 3.0;
                 max_turn_angle_deg_ = 105.0;
                 max_turn_angle_rad_ = max_turn_angle_deg_ * M_PI / 180.0;
+
                 // Set starting state from vehicle info.
                 robot_name_ = veh.name;
                 trajectory_length_ = veh.trajectory_length;
                 start_x_ = veh.start_x;
                 start_y_ = veh.start_y;
-                start_z_ = veh.start_z;
+                // For drones, override the start_z with the specified drone altitude.
+                start_z_ = drone_altitude_;
                 start_yaw_deg_ = veh.start_yaw;
                 start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
                 provided_waypoints_ = veh.checkpoints;
-                // Use the drone occupancy grid.
-                dynamic_occupancy_grid_ = occupancy_grid_drone_;
-                // Clear out UGV trajectories from the drone map (set cells to 0).
-                for (const auto &pair : plannedTrajectories_)
-                {
-                    // Assume UGV names contain "Husky".
-                    if (pair.first.find("Husky") != std::string::npos)
-                    {
-                        for (const auto &pt : pair.second)
-                        {
-                            int cell_x = static_cast<int>(std::floor((std::get<0>(pt) - grid_origin_x_) / grid_resolution_));
-                            int cell_y = static_cast<int>(std::floor((std::get<1>(pt) - grid_origin_y_) / grid_resolution_));
-                            if (cell_x >= 0 && cell_x < grid_width_ && cell_y >= 0 && cell_y < grid_height_)
-                            {
-                                dynamic_occupancy_grid_[cell_y * grid_width_ + cell_x] = 0;
-                            }
-                        }
-                    }
-                }
+
+                // Use the drone dynamic grid for planning.
+                dynamic_occupancy_grid_ = dynamic_drone_grid_;
                 trajectory_.clear();
                 auto seg_pair = plan_trajectory();
-                update_dynamic_occupancy_grid(seg_pair.first);
-                publish_updated_occupancy_grid();
+                update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
+                publish_updated_occupancy_grid(dynamic_drone_grid_, true);
+
                 output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
                 save_trajectory_to_file(seg_pair.second);
                 plannedTrajectories_[veh.name] = seg_pair.second;
