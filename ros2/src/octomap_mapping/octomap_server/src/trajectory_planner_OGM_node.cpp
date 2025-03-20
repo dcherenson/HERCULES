@@ -58,7 +58,7 @@ public:
         // Settings file and trajectory inflation parameter.
         this->declare_parameter("settings_file", "/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json");
         std::string settings_file_;
-        this->declare_parameter("trajectory_exploration_radius", 0.5);
+        this->declare_parameter("trajectory_exploration_radius", 5.0);
         this->declare_parameter("drone_altitude", 35.0); // meters
 
         // Retrieve parameters.
