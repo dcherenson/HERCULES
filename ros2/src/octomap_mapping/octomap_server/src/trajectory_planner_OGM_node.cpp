@@ -31,14 +31,17 @@ using namespace std::chrono_literals;
 class TrajectoryPlanner : public rclcpp::Node
 {
 public:
-    TrajectoryPlanner() : Node("trajectory_planner"), occupancy_grid_received_(false), rng_(rd_())
+    TrajectoryPlanner() : Node("trajectory_planner"),
+                          occupancy_grid_received_ground_(false),
+                          occupancy_grid_received_drone_(false),
+                          rng_(rd_())
     {
-        // Declare parameters.
+        // Declare parameters (default values for ground planning).
         this->declare_parameter("z_height", -0.25);
         this->declare_parameter("trajectory_length", 200.0); // meters
         this->declare_parameter("square_size", 500.0);       // planning area side (meters)
         this->declare_parameter("max_step", 5.0);            // maximum allowed step length
-        this->declare_parameter("max_linear_velocity", 2.0); // maximum linear velocity
+        this->declare_parameter("max_linear_velocity", 2.0); // default for UGV
         this->declare_parameter("robot_name", "Husky1");
 
         // Starting point parameters.
@@ -48,15 +51,16 @@ public:
 
         // Unicycle-like constraints.
         this->declare_parameter("start_yaw", 0.0);           // initial heading in degrees
-        this->declare_parameter("max_turn_angle_deg", 45.0); // max turn angle between consecutive waypoints in degrees
+        this->declare_parameter("max_turn_angle_deg", 45.0); // default for UGV
 
         // New parameter for obstacle inflation (meters).
         this->declare_parameter("inflation_radius", 2.5);
 
+        // Settings file and trajectory inflation parameter.
         this->declare_parameter("settings_file", "/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json");
         std::string settings_file_;
-
         this->declare_parameter("trajectory_inflation_radius", 0.5);
+        this->declare_parameter("drone_altitude", 35.0); // meters
 
         // Retrieve parameters.
         this->get_parameter("trajectory_inflation_radius", trajectory_inflation_radius_);
@@ -73,7 +77,7 @@ public:
         this->get_parameter("max_turn_angle_deg", max_turn_angle_deg_);
         this->get_parameter("inflation_radius", inflation_radius_);
         this->get_parameter("robot_name", robot_name_);
-        // this->get_parameter("waypoints_file", waypoints_file_);
+        this->get_parameter("drone_altitude", drone_altitude_);
 
         output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/trajectory_" + robot_name_ + ".txt";
 
@@ -87,9 +91,11 @@ public:
         grid_origin_y_ = -square_size_ / 2.0;
         grid_width_ = static_cast<int>(square_size_ / grid_resolution_);
         grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
-        occupancy_grid_.assign(grid_width_ * grid_height_, 0);
+        // These occupancy grids will be filled from the callbacks.
+        occupancy_grid_ground_.assign(grid_width_ * grid_height_, 0);
+        occupancy_grid_drone_.assign(grid_width_ * grid_height_, 0);
 
-        // load vehicle parameters from the json file
+        // Load vehicle parameters from the JSON settings file.
         std::ifstream settings_ifs(settings_file_);
         if (!settings_ifs.is_open())
         {
@@ -118,7 +124,7 @@ public:
                     info.start_y = veh_data.value("Y", 0.0);
                     info.start_z = veh_data.value("Z", 0.0);
                     info.start_yaw = veh_data.value("Yaw", 0.0);
-                    info.trajectory_length = veh_data.value("TrajectoryLength", trajectory_length_); // fallback if missing
+                    info.trajectory_length = veh_data.value("TrajectoryLength", trajectory_length_);
                     if (veh_data.contains("Checkpoints") && veh_data["Checkpoints"].is_array())
                     {
                         for (const auto &checkpoint : veh_data["Checkpoints"])
@@ -131,19 +137,19 @@ public:
                     }
                     vehicles_.push_back(info);
                 }
-                // Sort vehicles_ by the numeric part of their names (e.g., Husky1, Husky2, ...)
+                // Sort vehicles by numeric order extracted from their names.
                 std::sort(vehicles_.begin(), vehicles_.end(), [](const VehicleInfo &a, const VehicleInfo &b)
                           {
-            auto extractNumber = [](const std::string& s) -> int {
-                std::string num;
-                for (char c : s)
-                {
-                    if (std::isdigit(c))
-                        num.push_back(c);
-                }
-                return num.empty() ? 0 : std::stoi(num);
-            };
-            return extractNumber(a.name) < extractNumber(b.name); });
+          auto extractNumber = [](const std::string &s) -> int {
+            std::string num;
+            for (char c : s)
+            {
+              if (std::isdigit(c))
+                num.push_back(c);
+            }
+            return num.empty() ? 0 : std::stoi(num);
+          };
+          return extractNumber(a.name) < extractNumber(b.name); });
             }
             else
             {
@@ -151,12 +157,17 @@ public:
             }
         }
 
-        // Subscribe to the occupancy grid.
-        occupancy_grid_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-            "/sliced_projected_map", 10,
-            std::bind(&TrajectoryPlanner::occupancy_grid_callback, this, std::placeholders::_1));
+        // Subscribe to the two occupancy grid topics.
+        // Ground OGM (altitude 0.0) used for UGV planning.
+        occupancy_grid_sub_ground_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+            "Ausenv_0mAlt_OGM_0p5m", 10,
+            std::bind(&TrajectoryPlanner::occupancy_grid_ground_callback, this, std::placeholders::_1));
+        // Drone OGM (altitude 35.0) used for drone planning.
+        occupancy_grid_sub_drone_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+            "Ausenv_35mAlt_OGM_0p5m", 10,
+            std::bind(&TrajectoryPlanner::occupancy_grid_drone_callback, this, std::placeholders::_1));
 
-        // Publishers.
+        // Publisher for updated occupancy grid (can be used for both types).
         updated_ogm_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/updated_occupancy_grid", 10);
 
         // Timer.
@@ -170,12 +181,27 @@ public:
     }
 
 private:
-    using TrajVec = std::vector<std::tuple<double, double, double, double>>;
-    using TrajPair = std::pair<TrajVec, TrajVec>; // first = dense version, second = sparse version
+    // -------------------- Vehicle Info Structure --------------------
+    struct VehicleInfo
+    {
+        std::string name;
+        double trajectory_length;
+        double start_x, start_y, start_z, start_yaw;
+        std::vector<std::tuple<double, double, double>> checkpoints;
+    };
+    std::vector<VehicleInfo> vehicles_;
 
-    nav_msgs::msg::OccupancyGrid original_ogm_;
+    // -------------------- Occupancy Grids and Flags --------------------
+    // Ground occupancy grid (from the ground-specific OGM topic).
+    std::vector<int8_t> occupancy_grid_ground_;
+    bool occupancy_grid_received_ground_ = false;
+    // Drone occupancy grid (from the drone-specific OGM topic).
+    std::vector<int8_t> occupancy_grid_drone_;
+    bool occupancy_grid_received_drone_ = false;
+    // This dynamic occupancy grid (used during planning) will be set to either one.
+    std::vector<int8_t> dynamic_occupancy_grid_;
 
-    // Parameters and variables.
+    // -------------------- Parameters and Variables --------------------
     double z_height_;
     double trajectory_length_;
     double square_size_;
@@ -186,53 +212,37 @@ private:
     double grid_origin_x_, grid_origin_y_;
     int grid_width_, grid_height_;
     double trajectory_inflation_radius_;
-    std::vector<int8_t> occupancy_grid_;
-
+    double inflation_radius_;
     std::string output_file_path_;
     std::string robot_name_;
-    bool trajectory_saved_ = false;
 
-    // For storing trajectories for each robot.
-    std::map<std::string, std::vector<std::tuple<double, double, double, double>>> plannedTrajectories_;
-
-    // A copy of the original occupancy grid that gets updated as trajectories are planned.
-    std::vector<int8_t> dynamic_occupancy_grid_;
-    std::map<std::string, rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr> trajectory_publishers_;
-    std::map<std::string, rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr> marker_publishers_;
-    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr updated_ogm_pub_;
-
-    struct VehicleInfo
-    {
-        std::string name;
-        double trajectory_length;
-        double start_x, start_y, start_z, start_yaw;
-        std::vector<std::tuple<double, double, double>> checkpoints;
-    };
-    std::vector<VehicleInfo> vehicles_;
-
-    // Starting point.
+    // Starting point and orientation.
     double start_x_;
     double start_y_;
     double start_z_;
     double start_yaw_deg_;
     double start_yaw_;
+    double drone_altitude_;
 
-    // Constraints.
+    // Turning constraints.
     double max_turn_angle_deg_;
     double max_turn_angle_rad_;
 
-    // Inflation.
-    double inflation_radius_;
-
-    // Waypoints.
+    // Waypoints provided from settings.
     std::vector<std::tuple<double, double, double>> provided_waypoints_;
 
-    // Flag to ensure the occupancy grid callback runs only once.
-    bool occupancy_grid_received_;
-
     // ROS interfaces.
-    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_ground_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr occupancy_grid_sub_drone_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr updated_ogm_pub_;
+
+    std::map<std::string, rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr> trajectory_publishers_;
+    std::map<std::string, rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr> marker_publishers_;
+
+    // Trajectory storage.
+    std::map<std::string, std::vector<std::tuple<double, double, double, double>>> plannedTrajectories_;
+    std::vector<std::tuple<double, double, double, double>> trajectory_;
 
     // Random generators.
     std::random_device rd_;
@@ -240,132 +250,47 @@ private:
     std::uniform_real_distribution<double> x_dist_;
     std::uniform_real_distribution<double> y_dist_;
 
-    // Trajectory storage.
-    std::vector<std::tuple<double, double, double, double>> trajectory_;
-
-    // ------------------ Smoothing Function ------------------
-    // Applies iterative smoothing to a raw vector of 2D points.
-    std::vector<std::pair<double, double>> smoothPath(const std::vector<std::pair<double, double>> &path,
-                                                      int iterations = 50, double alpha = 0.1)
+    // -------------------- Helper Functions to Determine Vehicle Type --------------------
+    // For simplicity, assume names containing "Husky" are UGVs and those containing "Drone" are drones.
+    bool isUGV(const VehicleInfo &veh)
     {
-        std::vector<std::pair<double, double>> smoothed = path;
-        // Do not smooth endpoints.
-        for (int iter = 0; iter < iterations; ++iter)
-        {
-            for (size_t i = 1; i < smoothed.size() - 1; ++i)
-            {
-                double new_x = smoothed[i].first + alpha * (smoothed[i - 1].first + smoothed[i + 1].first - 2.0 * smoothed[i].first);
-                double new_y = smoothed[i].second + alpha * (smoothed[i - 1].second + smoothed[i + 1].second - 2.0 * smoothed[i].second);
-                smoothed[i] = {new_x, new_y};
-            }
-        }
-        return smoothed;
+        return (veh.name.find("Husky") != std::string::npos);
     }
-    // --------------------------------------------------------
-
-    // ------------------ Additional Refinement for Sharp Turns ------------------
-    // For each intermediate point, if the turning angle (change in heading) is above a threshold,
-    // pull that point toward the average of its neighbors.
-    std::vector<std::pair<double, double>> refineSharpTurns(const std::vector<std::pair<double, double>> &path,
-                                                            double turn_threshold)
+    bool isDrone(const VehicleInfo &veh)
     {
-        std::vector<std::pair<double, double>> refined = path;
-        // Process only intermediate points.
-        for (size_t i = 1; i < refined.size() - 1; ++i)
-        {
-            double dx1 = refined[i].first - refined[i - 1].first;
-            double dy1 = refined[i].second - refined[i - 1].second;
-            double dx2 = refined[i + 1].first - refined[i].first;
-            double dy2 = refined[i + 1].second - refined[i].second;
-            double mag1 = std::sqrt(dx1 * dx1 + dy1 * dy1);
-            double mag2 = std::sqrt(dx2 * dx2 + dy2 * dy2);
-            if (mag1 < 1e-6 || mag2 < 1e-6)
-                continue;
-            double dot = dx1 * dx2 + dy1 * dy2;
-            double angle = std::acos(std::clamp(dot / (mag1 * mag2), -1.0, 1.0));
-            // If the turning angle is large (i.e. the path is very "kinky")
-            if (angle > turn_threshold)
-            {
-                // Replace this point with the average of its neighbors.
-                refined[i].first = (refined[i - 1].first + refined[i + 1].first) / 2.0;
-                refined[i].second = (refined[i - 1].second + refined[i + 1].second) / 2.0;
-            }
-        }
-        return refined;
+        return (veh.name.find("Drone") != std::string::npos);
     }
-    // --------------------------------------------------------
 
-    // ------------------ Sparsification Function ------------------
-    // Removes intermediate waypoints for nearly straight segments.
-    std::vector<std::pair<double, double>> sparsifyPath(const std::vector<std::pair<double, double>> &path, double angle_threshold = 0.05)
+    // -------------------- Occupancy Grid Callbacks --------------------
+    // Ground occupancy grid callback (used for UGV planning).
+    void occupancy_grid_ground_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
     {
-        if (path.size() < 3)
-            return path;
-        std::vector<std::pair<double, double>> sparsified;
-        sparsified.push_back(path.front());
-        for (size_t i = 1; i < path.size() - 1; ++i)
+        if (occupancy_grid_received_ground_)
         {
-            const auto &prev = sparsified.back();
-            const auto &curr = path[i];
-            const auto &next = path[i + 1];
-            double dx1 = curr.first - prev.first;
-            double dy1 = curr.second - prev.second;
-            double dx2 = next.first - curr.first;
-            double dy2 = next.second - curr.second;
-            double mag1 = std::sqrt(dx1 * dx1 + dy1 * dy1);
-            double mag2 = std::sqrt(dx2 * dx2 + dy2 * dy2);
-            if (mag1 < 1e-6 || mag2 < 1e-6)
-            {
-                sparsified.push_back(curr);
-                continue;
-            }
-            double dot = dx1 * dx2 + dy1 * dy2;
-            double angle = std::acos(std::clamp(dot / (mag1 * mag2), -1.0, 1.0));
-            // If the change in angle is significant, keep the current point.
-            if (angle > angle_threshold)
-            {
-                sparsified.push_back(curr);
-            }
-        }
-        sparsified.push_back(path.back());
-        return sparsified;
-    }
-    // --------------------------------------------------------
-
-    // Callback: update occupancy grid.
-    void occupancy_grid_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
-    {
-        if (occupancy_grid_received_)
-        {
-            RCLCPP_INFO(this->get_logger(), "Occupancy grid already received; ignoring new message.");
+            RCLCPP_INFO(this->get_logger(), "Ground occupancy grid already received; ignoring new message.");
             return;
         }
         if (msg->data.empty())
         {
-            RCLCPP_WARN(this->get_logger(), "Received empty occupancy grid; waiting for valid data.");
+            RCLCPP_WARN(this->get_logger(), "Received empty ground occupancy grid; waiting for valid data.");
             return;
         }
 
-        // Store the original occupancy grid message.
-        original_ogm_ = *msg;
-
-        // Use the message's resolution, but define our planning grid using your own square_size_.
+        // Store the original occupancy grid message (if needed).
+        // Use the message's resolution and update planning grid.
         grid_resolution_ = msg->info.resolution;
         grid_width_ = static_cast<int>(square_size_ / grid_resolution_);
         grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
-        // Here we set our planning grid origin to be centered (as before)
         grid_origin_x_ = -square_size_ / 2.0;
         grid_origin_y_ = -square_size_ / 2.0;
 
-        occupancy_grid_.resize(grid_width_ * grid_height_, 0);
-        // Map each planning grid cell to a corresponding cell in the occupancy grid message.
+        occupancy_grid_ground_.resize(grid_width_ * grid_height_, 0);
         for (int j = 0; j < grid_height_; j++)
         {
             for (int i = 0; i < grid_width_; i++)
             {
                 double world_x = grid_origin_x_ + (i + 0.5) * grid_resolution_;
                 double world_y = grid_origin_y_ + (j + 0.5) * grid_resolution_;
-                // Convert world coordinates to occupancy grid message indices.
                 int cell_x = static_cast<int>(std::floor((world_x - msg->info.origin.position.x) / msg->info.resolution));
                 int cell_y = static_cast<int>(std::floor((world_y - msg->info.origin.position.y) / msg->info.resolution));
                 int idx = j * grid_width_ + i;
@@ -373,21 +298,65 @@ private:
                     cell_y >= 0 && cell_y < static_cast<int>(msg->info.height))
                 {
                     int msg_index = cell_y * msg->info.width + cell_x;
-                    // Mark as free (0) if the message value is 0, else as an obstacle (100).
-                    occupancy_grid_[idx] = (msg->data[msg_index] == 0 ? 0 : 100);
+                    occupancy_grid_ground_[idx] = (msg->data[msg_index] == 0 ? 0 : 100);
                 }
                 else
                 {
-                    occupancy_grid_[idx] = 0;
+                    occupancy_grid_ground_[idx] = 0;
                 }
             }
         }
-
-        occupancy_grid_received_ = true;
-        RCLCPP_INFO(this->get_logger(), "Occupancy grid updated from occupancy grid map.");
+        occupancy_grid_received_ground_ = true;
+        RCLCPP_INFO(this->get_logger(), "Ground occupancy grid updated for planning.");
     }
 
-    // Bresenham algorithm
+    // Drone occupancy grid callback (used for drone planning).
+    void occupancy_grid_drone_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+    {
+        if (occupancy_grid_received_drone_)
+        {
+            RCLCPP_INFO(this->get_logger(), "Drone occupancy grid already received; ignoring new message.");
+            return;
+        }
+        if (msg->data.empty())
+        {
+            RCLCPP_WARN(this->get_logger(), "Received empty drone occupancy grid; waiting for valid data.");
+            return;
+        }
+        // Update drone occupancy grid.
+        grid_resolution_ = msg->info.resolution;
+        grid_width_ = static_cast<int>(square_size_ / grid_resolution_);
+        grid_height_ = static_cast<int>(square_size_ / grid_resolution_);
+        grid_origin_x_ = -square_size_ / 2.0;
+        grid_origin_y_ = -square_size_ / 2.0;
+
+        occupancy_grid_drone_.resize(grid_width_ * grid_height_, 0);
+        for (int j = 0; j < grid_height_; j++)
+        {
+            for (int i = 0; i < grid_width_; i++)
+            {
+                double world_x = grid_origin_x_ + (i + 0.5) * grid_resolution_;
+                double world_y = grid_origin_y_ + (j + 0.5) * grid_resolution_;
+                int cell_x = static_cast<int>(std::floor((world_x - msg->info.origin.position.x) / msg->info.resolution));
+                int cell_y = static_cast<int>(std::floor((world_y - msg->info.origin.position.y) / msg->info.resolution));
+                int idx = j * grid_width_ + i;
+                if (cell_x >= 0 && cell_x < static_cast<int>(msg->info.width) &&
+                    cell_y >= 0 && cell_y < static_cast<int>(msg->info.height))
+                {
+                    int msg_index = cell_y * msg->info.width + cell_x;
+                    occupancy_grid_drone_[idx] = (msg->data[msg_index] == 0 ? 0 : 100);
+                }
+                else
+                {
+                    occupancy_grid_drone_[idx] = 0;
+                }
+            }
+        }
+        occupancy_grid_received_drone_ = true;
+        RCLCPP_INFO(this->get_logger(), "Drone occupancy grid updated for planning.");
+    }
+
+    // -------------------- Bresenham Algorithm --------------------
     std::vector<std::pair<int, int>> bresenham(int x0, int y0, int x1, int y1)
     {
         std::vector<std::pair<int, int>> cells;
@@ -423,10 +392,8 @@ private:
         int x1 = static_cast<int>((std::get<0>(p2) - grid_origin_x_) / grid_resolution_);
         int y1 = static_cast<int>((std::get<1>(p2) - grid_origin_y_) / grid_resolution_);
         auto line_cells = bresenham(x0, y0, x1, y1);
-
         double effective_infl = infl + grid_resolution_ / 2.0;
         int infl_cells = static_cast<int>(std::ceil(effective_infl / grid_resolution_));
-
         for (auto cell : line_cells)
         {
             int cx = cell.first, cy = cell.second;
@@ -436,32 +403,24 @@ private:
                 {
                     double dist = std::sqrt(dx * dx + dy * dy) * grid_resolution_;
                     if (dist > effective_infl)
-                    {
                         continue;
-                    }
                     int nx = cx + dx, ny = cy + dy;
                     if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
-                    {
                         continue;
-                    }
                     if (dynamic_occupancy_grid_[ny * grid_width_ + nx] != 0)
-                    {
                         return false;
-                    }
                 }
             }
         }
         return true;
     }
-
     bool check_line_free_bresenham(const std::tuple<double, double, double, double> &p1,
                                    const std::tuple<double, double, double, double> &p2)
     {
         return check_line_free_bresenham(p1, p2, inflation_radius_);
     }
 
-    // ---------------------- A* Algorithm Implementation ----------------------
-    // Searches for a path (grid cells) from (start_x, start_y) to (goal_x, goal_y)
+    // -------------------- A* Algorithm Implementation --------------------
     std::vector<std::pair<int, int>> a_star(int start_x, int start_y, int goal_x, int goal_y)
     {
         struct PQItem
@@ -472,13 +431,9 @@ private:
         };
         struct cmp
         {
-            bool operator()(const PQItem &a, const PQItem &b)
-            {
-                return a.f > b.f;
-            }
+            bool operator()(const PQItem &a, const PQItem &b) { return a.f > b.f; }
         };
         std::priority_queue<PQItem, std::vector<PQItem>, cmp> open;
-
         auto index = [this](int x, int y)
         { return y * grid_width_ + x; };
         const double INF = 1e9;
@@ -486,19 +441,15 @@ private:
         std::vector<double> g_cost(grid_width_ * grid_height_, INF);
         std::vector<int> parent_x(grid_width_ * grid_height_, -1);
         std::vector<int> parent_y(grid_width_ * grid_height_, -1);
-
         auto heuristic = [goal_x, goal_y](int x, int y) -> double
         {
             return std::sqrt((x - goal_x) * (x - goal_x) + (y - goal_y) * (y - goal_y));
         };
-
         int start_idx = index(start_x, start_y);
         g_cost[start_idx] = 0.0;
         open.push({heuristic(start_x, start_y), start_x, start_y});
-
         std::vector<std::pair<int, int>> directions = {
             {1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
-
         bool found = false;
         while (!open.empty())
         {
@@ -507,9 +458,7 @@ private:
             int cx = current.x, cy = current.y;
             int c_idx = index(cx, cy);
             if (closed[c_idx])
-            {
                 continue;
-            }
             closed[c_idx] = true;
             if (cx == goal_x && cy == goal_y)
             {
@@ -520,18 +469,12 @@ private:
             {
                 int nx = cx + d.first, ny = cy + d.second;
                 if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
-                {
                     continue;
-                }
                 int n_idx = index(nx, ny);
                 if (dynamic_occupancy_grid_[n_idx] != 0)
-                {
                     continue;
-                }
                 if (closed[n_idx])
-                {
                     continue;
-                }
                 double step_cost = (d.first != 0 && d.second != 0) ? std::sqrt(2.0) : 1.0;
                 double tentative_g = g_cost[c_idx] + step_cost;
                 if (tentative_g < g_cost[n_idx])
@@ -544,12 +487,9 @@ private:
                 }
             }
         }
-
         std::vector<std::pair<int, int>> path;
         if (!found)
-        {
             return path;
-        }
         int cx = goal_x, cy = goal_y;
         while (!(cx == start_x && cy == start_y))
         {
@@ -564,23 +504,19 @@ private:
         std::reverse(path.begin(), path.end());
         return path;
     }
-    // ------------------------------------------------------------------------
 
-    // ---------------------- Trajectory Planning ----------------------
+    // -------------------- Trajectory Planning --------------------
+    // Returns a pair: first element is the "dense" trajectory used for updating the occupancy grid,
+    // and second element is the "sparse" trajectory for publishing and saving.
     std::pair<std::vector<std::tuple<double, double, double, double>>,
               std::vector<std::tuple<double, double, double, double>>>
     plan_trajectory()
     {
         using TrajVec = std::vector<std::tuple<double, double, double, double>>;
-        // dense_traj will be used for updating the occupancy grid.
-        TrajVec dense_traj;
-        // sparse_traj will be used for publishing and saving.
-        TrajVec sparse_traj;
-
-        // Add initial state to both.
+        TrajVec dense_traj, sparse_traj;
+        // Add initial state.
         dense_traj.push_back(std::make_tuple(start_x_, start_y_, start_z_, 0.0));
         sparse_traj.push_back(std::make_tuple(start_x_, start_y_, start_z_, 0.0));
-
         double curr_x = start_x_, curr_y = start_y_, curr_time = 0.0, curr_theta = start_yaw_;
 
         // Lambda to compute time increment along a segment.
@@ -598,15 +534,12 @@ private:
         };
 
         // Lambda: plan a segment from current state to a given goal.
-        // It returns a pair: (dense segment, sparse segment)
         auto plan_segment = [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double goal_x, double goal_y, double goal_z) -> std::pair<TrajVec, TrajVec>
         {
             TrajVec seg_dense, seg_sparse;
-            // Start the segment at the current state.
             seg_dense.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
             seg_sparse.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
-
-            // Build a raw path from A*
+            // Build a raw path using A*.
             std::vector<std::pair<double, double>> raw_path;
             raw_path.push_back({curr_x, curr_y});
             int start_cell_x = static_cast<int>(std::floor((curr_x - grid_origin_x_) / grid_resolution_));
@@ -622,7 +555,6 @@ private:
                 double wy = grid_origin_y_ + (cell_y + 0.5) * grid_resolution_;
                 raw_path.push_back({wx, wy});
             }
-
             // Smooth the raw path.
             auto smooth_path_result = smoothPath(raw_path, 50, 0.1);
             double turn_threshold = 1.0;
@@ -631,14 +563,12 @@ private:
             {
                 refined_path = refineSharpTurns(refined_path, turn_threshold);
             }
-
-            // Build the dense segment from the refined (unsparsified) path.
+            // Build dense segment.
             {
                 double prev_x = refined_path.front().first;
                 double prev_y = refined_path.front().second;
                 double time_acc = curr_time;
                 double current_theta = curr_theta;
-                // For each point in the refined path, add to the dense segment.
                 for (size_t i = 1; i < refined_path.size(); ++i)
                 {
                     double wx = refined_path[i].first;
@@ -651,15 +581,13 @@ private:
                     prev_y = wy;
                 }
             }
-
-            // Build the sparse segment by applying sparsification.
+            // Build sparse segment by sparsification.
             {
                 auto sparsified_path = sparsifyPath(refined_path, 0.05);
                 double prev_x = sparsified_path.front().first;
                 double prev_y = sparsified_path.front().second;
                 double time_acc = curr_time;
                 double current_theta = curr_theta;
-                // For each point in the sparsified path, add to the sparse segment.
                 for (size_t i = 1; i < sparsified_path.size(); ++i)
                 {
                     double wx = sparsified_path[i].first;
@@ -675,7 +603,7 @@ private:
             return std::make_pair(seg_dense, seg_sparse);
         };
 
-        // Lambda: plan a random segment if the trajectory is too short.
+        // Lambda: plan a random segment if trajectory is too short (using kinodynamic RRT).
         auto plan_random_segment = [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double remaining_length) -> std::pair<TrajVec, TrajVec>
         {
             struct Node
@@ -760,7 +688,7 @@ private:
             {
                 dense_rand.push_back(std::make_tuple(node.x, node.y, start_z_, node.time));
             }
-            // Generate sparse version from dense_rand by sparsifying the (x,y) points.
+            // Generate sparse version.
             std::vector<std::pair<double, double>> densePoints;
             for (const auto &pt : dense_rand)
             {
@@ -799,7 +727,7 @@ private:
                 double goal_y = std::get<1>(pt);
                 double goal_z = std::get<2>(pt);
                 auto seg_pair = plan_segment(goal_x, goal_y, goal_z);
-                // Append segments (avoid duplicating the starting state).
+                // Append segments (avoid duplicating starting state).
                 dense_full_traj.insert(dense_full_traj.end(), seg_pair.first.begin() + 1, seg_pair.first.end());
                 sparse_full_traj.insert(sparse_full_traj.end(), seg_pair.second.begin() + 1, seg_pair.second.end());
                 curr_x = goal_x;
@@ -813,7 +741,7 @@ private:
                 }
             }
         }
-        // Compute total length from the sparse trajectory (for logging).
+        // If total length is less than desired, add a random segment.
         double total_length = 0.0;
         for (size_t i = 1; i < sparse_full_traj.size(); i++)
         {
@@ -835,55 +763,96 @@ private:
             double dy = std::get<1>(sparse_full_traj[i]) - std::get<1>(sparse_full_traj[i - 1]);
             final_length += std::sqrt(dx * dx + dy * dy);
         }
-        RCLCPP_INFO(this->get_logger(), "Planned trajectory length: %.2f m with %zu waypoints",
-                    final_length, sparse_full_traj.size());
+        RCLCPP_INFO(this->get_logger(), "Planned trajectory length: %.2f m with %zu waypoints", final_length, sparse_full_traj.size());
         return std::make_pair(dense_full_traj, sparse_full_traj);
     }
 
-    // ------------------------------------------------------------------------
-
-    // Save trajectory to file.
-    void save_trajectory_to_file(const std::vector<std::tuple<double, double, double, double>> &traj)
+    // -------------------- Smoothing, Refinement, and Sparsification --------------------
+    std::vector<std::pair<double, double>> smoothPath(const std::vector<std::pair<double, double>> &path,
+                                                      int iterations = 50, double alpha = 0.1)
     {
-        std::ofstream ofs(output_file_path_);
-        if (!ofs.is_open())
+        std::vector<std::pair<double, double>> smoothed = path;
+        for (int iter = 0; iter < iterations; ++iter)
         {
-            RCLCPP_ERROR(this->get_logger(), "Unable to open file %s for writing", output_file_path_.c_str());
-            return;
+            for (size_t i = 1; i < smoothed.size() - 1; ++i)
+            {
+                double new_x = smoothed[i].first + alpha * (smoothed[i - 1].first + smoothed[i + 1].first - 2.0 * smoothed[i].first);
+                double new_y = smoothed[i].second + alpha * (smoothed[i - 1].second + smoothed[i + 1].second - 2.0 * smoothed[i].second);
+                smoothed[i] = {new_x, new_y};
+            }
         }
-        for (const auto &pt : traj)
+        return smoothed;
+    }
+    std::vector<std::pair<double, double>> refineSharpTurns(const std::vector<std::pair<double, double>> &path,
+                                                            double turn_threshold)
+    {
+        std::vector<std::pair<double, double>> refined = path;
+        for (size_t i = 1; i < refined.size() - 1; ++i)
         {
-            ofs << std::get<1>(pt) << " "   // Y first
-                << std::get<0>(pt) << " "   // X second
-                << std::get<2>(pt) << " "   // Z remains
-                << std::get<3>(pt) << "\n"; // Timestamp
+            double dx1 = refined[i].first - refined[i - 1].first;
+            double dy1 = refined[i].second - refined[i - 1].second;
+            double dx2 = refined[i + 1].first - refined[i].first;
+            double dy2 = refined[i + 1].second - refined[i].second;
+            double mag1 = std::sqrt(dx1 * dx1 + dy1 * dy1);
+            double mag2 = std::sqrt(dx2 * dx2 + dy2 * dy2);
+            if (mag1 < 1e-6 || mag2 < 1e-6)
+                continue;
+            double dot = dx1 * dx2 + dy1 * dy2;
+            double angle = std::acos(std::clamp(dot / (mag1 * mag2), -1.0, 1.0));
+            if (angle > turn_threshold)
+            {
+                refined[i].first = (refined[i - 1].first + refined[i + 1].first) / 2.0;
+                refined[i].second = (refined[i - 1].second + refined[i + 1].second) / 2.0;
+            }
         }
-        ofs.close();
-        RCLCPP_INFO(this->get_logger(), "Trajectory saved to %s", output_file_path_.c_str());
+        return refined;
+    }
+    std::vector<std::pair<double, double>> sparsifyPath(const std::vector<std::pair<double, double>> &path, double angle_threshold = 0.05)
+    {
+        if (path.size() < 3)
+            return path;
+        std::vector<std::pair<double, double>> sparsified;
+        sparsified.push_back(path.front());
+        for (size_t i = 1; i < path.size() - 1; ++i)
+        {
+            const auto &prev = sparsified.back();
+            const auto &curr = path[i];
+            const auto &next = path[i + 1];
+            double dx1 = curr.first - prev.first;
+            double dy1 = curr.second - prev.second;
+            double dx2 = next.first - curr.first;
+            double dy2 = next.second - curr.second;
+            double mag1 = std::sqrt(dx1 * dx1 + dy1 * dy1);
+            double mag2 = std::sqrt(dx2 * dx2 + dy2 * dy2);
+            if (mag1 < 1e-6 || mag2 < 1e-6)
+            {
+                sparsified.push_back(curr);
+                continue;
+            }
+            double dot = dx1 * dx2 + dy1 * dy2;
+            double angle = std::acos(std::clamp(dot / (mag1 * mag2), -1.0, 1.0));
+            if (angle > angle_threshold)
+                sparsified.push_back(curr);
+        }
+        sparsified.push_back(path.back());
+        return sparsified;
     }
 
+    // -------------------- Occupancy Grid Update --------------------
+    // This function updates dynamic_occupancy_grid_ by inflating the area around each waypoint in the trajectory.
+    // (For UGV planning, these inflated cells are obstacles; for drone planning they mark the drone's own path.)
     void update_dynamic_occupancy_grid(const std::vector<std::tuple<double, double, double, double>> &traj)
     {
-        // Use the trajectory inflation radius parameter instead of hardcoded 0.5
         double inflation = trajectory_inflation_radius_;
         if (inflation <= 0.0)
-        {
-            // Do nothing if inflation is 0.
             return;
-        }
-        // Compute the inflation in number of cells
         int infl_cells = static_cast<int>(std::ceil(inflation / grid_resolution_));
-
-        // For each waypoint in the trajectory, inflate the area around it.
         for (const auto &pt : traj)
         {
             double x = std::get<0>(pt);
             double y = std::get<1>(pt);
-            // Convert world coordinates to grid indices.
             int cell_x = static_cast<int>(std::floor((x - grid_origin_x_) / grid_resolution_));
             int cell_y = static_cast<int>(std::floor((y - grid_origin_y_) / grid_resolution_));
-
-            // Loop over the neighboring cells
             for (int dx = -infl_cells; dx <= infl_cells; ++dx)
             {
                 for (int dy = -infl_cells; dy <= infl_cells; ++dy)
@@ -892,7 +861,6 @@ private:
                     int ny = cell_y + dy;
                     if (nx >= 0 && nx < grid_width_ && ny >= 0 && ny < grid_height_)
                     {
-                        // Compute the Euclidean distance from the waypoint (in meters)
                         double distance = std::sqrt((dx * grid_resolution_) * (dx * grid_resolution_) +
                                                     (dy * grid_resolution_) * (dy * grid_resolution_));
                         if (distance <= inflation)
@@ -910,63 +878,18 @@ private:
         }
     }
 
-    void plan_all_trajectories()
-    {
-        // Initialize dynamic occupancy grid as a copy of the original occupancy grid.
-        dynamic_occupancy_grid_ = occupancy_grid_;
-
-        // Loop over vehicles in sorted order.
-        for (const auto &veh : vehicles_)
-        {
-            // Set current planning parameters from the vehicle info.
-            robot_name_ = veh.name;
-            trajectory_length_ = veh.trajectory_length;
-            start_x_ = veh.start_x;
-            start_y_ = veh.start_y;
-            start_z_ = veh.start_z;
-            start_yaw_deg_ = veh.start_yaw;
-            start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
-            provided_waypoints_ = veh.checkpoints;
-
-            // Reset the current trajectory.
-            trajectory_.clear();
-            // Plan the trajectory (dense and sparse versions)
-            auto seg_pair = plan_trajectory(); // returns pair: (dense, sparse)
-
-            // Use the dense trajectory for occupancy grid update.
-            update_dynamic_occupancy_grid(seg_pair.first);
-            // Publish the updated occupancy grid.
-            publish_updated_occupancy_grid();
-
-            // *** NEW: Update output file path based on vehicle name and save trajectory ***
-            output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
-            save_trajectory_to_file(seg_pair.second);
-
-            // Save and publish the sparse trajectory.
-            plannedTrajectories_[veh.name] = seg_pair.second;
-            publish_trajectory_for_robot(veh.name, seg_pair.second);
-            publish_checkpoints_for_robot(veh.name, veh.checkpoints);
-        }
-    }
-
+    // -------------------- Publishing Functions --------------------
     void publish_updated_occupancy_grid()
     {
         nav_msgs::msg::OccupancyGrid updated_ogm_msg;
         updated_ogm_msg.header.stamp = this->now();
-        // Set the frame_id explicitly
         updated_ogm_msg.header.frame_id = "map";
-
-        // Update the info to match your planning grid dimensions.
         updated_ogm_msg.info.resolution = grid_resolution_;
         updated_ogm_msg.info.width = grid_width_;
         updated_ogm_msg.info.height = grid_height_;
-
-        // Set the origin to your planning grid's origin.
         updated_ogm_msg.info.origin.position.x = grid_origin_x_;
         updated_ogm_msg.info.origin.position.y = grid_origin_y_;
-        updated_ogm_msg.info.origin.position.z = 0.0; // or set as needed
-
-        // Publish your updated occupancy grid data.
+        updated_ogm_msg.info.origin.position.z = 0.0;
         updated_ogm_msg.data = dynamic_occupancy_grid_;
         updated_ogm_pub_->publish(updated_ogm_msg);
     }
@@ -985,12 +908,18 @@ private:
             pose.header = path_msg.header;
             pose.pose.position.x = std::get<0>(pt);
             pose.pose.position.y = std::get<1>(pt);
-            pose.pose.position.z = std::get<2>(pt);
+            // If the vehicle is a drone, override the z value with the drone altitude parameter.
+            if (robot.find("Drone") != std::string::npos)
+            {
+                pose.pose.position.z = drone_altitude_; // drone_altitude_ is retrieved from parameter
+            }
+            else
+            {
+                pose.pose.position.z = std::get<2>(pt);
+            }
             pose.pose.orientation.w = 1.0;
             path_msg.poses.push_back(pose);
         }
-
-        // Check if a publisher already exists for this robot; if not, create one.
         if (trajectory_publishers_.find(robot) == trajectory_publishers_.end())
         {
             trajectory_publishers_[robot] = this->create_publisher<nav_msgs::msg::Path>(robot + "_trajectory", 10);
@@ -1015,7 +944,6 @@ private:
         marker.color.r = 0.0;
         marker.color.g = 1.0;
         marker.color.b = 0.0;
-
         for (const auto &pt : checkpoints)
         {
             geometry_msgs::msg::Point p;
@@ -1024,7 +952,6 @@ private:
             p.z = std::get<2>(pt);
             marker.points.push_back(p);
         }
-        // Use or create a persistent publisher for this robot.
         if (marker_publishers_.find(robot) == marker_publishers_.end())
         {
             marker_publishers_[robot] = this->create_publisher<visualization_msgs::msg::Marker>(robot + "_checkpoints", 10);
@@ -1032,17 +959,134 @@ private:
         marker_publishers_[robot]->publish(marker);
     }
 
-    // Timer callback: plan (if not already done) and publish the trajectory and waypoints.
-    void timer_callback()
+    // -------------------- Trajectory File Saving --------------------
+    void save_trajectory_to_file(const std::vector<std::tuple<double, double, double, double>> &traj)
     {
-        if (!occupancy_grid_received_)
+        std::ofstream ofs(output_file_path_);
+        if (!ofs.is_open())
         {
-            RCLCPP_WARN(this->get_logger(), "No occupancy grid received yet; skipping trajectory planning.");
+            RCLCPP_ERROR(this->get_logger(), "Unable to open file %s for writing", output_file_path_.c_str());
             return;
         }
-        // Plan trajectories for all vehicles sequentially.
+        for (const auto &pt : traj)
+        {
+            ofs << std::get<1>(pt) << " "   // Y first
+                << std::get<0>(pt) << " "   // X second
+                << std::get<2>(pt) << " "   // Z remains
+                << std::get<3>(pt) << "\n"; // Timestamp
+        }
+        ofs.close();
+        RCLCPP_INFO(this->get_logger(), "Trajectory saved to %s", output_file_path_.c_str());
+    }
+
+    // -------------------- Main Planning Routine --------------------
+    // This function first plans for all UGVs (using the ground OGM) and then for all drones (using the drone OGM).
+    void plan_all_trajectories()
+    {
+        // First, ensure the ground occupancy grid has been received.
+        if (!occupancy_grid_received_ground_)
+        {
+            RCLCPP_WARN(this->get_logger(), "Ground occupancy grid not received yet; cannot plan UGV trajectories.");
+            return;
+        }
+        // ----------------- Plan UGV Trajectories -----------------
+        for (const auto &veh : vehicles_)
+        {
+            if (isUGV(veh))
+            {
+                // Set UGV planning parameters.
+                max_linear_velocity_ = 2.0;
+                max_turn_angle_deg_ = 45.0;
+                max_turn_angle_rad_ = max_turn_angle_deg_ * M_PI / 180.0;
+                // Set starting state from vehicle info.
+                robot_name_ = veh.name;
+                trajectory_length_ = veh.trajectory_length;
+                start_x_ = veh.start_x;
+                start_y_ = veh.start_y;
+                start_z_ = veh.start_z;
+                start_yaw_deg_ = veh.start_yaw;
+                start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
+                provided_waypoints_ = veh.checkpoints;
+                // Use the ground occupancy grid.
+                dynamic_occupancy_grid_ = occupancy_grid_ground_;
+                trajectory_.clear();
+                auto seg_pair = plan_trajectory();
+                update_dynamic_occupancy_grid(seg_pair.first);
+                publish_updated_occupancy_grid();
+                output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                save_trajectory_to_file(seg_pair.second);
+                plannedTrajectories_[veh.name] = seg_pair.second;
+                publish_trajectory_for_robot(veh.name, seg_pair.second);
+                publish_checkpoints_for_robot(veh.name, veh.checkpoints);
+            }
+        }
+
+        // ----------------- Plan Drone Trajectories -----------------
+        if (!occupancy_grid_received_drone_)
+        {
+            RCLCPP_WARN(this->get_logger(), "Drone occupancy grid not received yet; skipping drone planning.");
+            return;
+        }
+        for (const auto &veh : vehicles_)
+        {
+            if (isDrone(veh))
+            {
+                // Set drone planning parameters.
+                max_linear_velocity_ = 3.0;
+                max_turn_angle_deg_ = 105.0;
+                max_turn_angle_rad_ = max_turn_angle_deg_ * M_PI / 180.0;
+                // Set starting state from vehicle info.
+                robot_name_ = veh.name;
+                trajectory_length_ = veh.trajectory_length;
+                start_x_ = veh.start_x;
+                start_y_ = veh.start_y;
+                start_z_ = veh.start_z;
+                start_yaw_deg_ = veh.start_yaw;
+                start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
+                provided_waypoints_ = veh.checkpoints;
+                // Use the drone occupancy grid.
+                dynamic_occupancy_grid_ = occupancy_grid_drone_;
+                // Clear out UGV trajectories from the drone map (set cells to 0).
+                for (const auto &pair : plannedTrajectories_)
+                {
+                    // Assume UGV names contain "Husky".
+                    if (pair.first.find("Husky") != std::string::npos)
+                    {
+                        for (const auto &pt : pair.second)
+                        {
+                            int cell_x = static_cast<int>(std::floor((std::get<0>(pt) - grid_origin_x_) / grid_resolution_));
+                            int cell_y = static_cast<int>(std::floor((std::get<1>(pt) - grid_origin_y_) / grid_resolution_));
+                            if (cell_x >= 0 && cell_x < grid_width_ && cell_y >= 0 && cell_y < grid_height_)
+                            {
+                                dynamic_occupancy_grid_[cell_y * grid_width_ + cell_x] = 0;
+                            }
+                        }
+                    }
+                }
+                trajectory_.clear();
+                auto seg_pair = plan_trajectory();
+                update_dynamic_occupancy_grid(seg_pair.first);
+                publish_updated_occupancy_grid();
+                output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                save_trajectory_to_file(seg_pair.second);
+                plannedTrajectories_[veh.name] = seg_pair.second;
+                publish_trajectory_for_robot(veh.name, seg_pair.second);
+                publish_checkpoints_for_robot(veh.name, veh.checkpoints);
+            }
+        }
+    }
+
+    // -------------------- Timer Callback --------------------
+    void timer_callback()
+    {
+        if (!occupancy_grid_received_ground_)
+        {
+            RCLCPP_WARN(this->get_logger(), "Ground occupancy grid not received; skipping planning.");
+            return;
+        }
+        // Plan both UGV and (if available) drone trajectories sequentially.
         plan_all_trajectories();
-        // Optionally, cancel the timer if you plan only once.
+        // Optionally cancel timer if planning only once.
         timer_->cancel();
     }
 };
