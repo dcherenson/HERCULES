@@ -662,13 +662,17 @@ private:
         };
 
         // Lambda: plan a random segment if trajectory is too short (using kinodynamic RRT).
-        auto plan_random_segment = [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double remaining_length) -> std::pair<TrajVec, TrajVec>
+        // Lambda: plan a random segment if trajectory is too short (using kinodynamic RRT).
+        auto plan_random_segment = [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double remaining_length)
+            -> std::pair<std::vector<std::tuple<double, double, double, double>>,
+                         std::vector<std::tuple<double, double, double, double>>>
         {
             struct Node
             {
                 double x, y, theta, time, cost; // cost = accumulated distance (pure)
                 int parent;
             };
+            using TrajVec = std::vector<std::tuple<double, double, double, double>>;
             std::vector<Node> tree;
             Node root = {curr_x, curr_y, curr_theta, curr_time, 0.0, -1};
             tree.push_back(root);
@@ -680,8 +684,49 @@ private:
 
             for (int iter = 0; iter < max_iterations; iter++)
             {
-                double x_rand = x_dist_(rng_);
-                double y_rand = y_dist_(rng_);
+                // ----- Biased Sampling toward Unknown Cells (Approach 1) -----
+                double bias_probability = 0.7; // Tune this probability as needed.
+                double sample_choice = std::uniform_real_distribution<double>(0.0, 1.0)(rng_);
+                double x_rand, y_rand;
+                if (sample_choice < bias_probability)
+                {
+                    // Gather centers of unknown cells.
+                    std::vector<std::pair<double, double>> unknown_cells;
+                    for (int j = 0; j < grid_height_; j++)
+                    {
+                        for (int i = 0; i < grid_width_; i++)
+                        {
+                            int idx = j * grid_width_ + i;
+                            if (dynamic_occupancy_grid_[idx] == -1)
+                            {
+                                double wx = grid_origin_x_ + (i + 0.5) * grid_resolution_;
+                                double wy = grid_origin_y_ + (j + 0.5) * grid_resolution_;
+                                unknown_cells.push_back({wx, wy});
+                            }
+                        }
+                    }
+                    if (!unknown_cells.empty())
+                    {
+                        int rand_idx = std::uniform_int_distribution<int>(0, unknown_cells.size() - 1)(rng_);
+                        x_rand = unknown_cells[rand_idx].first;
+                        y_rand = unknown_cells[rand_idx].second;
+                    }
+                    else
+                    {
+                        // Fallback to uniform sampling if no unknown cells are available.
+                        x_rand = x_dist_(rng_);
+                        y_rand = y_dist_(rng_);
+                    }
+                }
+                else
+                {
+                    // Regular uniform sampling.
+                    x_rand = x_dist_(rng_);
+                    y_rand = y_dist_(rng_);
+                }
+                // -------------------------------------------------------------
+
+                // Find the nearest node in the tree.
                 int nearest_index = 0;
                 double min_dist = std::numeric_limits<double>::max();
                 for (int i = 0; i < tree.size(); i++)
@@ -729,11 +774,11 @@ private:
                     continue;
                 }
 
-                // Create new node with pure distance cost.
+                // Create new node.
                 Node new_node = {new_x, new_y, new_theta, new_time, distance_cost, nearest_index};
                 tree.push_back(new_node);
 
-                // Use the pure distance cost to decide if we've reached the required remaining length.
+                // Check if we've reached the required remaining length.
                 if (distance_cost >= remaining_length)
                 {
                     reached = true;
@@ -751,7 +796,7 @@ private:
                 return std::make_pair(dense_rand, sparse_rand);
             }
 
-            // Reconstruct the path
+            // Reconstruct the path.
             std::vector<Node> path;
             int idx = goal_index;
             while (idx != -1)
