@@ -153,6 +153,15 @@ public:
                     }
 
                     info.reach_checkpoints_first = veh_data.value("ReachCheckPointsFirst", true);
+
+                    if (veh_data.contains("FlightPattern"))
+                    {
+                        info.flight_pattern = veh_data.value("FlightPattern", "Loiter");
+                    }
+                    else
+                    {
+                        info.flight_pattern = "Loiter";
+                    }
                     vehicles_.push_back(info);
                 }
                 // Sort vehicles by numeric order extracted from their names.
@@ -208,6 +217,7 @@ private:
         double start_x, start_y, start_z, start_yaw;
         std::vector<std::tuple<double, double, double>> checkpoints;
         bool reach_checkpoints_first;
+        std::string flight_pattern; // "Loiter" (default) or "Convoy" for drones
     };
     std::vector<VehicleInfo> vehicles_;
 
@@ -1348,18 +1358,298 @@ private:
         RCLCPP_INFO(this->get_logger(), "Trajectory saved to %s", output_file_path_.c_str());
     }
 
+    // Computes the time increment to traverse from (x0, y0) to (x1, y1)
+    // given the current heading (current_theta). It uses the member variables
+    // max_linear_velocity_ and max_turn_angle_rad_.
+    double compute_dt_segment(double x0, double y0, double x1, double y1, double current_theta)
+    {
+        double dx = x1 - x0;
+        double dy = y1 - y0;
+        double distance = std::sqrt(dx * dx + dy * dy);
+        double t_linear = distance / max_linear_velocity_;
+        double new_heading = std::atan2(dy, dx);
+        double dtheta = std::fabs(new_heading - current_theta);
+        if (dtheta > M_PI)
+            dtheta = 2 * M_PI - dtheta;
+        double t_angular = (dtheta / max_turn_angle_rad_) * t_linear;
+        return t_linear + t_angular;
+    }
+
+    // This function replicates the logic from plan_segment lambda,
+    // but as a standalone member function. It returns a pair of trajectories:
+    // the dense version (for updating the occupancy grid) and the sparse version
+    // (for publishing/saving). The planning is done from the initial state provided
+    // (init_x, init_y, init_z, init_time, init_theta) to the goal (goal_x, goal_y, goal_z).
+    std::pair<std::vector<std::tuple<double, double, double, double>>,
+              std::vector<std::tuple<double, double, double, double>>>
+    plan_segment_to_goal(double init_x, double init_y, double init_z, double init_time, double init_theta,
+                         double goal_x, double goal_y, double goal_z)
+    {
+        using TrajVec = std::vector<std::tuple<double, double, double, double>>;
+        TrajVec seg_dense, seg_sparse;
+        // Start with the initial state.
+        seg_dense.push_back(std::make_tuple(init_x, init_y, init_z, init_time));
+        seg_sparse.push_back(std::make_tuple(init_x, init_y, init_z, init_time));
+
+        if (!use_k_rrt_for_checkpoints_)
+        {
+            // A* based planning segment.
+            std::vector<std::pair<double, double>> raw_path;
+            raw_path.push_back({init_x, init_y});
+            int start_cell_x = static_cast<int>(std::floor((init_x - grid_origin_x_) / grid_resolution_));
+            int start_cell_y = static_cast<int>(std::floor((init_y - grid_origin_y_) / grid_resolution_));
+            int goal_cell_x = static_cast<int>(std::floor((goal_x - grid_origin_x_) / grid_resolution_));
+            int goal_cell_y = static_cast<int>(std::floor((goal_y - grid_origin_y_) / grid_resolution_));
+            auto path_cells = a_star(start_cell_x, start_cell_y, goal_cell_x, goal_cell_y);
+            for (size_t i = 1; i < path_cells.size(); ++i)
+            {
+                int cell_x = path_cells[i].first;
+                int cell_y = path_cells[i].second;
+                double wx = grid_origin_x_ + (cell_x + 0.5) * grid_resolution_;
+                double wy = grid_origin_y_ + (cell_y + 0.5) * grid_resolution_;
+                raw_path.push_back({wx, wy});
+            }
+            // Smooth the raw path.
+            auto smooth_path_result = smoothPath(raw_path, 50, 0.1);
+            double turn_threshold = 1.0;
+            auto refined_path = smooth_path_result;
+            for (int iter = 0; iter < 5; ++iter)
+            {
+                refined_path = refineSharpTurns(refined_path, turn_threshold);
+            }
+            // Build dense segment.
+            double prev_x = refined_path.front().first;
+            double prev_y = refined_path.front().second;
+            double time_acc = init_time;
+            double local_theta = init_theta;
+            for (size_t i = 1; i < refined_path.size(); ++i)
+            {
+                double wx = refined_path[i].first;
+                double wy = refined_path[i].second;
+                double dt_val = compute_dt_segment(prev_x, prev_y, wx, wy, local_theta);
+                time_acc += dt_val;
+                seg_dense.push_back(std::make_tuple(wx, wy, init_z, time_acc));
+                local_theta = std::atan2(wy - prev_y, wx - prev_x);
+                prev_x = wx;
+                prev_y = wy;
+            }
+            // Build sparse segment via sparsification.
+            auto sparsified_path = sparsifyPath(refined_path, 0.05);
+            prev_x = sparsified_path.front().first;
+            prev_y = sparsified_path.front().second;
+            time_acc = init_time;
+            local_theta = init_theta;
+            for (size_t i = 1; i < sparsified_path.size(); ++i)
+            {
+                double wx = sparsified_path[i].first;
+                double wy = sparsified_path[i].second;
+                double dt_val = compute_dt_segment(prev_x, prev_y, wx, wy, local_theta);
+                time_acc += dt_val;
+                seg_sparse.push_back(std::make_tuple(wx, wy, init_z, time_acc));
+                local_theta = std::atan2(wy - prev_y, wx - prev_x);
+                prev_x = wx;
+                prev_y = wy;
+            }
+            return std::make_pair(seg_dense, seg_sparse);
+        }
+        else
+        {
+            // Kinodynamic-RRT based planning segment.
+            struct Node
+            {
+                double x, y, theta, time, cost;
+                int parent;
+            };
+            std::vector<Node> tree;
+            Node root = {init_x, init_y, init_theta, init_time, 0.0, -1};
+            tree.push_back(root);
+            int max_iterations = 100000;
+            bool reached = false;
+            int goal_index = -1;
+            double dt_val = 2.0; // Time increment per step.
+            double v = max_linear_velocity_;
+            double goal_threshold = 1.0; // Distance threshold.
+
+            for (int iter = 0; iter < max_iterations; iter++)
+            {
+                double sample_choice = std::uniform_real_distribution<double>(0.0, 1.0)(rng_);
+                double x_rand, y_rand;
+                double bias_probability = 0.2; // 20% chance to sample the goal directly.
+                if (sample_choice < bias_probability)
+                {
+                    x_rand = goal_x;
+                    y_rand = goal_y;
+                }
+                else
+                {
+                    x_rand = x_dist_(rng_);
+                    y_rand = y_dist_(rng_);
+                }
+                // Find the nearest node.
+                int nearest_index = 0;
+                double min_dist = std::numeric_limits<double>::max();
+                for (int i = 0; i < tree.size(); i++)
+                {
+                    double dx = tree[i].x - x_rand;
+                    double dy = tree[i].y - y_rand;
+                    double dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist < min_dist)
+                    {
+                        min_dist = dist;
+                        nearest_index = i;
+                    }
+                }
+                Node nearest = tree[nearest_index];
+                double theta_des = std::atan2(y_rand - nearest.y, x_rand - nearest.x);
+                double dtheta = theta_des - nearest.theta;
+                while (dtheta > M_PI)
+                    dtheta -= 2 * M_PI;
+                while (dtheta < -M_PI)
+                    dtheta += 2 * M_PI;
+                double new_theta = nearest.theta + dtheta;
+                double step = v * dt_val;
+                double new_x = nearest.x + step * std::cos(new_theta);
+                double new_y = nearest.y + step * std::sin(new_theta);
+                double new_time = nearest.time + dt_val;
+                double distance_cost = nearest.cost + step;
+                if (new_x < grid_origin_x_ || new_x > grid_origin_x_ + square_size_ ||
+                    new_y < grid_origin_y_ || new_y > grid_origin_y_ + square_size_)
+                {
+                    continue;
+                }
+                if (!check_line_free_bresenham(std::make_tuple(nearest.x, nearest.y, init_z, 0.0),
+                                               std::make_tuple(new_x, new_y, init_z, 0.0)))
+                {
+                    continue;
+                }
+                Node new_node = {new_x, new_y, new_theta, new_time, distance_cost, nearest_index};
+                tree.push_back(new_node);
+                double dx_goal = new_x - goal_x;
+                double dy_goal = new_y - goal_y;
+                if (std::sqrt(dx_goal * dx_goal + dy_goal * dy_goal) < goal_threshold)
+                {
+                    reached = true;
+                    goal_index = tree.size() - 1;
+                    break;
+                }
+            }
+
+            TrajVec seg_dense_rrt, seg_sparse_rrt;
+            if (!reached)
+            {
+                RCLCPP_ERROR(this->get_logger(), "Kinodynamic RRT for checkpoint failed after %d iterations", max_iterations);
+                seg_dense_rrt.push_back(std::make_tuple(init_x, init_y, init_z, init_time));
+                seg_sparse_rrt.push_back(std::make_tuple(init_x, init_y, init_z, init_time));
+                return std::make_pair(seg_dense_rrt, seg_sparse_rrt);
+            }
+
+            std::vector<Node> path;
+            int idx = goal_index;
+            while (idx != -1)
+            {
+                path.push_back(tree[idx]);
+                idx = tree[idx].parent;
+            }
+            std::reverse(path.begin(), path.end());
+            for (const auto &node : path)
+            {
+                seg_dense_rrt.push_back(std::make_tuple(node.x, node.y, init_z, node.time));
+            }
+            std::vector<std::pair<double, double>> densePoints;
+            for (const auto &pt : seg_dense_rrt)
+            {
+                densePoints.push_back({std::get<0>(pt), std::get<1>(pt)});
+            }
+            auto sparsified_points = sparsifyPath(densePoints, 0.05);
+            double prev_x = sparsified_points.front().first;
+            double prev_y = sparsified_points.front().second;
+            double time_acc = std::get<3>(seg_dense_rrt.front());
+            double local_theta = init_theta;
+            seg_sparse_rrt.push_back(std::make_tuple(prev_x, prev_y, init_z, time_acc));
+            for (size_t i = 1; i < sparsified_points.size(); i++)
+            {
+                double wx = sparsified_points[i].first;
+                double wy = sparsified_points[i].second;
+                double dt_new = compute_dt_segment(prev_x, prev_y, wx, wy, local_theta);
+                time_acc += dt_new;
+                seg_sparse_rrt.push_back(std::make_tuple(wx, wy, init_z, time_acc));
+                local_theta = std::atan2(wy - prev_y, wx - prev_x);
+                prev_x = wx;
+                prev_y = wy;
+            }
+            return std::make_pair(seg_dense_rrt, seg_sparse_rrt);
+        }
+    }
+
+    // member function to plan a convoy trajectory.
+    //    This function uses the UGV’s sparse trajectory (ugv_traj) as a reference.
+    //    For each waypoint in ugv_traj (except the first), we plan a segment
+    //    from the drone’s current state to the UGV waypoint (using the drone’s OGM and with goal altitude set to drone_altitude_).
+    //    Then, we rescale the computed time stamps so that the segment finishes at the same time as the UGV’s waypoint.
+    std::pair<std::vector<std::tuple<double, double, double, double>>,
+              std::vector<std::tuple<double, double, double, double>>>
+    plan_convoy_trajectory(const std::vector<std::tuple<double, double, double, double>> &ugv_traj)
+    {
+        using TrajVec = std::vector<std::tuple<double, double, double, double>>;
+        TrajVec dense_traj, sparse_traj;
+        // Start at the drone’s starting state (with drone_altitude_)
+        dense_traj.push_back(std::make_tuple(start_x_, start_y_, drone_altitude_, 0.0));
+        sparse_traj.push_back(std::make_tuple(start_x_, start_y_, drone_altitude_, 0.0));
+        double curr_x = start_x_, curr_y = start_y_, curr_time = 0.0, curr_theta = start_yaw_;
+
+        // For each subsequent waypoint in the companion UGV’s trajectory…
+        for (size_t i = 1; i < ugv_traj.size(); i++)
+        {
+            double target_x = std::get<0>(ugv_traj[i]);
+            double target_y = std::get<1>(ugv_traj[i]);
+            double target_time = std::get<3>(ugv_traj[i]); // desired arrival time
+
+            // Plan a segment from current state to the target at drone altitude.
+            // (This code reuses your existing plan_segment logic.
+            // For clarity you might refactor that lambda into a helper function, e.g. plan_segment_to_goal.)
+            auto seg_pair = plan_segment_to_goal(curr_x, curr_y, drone_altitude_, curr_time, curr_theta, target_x, target_y, drone_altitude_);
+
+            // Rescale the time stamps in seg_pair so that the segment ends at target_time.
+            double seg_start_time = curr_time;
+            double seg_end_time = std::get<3>(seg_pair.second.back());
+            double scaling = (target_time - seg_start_time) / (seg_end_time - seg_start_time);
+            for (size_t j = 0; j < seg_pair.second.size(); j++)
+            {
+                double orig_time = std::get<3>(seg_pair.second[j]);
+                double new_time = seg_start_time + (orig_time - seg_start_time) * scaling;
+                std::get<3>(seg_pair.second[j]) = new_time;
+                std::get<3>(seg_pair.first[j]) = new_time;
+            }
+            // Append the new segment (skipping the duplicate starting point)
+            dense_traj.insert(dense_traj.end(), seg_pair.first.begin() + 1, seg_pair.first.end());
+            sparse_traj.insert(sparse_traj.end(), seg_pair.second.begin() + 1, seg_pair.second.end());
+
+            // Update current state for next segment.
+            curr_x = target_x;
+            curr_y = target_y;
+            curr_time = target_time;
+            if (seg_pair.second.size() >= 2)
+            {
+                double prev_x = std::get<0>(seg_pair.second[seg_pair.second.size() - 2]);
+                double prev_y = std::get<1>(seg_pair.second[seg_pair.second.size() - 2]);
+                curr_theta = std::atan2(target_y - prev_y, target_x - prev_x);
+            }
+        }
+        RCLCPP_INFO(this->get_logger(), "Planned convoy trajectory (time-synced with companion UGV).");
+        return std::make_pair(dense_traj, sparse_traj);
+    }
+
     // -------------------- Main Planning Routine --------------------
     // This function first plans for all UGVs (using the ground OGM) and then for all drones (using the drone OGM).
     void plan_all_trajectories()
     {
-        // First, ensure the ground occupancy grid has been received.
+        // ----- UGV Planning -----
         if (!occupancy_grid_received_ground_)
         {
             RCLCPP_WARN(this->get_logger(), "Ground occupancy grid not received yet; cannot plan UGV trajectories.");
             return;
         }
 
-        // ----- UGV Planning -----
         // Copy the ground occupancy grid into the UGV dynamic grid.
         dynamic_ground_grid_ = occupancy_grid_ground_;
 
@@ -1367,7 +1657,7 @@ private:
         {
             if (isUGV(veh))
             {
-                // Set UGV planning parameters.
+                // Set UGV-specific parameters.
                 max_linear_velocity_ = ugv_max_linear_velocity_;
                 max_turn_angle_deg_ = ugv_max_turn_angle_deg_;
                 max_turn_angle_rad_ = max_turn_angle_deg_ * M_PI / 180.0;
@@ -1381,11 +1671,9 @@ private:
                 start_yaw_deg_ = veh.start_yaw;
                 start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
                 provided_waypoints_ = veh.checkpoints;
-                // Set the new flag (default true if not specified in JSON)
                 current_reach_checkpoints_first_ = veh.reach_checkpoints_first;
 
                 // Use the UGV dynamic grid for planning.
-                // (Temporarily assign it to our global dynamic_occupancy_grid_ used by plan_trajectory.)
                 dynamic_occupancy_grid_ = dynamic_ground_grid_;
                 trajectory_.clear();
                 auto seg_pair = plan_trajectory();
@@ -1411,7 +1699,6 @@ private:
         dynamic_drone_grid_ = occupancy_grid_drone_;
 
         // Merge UGV-explored cells from dynamic_ground_grid_ into dynamic_drone_grid_.
-        // (Assuming both grids are the same size.)
         if (dynamic_ground_grid_.size() == dynamic_drone_grid_.size())
         {
             for (size_t i = 0; i < dynamic_drone_grid_.size(); i++)
@@ -1426,39 +1713,116 @@ private:
             RCLCPP_WARN(this->get_logger(), "UGV and Drone grid sizes differ; cannot merge explored cells.");
         }
 
+        // Build a mapping for Convoy mode: assign each convoy drone a unique UGV companion based on starting positions.
+        std::map<std::string, std::string> drone_to_ugv;
+        std::vector<VehicleInfo> ugv_list;
+        for (const auto &veh : vehicles_)
+        {
+            if (isUGV(veh))
+                ugv_list.push_back(veh);
+        }
+        for (const auto &veh : vehicles_)
+        {
+            if (isDrone(veh) && veh.flight_pattern == "Convoy")
+            {
+                double min_dist = std::numeric_limits<double>::max();
+                std::string selected_ugv;
+                for (const auto &ugv : ugv_list)
+                {
+                    // Only consider UGVs not already paired.
+                    bool already_assigned = false;
+                    for (const auto &pair : drone_to_ugv)
+                    {
+                        if (pair.second == ugv.name)
+                        {
+                            already_assigned = true;
+                            break;
+                        }
+                    }
+                    if (already_assigned)
+                        continue;
+                    double dx = veh.start_x - ugv.start_x;
+                    double dy = veh.start_y - ugv.start_y;
+                    double dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist < min_dist)
+                    {
+                        min_dist = dist;
+                        selected_ugv = ugv.name;
+                    }
+                }
+                if (!selected_ugv.empty())
+                    drone_to_ugv[veh.name] = selected_ugv;
+                else if (!ugv_list.empty())
+                    drone_to_ugv[veh.name] = ugv_list[0].name; // fallback assignment
+            }
+        }
+
+        // Process each drone.
         for (const auto &veh : vehicles_)
         {
             if (isDrone(veh))
             {
-                // Set drone planning parameters.
+                // Set drone-specific parameters.
                 max_linear_velocity_ = drone_max_linear_velocity_;
                 max_turn_angle_deg_ = drone_max_turn_angle_deg_;
                 max_turn_angle_rad_ = max_turn_angle_deg_ * M_PI / 180.0;
 
-                // Set starting state from vehicle info.
+                // Set starting state from vehicle info (override z to drone_altitude_).
                 robot_name_ = veh.name;
                 trajectory_length_ = veh.trajectory_length;
                 start_x_ = veh.start_x;
                 start_y_ = veh.start_y;
-                // For drones, override the start_z with the specified drone altitude.
                 start_z_ = drone_altitude_;
                 start_yaw_deg_ = veh.start_yaw;
                 start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
                 provided_waypoints_ = veh.checkpoints;
                 current_reach_checkpoints_first_ = veh.reach_checkpoints_first;
 
-                // Use the drone dynamic grid for planning.
                 dynamic_occupancy_grid_ = dynamic_drone_grid_;
                 trajectory_.clear();
-                auto seg_pair = plan_trajectory();
-                update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
-                publish_updated_occupancy_grid(dynamic_drone_grid_, true);
 
-                output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
-                save_trajectory_to_file(seg_pair.second);
-                plannedTrajectories_[veh.name] = seg_pair.second;
-                publish_trajectory_for_robot(veh.name, seg_pair.second);
-                publish_checkpoints_for_robot(veh.name, veh.checkpoints);
+                if (veh.flight_pattern == "Convoy")
+                {
+                    // For Convoy mode, select the companion UGV's trajectory.
+                    std::string companion = drone_to_ugv[veh.name];
+                    auto ugv_traj_it = plannedTrajectories_.find(companion);
+                    if (ugv_traj_it == plannedTrajectories_.end())
+                    {
+                        RCLCPP_ERROR(this->get_logger(), "Companion UGV trajectory for %s not found", companion.c_str());
+                        // Fallback to default (Loiter) planning.
+                        auto seg_pair = plan_trajectory();
+                        update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
+                        publish_updated_occupancy_grid(dynamic_drone_grid_, true);
+                        output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                        save_trajectory_to_file(seg_pair.second);
+                        plannedTrajectories_[veh.name] = seg_pair.second;
+                        publish_trajectory_for_robot(veh.name, seg_pair.second);
+                        publish_checkpoints_for_robot(veh.name, veh.checkpoints);
+                    }
+                    else
+                    {
+                        // Plan the convoy trajectory by tracking the companion UGV's sparse trajectory.
+                        auto seg_pair = plan_convoy_trajectory(ugv_traj_it->second);
+                        update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
+                        publish_updated_occupancy_grid(dynamic_drone_grid_, true);
+                        output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                        save_trajectory_to_file(seg_pair.second);
+                        plannedTrajectories_[veh.name] = seg_pair.second;
+                        publish_trajectory_for_robot(veh.name, seg_pair.second);
+                        publish_checkpoints_for_robot(veh.name, veh.checkpoints);
+                    }
+                }
+                else
+                { // "Loiter" mode (default behavior)
+                    auto seg_pair = plan_trajectory();
+                    update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
+                    publish_updated_occupancy_grid(dynamic_drone_grid_, true);
+                    output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                    save_trajectory_to_file(seg_pair.second);
+                    plannedTrajectories_[veh.name] = seg_pair.second;
+                    publish_trajectory_for_robot(veh.name, seg_pair.second);
+                    publish_checkpoints_for_robot(veh.name, veh.checkpoints);
+                }
             }
         }
     }
