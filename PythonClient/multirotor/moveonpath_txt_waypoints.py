@@ -44,7 +44,7 @@ print(f"Make sure we are hovering at {-z} meters...")
 client.moveToZAsync(z, 1, vehicle_name=drone_name).join()
 
 # Load waypoints from the text file
-waypoints_file = '/home/sgarimella34/multi-robot-coordination/trajectory_data/trajectory_drone_test.txt'
+waypoints_file = '/home/sgarimella34/multi-robot-coordination/trajectory_data/Drone1_trajectory.txt'
 waypoints = load_waypoints_from_file(waypoints_file)
 
 if not waypoints:

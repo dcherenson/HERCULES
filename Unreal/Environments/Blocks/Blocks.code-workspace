@@ -45,6 +45,7 @@
 			"thread": "cpp",
 			"typeindex": "cpp",
 			"algorithm": "cpp"
-		}
+		},
+		"ros.distro": "humble"
 	}
 }
