@@ -140,6 +140,11 @@ __pragma(warning(disable : 4239))
             const float Kp_steering = 1.0f;        // Proportional gain for steering.
             const float max_steering_angle = 0.5f; // Maximum steering angle in radians.
             const float throttle_gain = 0.5f;      // Gain for throttle command.
+            const float threshold = 1.0f;          // Distance threshold for waypoint completion.
+
+            // Detect if the path is a closed loop.
+            bool closed_loop = (distance2D(path.front(), path.back()) < 1e-3);
+            bool passed_start = false; // Will be set true once the UGV leaves the start area.
 
             while (true)
             {
@@ -153,27 +158,20 @@ __pragma(warning(disable : 4239))
                 }
 
                 // Retrieve current car state.
-                CarApiBase::CarState car_state = getCarState(vehicle_name);
-                // Use kinematics_estimated.pose to get position and orientation.
+                CarApiBase::CarState car_state = this->getCarState(vehicle_name);
                 Vector3r current_pos = car_state.kinematics_estimated.pose.position;
                 float current_speed = car_state.speed; // In m/s.
 
                 // For this example, we use a fixed lookahead distance.
                 float current_lookahead = lookahead;
-
-                // Get the target point along the path.
                 Vector3r target = getLookaheadPoint(current_pos, path, current_lookahead);
 
-                // Compute desired heading (in radians) from current position to target.
+                // Compute desired heading from current position to target.
                 float desired_heading = std::atan2(target.y() - current_pos.y(), target.x() - current_pos.x());
-
-                // Extract the car's current heading from the kinematics pose.
                 float current_heading = getYawFromQuaternion(car_state.kinematics_estimated.pose.orientation);
-
-                // Compute heading error.
                 float heading_error = normalizeAngle(desired_heading - current_heading);
 
-                // Compute steering command using a proportional controller.
+                // Compute steering command.
                 float steering_cmd = Kp_steering * heading_error;
                 if (steering_cmd > max_steering_angle)
                     steering_cmd = max_steering_angle;
@@ -193,23 +191,38 @@ __pragma(warning(disable : 4239))
                     throttle_cmd = 0.0f;
                 }
 
-                // Create and send the car controls command.
+                // Send the command using the client instance.
                 CarApiBase::CarControls controls;
                 controls.steering = steering_cmd;
                 controls.throttle = throttle_cmd;
                 controls.handbrake = false;
                 controls.is_manual_gear = false;
-
                 this->setCarControls(controls, vehicle_name);
 
-                // Check if the final waypoint has been reached (use a 1-meter threshold).
-                if (distance2D(current_pos, path.back()) < 1.0f)
+                // Termination check:
+                if (closed_loop)
                 {
-                    std::cout << "Destination reached." << std::endl;
-                    break;
+                    // For closed-loop paths, first ensure the UGV has left the vicinity of the starting point.
+                    if (!passed_start && distance2D(current_pos, path.front()) > threshold * 2)
+                        passed_start = true;
+                    // If the UGV has left and then returned close to the starting point, finish.
+                    if (passed_start && distance2D(current_pos, path.front()) < threshold)
+                    {
+                        std::cout << "Closed-loop: Returned to starting point." << std::endl;
+                        break;
+                    }
+                }
+                else
+                {
+                    // For open paths, check if we're near the final waypoint.
+                    if (distance2D(current_pos, path.back()) < threshold)
+                    {
+                        std::cout << "Destination reached." << std::endl;
+                        break;
+                    }
                 }
 
-                // Sleep for the control period.
+                // Wait for the control period.
                 std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(control_period * 1000)));
             }
 
@@ -219,7 +232,6 @@ __pragma(warning(disable : 4239))
             stop_controls.steering = 0;
             stop_controls.handbrake = true;
             this->setCarControls(stop_controls, vehicle_name);
-
 
             return true;
         }
