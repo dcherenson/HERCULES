@@ -65,14 +65,15 @@ std::vector<Vector3r> loadWaypoints(const string &file_path, float fixed_z)
 
 int main(int argc, char *argv[])
 {
-    if (argc != 3)
+    if (argc != 4)
     {
-        cerr << "Usage: " << argv[0] << " <UGVName> <WaypointFilePath>" << endl;
+        cerr << "Usage: " << argv[0] << " <UGVName> <UGVLinearVelocity> <WaypointFilePath>" << endl;
         return 1;
     }
 
     string ugv_name = argv[1];
-    string waypoint_file = argv[2];
+    string ugv_linear_vel = argv[2];
+    string waypoint_file = argv[3];
 
     // For a ground vehicle, you can assume a fixed z value (e.g. 0 meters).
     float fixed_z = 0.0f;
@@ -98,7 +99,8 @@ int main(int argc, char *argv[])
     cout << "[" << ugv_name << "] Starting waypoint navigation..." << endl;
 
     // Define parameters for the moveOnPath function.
-    float desired_velocity = 2.0f;   // Desired speed in m/s.
+    float desired_velocity = std::stof(argv[2]); // Desired speed in m/s.
+
     float timeout_sec = 1000.0f;     // Total allowed time (in seconds) for the maneuver.
     float lookahead = 5.0f;          // Lookahead distance (in meters).
     float adaptive_lookahead = 0.0f; // Not used in this example.

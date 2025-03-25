@@ -220,6 +220,24 @@ __pragma(warning(disable : 4239))
                         std::cout << "Destination reached." << std::endl;
                         break;
                     }
+                    // Additional check: if there are at least two waypoints, check if the UGV has passed the last checkpoint.
+                    if (path.size() >= 2)
+                    {
+                        Vector3r last_segment = path.back() - path[path.size() - 2];
+                        float segment_length = last_segment.norm();
+                        // Avoid division by zero.
+                        if (segment_length > 1e-6f)
+                        {
+                            Vector3r dir = last_segment / segment_length;
+                            Vector3r to_vehicle = current_pos - path[path.size() - 2];
+                            float proj = to_vehicle.dot(dir);
+                            if (proj > segment_length)
+                            {
+                                std::cout << "Destination passed." << std::endl;
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 // Wait for the control period.
