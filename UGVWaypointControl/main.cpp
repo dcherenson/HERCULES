@@ -102,12 +102,11 @@ int main(int argc, char *argv[])
     float desired_velocity = std::stof(argv[2]); // Desired speed in m/s.
 
     float timeout_sec = 1000.0f;     // Total allowed time (in seconds) for the maneuver.
-    float lookahead = 5.0f;          // Lookahead distance (in meters).
-    float adaptive_lookahead = 0.0f; // Not used in this example.
+    float lookahead = 4.0f;          // Lookahead distance (in meters).
 
     // Call the moveOnPath function (which you added to CarRpcLibClient).
     bool success = client.moveOnPath(waypoints, desired_velocity, timeout_sec,
-                                     lookahead, adaptive_lookahead, ugv_name);
+                                     lookahead, ugv_name);
     if (!success)
     {
         cerr << "[" << ugv_name << "] Failed to complete the waypoint mission." << endl;
