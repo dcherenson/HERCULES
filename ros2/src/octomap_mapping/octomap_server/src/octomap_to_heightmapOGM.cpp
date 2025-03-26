@@ -18,7 +18,6 @@ public:
     OctomapToHeightmapNode()
         : Node("octomap_to_heightmap_node")
     {
-        // Declare parameters:
         // robot_vertical_clearance: above ground, if an occupied cell is found that is separated from the ground
         // and is higher than this value then it is ignored unless it is part of a continuous (tree trunk) block.
         robot_clearance_m_ = this->declare_parameter("robot_vertical_clearance", 0.5);
@@ -149,7 +148,7 @@ private:
                     else
                     {
                         // If the ground has already been found and a gap appears, you might decide to stop the ray.
-                        // (Uncomment the next line if you want to stop at the first gap.)
+                        // (NOTE: Uncomment the next line if you want to stop at the first gap.)
                         // if (ground_found) break;
                     }
                 } // end vertical ray
