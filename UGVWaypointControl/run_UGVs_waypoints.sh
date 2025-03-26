@@ -12,74 +12,72 @@ DEFAULT_NUM_UGVS=2
 # Default linear speed (in m/s) to be used when no individual speed is provided
 DEFAULT_SPEED=1.75
 
+# Prefix for UGV names (adjust to match your naming convention)
+PREFIX="Husky"
+
 # Array to hold process IDs for launched instances
 PIDS=()
 
 # Usage help function
 usage() {
     echo "Usage:"
-    echo "  $0                           # Run UGV1 to UGV${DEFAULT_NUM_UGVS} with default speed (${DEFAULT_SPEED} m/s)"
-    echo "  $0 <num_ugvs>                # Run UGV1 to UGV<num_ugvs> with default speed (${DEFAULT_SPEED} m/s)"
-    echo "  $0 UGV3                     # Run only UGV3 with default speed (${DEFAULT_SPEED} m/s)"
-    echo "  $0 UGV3 <speed>             # Run only UGV3 with the specified speed"
-    echo "  $0 <num_ugvs> <speed>         # Run UGV1 to UGV<num_ugvs> with the specified speed for all"
+    echo "  $0                           # Run ${PREFIX}1 to ${PREFIX}${DEFAULT_NUM_UGVS} with default speed (${DEFAULT_SPEED} m/s)"
+    echo "  $0 <num_ugvs>                # Run ${PREFIX}1 to ${PREFIX}<num_ugvs> with default speed (${DEFAULT_SPEED} m/s)"
+    echo "  $0 ${PREFIX}3                # Run only ${PREFIX}3 with default speed (${DEFAULT_SPEED} m/s)"
+    echo "  $0 ${PREFIX}3 <speed>        # Run only ${PREFIX}3 with the specified speed"
+    echo "  $0 <num_ugvs> <speed>        # Run ${PREFIX}1 to ${PREFIX}<num_ugvs> with the specified speed for all"
     exit 1
 }
 
 # Determine the launch mode based on the number and type of arguments.
 if [[ $# -eq 0 ]]; then
-    # Default: Run UGV1 to UGV${DEFAULT_NUM_UGVS} with default speed.
+    # Default: Run PREFIX1 to PREFIX${DEFAULT_NUM_UGVS} with default speed.
     for i in $(seq 1 $DEFAULT_NUM_UGVS); do
-        UGV_NAME="Husky$i"
+        UGV_NAME="${PREFIX}$i"
         WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
         echo "Launching $UGV_NAME with speed ${DEFAULT_SPEED} m/s and waypoints from $WAYPOINT_FILE"
         $EXECUTABLE_PATH "$UGV_NAME" "$DEFAULT_SPEED" "$WAYPOINT_FILE" &
         PIDS+=($!)
     done
 elif [[ $# -eq 1 ]]; then
-    if [[ $1 =~ ^UGV[0-9]+$ ]]; then
-        # Run only a specific UGV (e.g., UGV3) with default speed.
-        UGV_NAME="$1"
-        WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
-        echo "Launching $UGV_NAME with default speed ${DEFAULT_SPEED} m/s and waypoints from $WAYPOINT_FILE"
-        $EXECUTABLE_PATH "$UGV_NAME" "$DEFAULT_SPEED" "$WAYPOINT_FILE" &
-        PIDS+=($!)
-    elif [[ $1 =~ ^[0-9]+$ ]]; then
-        # Run UGV1 to UGV<num_ugvs> with default speed.
+    if [[ $1 =~ ^[0-9]+$ ]]; then
+        # Numeric argument: run PREFIX1 to PREFIX<num_ugvs> with default speed.
         NUM_UGVS=$1
         for i in $(seq 1 $NUM_UGVS); do
-            UGV_NAME="Husky$i"
+            UGV_NAME="${PREFIX}$i"
             WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
             echo "Launching $UGV_NAME with default speed ${DEFAULT_SPEED} m/s and waypoints from $WAYPOINT_FILE"
             $EXECUTABLE_PATH "$UGV_NAME" "$DEFAULT_SPEED" "$WAYPOINT_FILE" &
             PIDS+=($!)
         done
     else
-        usage
+        # Otherwise, assume it's a vehicle name.
+        UGV_NAME="$1"
+        WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
+        echo "Launching $UGV_NAME with default speed ${DEFAULT_SPEED} m/s and waypoints from $WAYPOINT_FILE"
+        $EXECUTABLE_PATH "$UGV_NAME" "$DEFAULT_SPEED" "$WAYPOINT_FILE" &
+        PIDS+=($!)
     fi
 elif [[ $# -eq 2 ]]; then
-    # Two arguments provided.
-    if [[ $1 =~ ^UGV[0-9]+$ ]]; then
-        # Mode: Run a single UGV (e.g., UGV3) with the specified speed.
-        UGV_NAME="$1"
-        SPEED="$2"
-        WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
-        echo "Launching $UGV_NAME with specified speed ${SPEED} m/s and waypoints from $WAYPOINT_FILE"
-        $EXECUTABLE_PATH "$UGV_NAME" "$SPEED" "$WAYPOINT_FILE" &
-        PIDS+=($!)
-    elif [[ $1 =~ ^[0-9]+$ ]]; then
-        # Mode: Run UGV1 to UGV<num_ugvs> with the specified speed for all.
+    if [[ $1 =~ ^[0-9]+$ ]]; then
+        # Numeric: run PREFIX1 to PREFIX<num_ugvs> with specified speed.
         NUM_UGVS=$1
         SPEED="$2"
         for i in $(seq 1 $NUM_UGVS); do
-            UGV_NAME="Husky$i"
+            UGV_NAME="${PREFIX}$i"
             WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
             echo "Launching $UGV_NAME with specified speed ${SPEED} m/s and waypoints from $WAYPOINT_FILE"
             $EXECUTABLE_PATH "$UGV_NAME" "$SPEED" "$WAYPOINT_FILE" &
             PIDS+=($!)
         done
     else
-        usage
+        # Otherwise, assume first argument is a vehicle name and second is the speed.
+        UGV_NAME="$1"
+        SPEED="$2"
+        WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
+        echo "Launching $UGV_NAME with specified speed ${SPEED} m/s and waypoints from $WAYPOINT_FILE"
+        $EXECUTABLE_PATH "$UGV_NAME" "$SPEED" "$WAYPOINT_FILE" &
+        PIDS+=($!)
     fi
 else
     usage

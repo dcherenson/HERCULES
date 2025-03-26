@@ -89,8 +89,8 @@ int main(int argc, char *argv[])
 
     // Create a CarRpcLibClient instance.
     // (Adjust the IP address, port, and timeout as needed.)
-    // CarRpcLibClient client("127.0.0.1", 41451, 60);
-    msr::airlib::CarRpcLibClient client;
+    msr::airlib::CarRpcLibClient client("127.0.0.1", 41452, 60);
+    // msr::airlib::CarRpcLibClient client;
     client.confirmConnection();
     client.enableApiControl(true, ugv_name);
 
@@ -101,8 +101,8 @@ int main(int argc, char *argv[])
     // Define parameters for the moveOnPath function.
     float desired_velocity = std::stof(argv[2]); // Desired speed in m/s.
 
-    float timeout_sec = 1000.0f;     // Total allowed time (in seconds) for the maneuver.
-    float lookahead = 4.0f;          // Lookahead distance (in meters).
+    float timeout_sec = 1000.0f; // Total allowed time (in seconds) for the maneuver.
+    float lookahead = 4.0f;      // Lookahead distance (in meters).
 
     // Call the moveOnPath function (which you added to CarRpcLibClient).
     bool success = client.moveOnPath(waypoints, desired_velocity, timeout_sec,

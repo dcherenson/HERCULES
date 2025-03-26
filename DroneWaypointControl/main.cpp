@@ -70,7 +70,7 @@ int main(int argc, char *argv[])
 
     try
     {
-        MultirotorRpcLibClient client;
+        MultirotorRpcLibClient client("localhost", 41451, 60.0f);
         client.confirmConnection();
         client.enableApiControl(true, drone_name);
         client.armDisarm(true, drone_name);
