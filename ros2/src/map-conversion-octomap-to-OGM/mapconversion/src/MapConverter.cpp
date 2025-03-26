@@ -25,7 +25,7 @@ void MapConverter::updateMap(vector<voxel> vMap, vector<double> minMax)
   // get number of cells in grid
   int xSize = (minMax[1] - minMax[0]) / MapConverter::map.getResulution();
   int ySize = (minMax[3] - minMax[2]) / MapConverter::map.getResulution();
-  // creat local maps
+  // create local maps
   HeightRangeMap hMap(xSize, ySize);
   for (voxel v : vMap)
   {
@@ -65,6 +65,7 @@ void MapConverter::updateMap(vector<voxel> vMap, vector<double> minMax)
         hMap.posMap[x][y].x = x * resolution + minMax[0];
         hMap.posMap[x][y].y = y * resolution + minMax[2];
         mapValue = -1;
+        // mapValue = 100;
       }
       if (mapValue == -1 &&
           map.get(hMap.posMap[x][y].x, hMap.posMap[x][y].y) == -1)
@@ -95,6 +96,8 @@ void MapConverter::updateMap(vector<voxel> vMap, vector<double> minMax)
           continue;
         map.set(hMap.posMap[x + d.x][y + d.y].x, hMap.posMap[x][y].y,
                 hMap.getOccupation(x + d.x, y + d.y, -1, minOcc));
+        // map.set(hMap.posMap[x + d.x][y + d.y].x, hMap.posMap[x + d.x][y + d.y].y,
+        //         hMap.getOccupation(x + d.x, y + d.y, -1, minOcc));
       }
     }
   }
@@ -114,7 +117,7 @@ vector<double> MapConverter::minMaxVoxel(vector<voxel> list)
   minMax[5] = -INFINITY;
   for (voxel v : list)
   {
-    // for reliebol size estimation of new regon, only smalest voxels in the
+    // for reliable size estimation of new region, only smallest voxels in the
     // octree are used
     if (v.halfSize > resolution * .9)
       continue;

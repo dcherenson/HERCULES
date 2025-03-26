@@ -160,6 +160,7 @@ install(TARGETS trajectory_planner_octomap_node_time_horizon
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# _______________________________________
 
 ament_auto_add_executable(octomap_slicer_gridmap
   src/octomap_slicer_gridmap.cpp
@@ -173,6 +174,23 @@ target_link_libraries(octomap_slicer_gridmap
 install(TARGETS octomap_slicer_gridmap
   DESTINATION lib/${PROJECT_NAME}
 )
+
+# _______________________________________
+ament_auto_add_executable(octomap_to_heightmapOGM
+  src/octomap_to_heightmapOGM.cpp
+)
+
+target_link_libraries(octomap_to_heightmapOGM
+  ${OCTOMAP_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
+install(TARGETS octomap_to_heightmapOGM
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# _______________________________________
+
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
