@@ -190,6 +190,20 @@ install(TARGETS octomap_to_heightmapOGM
 )
 
 # _______________________________________
+ament_auto_add_executable(octomap_to_heightmapOGM_windowplane
+  src/octomap_to_heightmapOGM_windowplane.cpp
+)
+
+target_link_libraries(octomap_to_heightmapOGM_windowplane
+  ${OCTOMAP_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
+install(TARGETS octomap_to_heightmapOGM_windowplane
+  DESTINATION lib/${PROJECT_NAME}
+)
+# _______________________________________
+
 
 
 if(BUILD_TESTING)
