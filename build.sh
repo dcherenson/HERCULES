@@ -7,7 +7,8 @@ pushd "$SCRIPT_DIR"  >/dev/null
 set -e
 set -x
 
-debug=true
+# debug=true
+debug=false
 gcc=false
 # Parse command line arguments
 while [[ $# -gt 0 ]]
