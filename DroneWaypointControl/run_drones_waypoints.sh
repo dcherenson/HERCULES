@@ -1,13 +1,15 @@
 #!/bin/bash
 
 # Absolute path to your executable
-EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_debug/output/bin/DroneWaypointControl
+# EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_debug/output/bin/DroneWaypointControl
+EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
+
 
 # Base path for waypoint files
 WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data"
 
 # Default number of drones if none specified
-DEFAULT_NUM_DRONES=2
+DEFAULT_NUM_DRONES=1
 
 # Store PIDs to wait on
 PIDS=()
