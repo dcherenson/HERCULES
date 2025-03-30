@@ -45,10 +45,12 @@ private: //variables
     APIPCamera* camera_front_right_;
     UPROPERTY()
     APIPCamera* camera_front_center_;
-    UPROPERTY()
-    APIPCamera* camera_back_center_;
-    UPROPERTY()
-    APIPCamera* camera_bottom_center_;
+
+    // Note by SSG: Not spawning back and bottom cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
+    // UPROPERTY()
+    // APIPCamera* camera_back_center_;
+    // UPROPERTY()
+    // APIPCamera* camera_bottom_center_;
 
     UPROPERTY()
     TArray<URotatingMovementComponent*> rotating_movements_;

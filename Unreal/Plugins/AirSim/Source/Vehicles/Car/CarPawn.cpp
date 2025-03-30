@@ -47,7 +47,7 @@ ACarPawn::ACarPawn()
     camera_front_right_base_->SetRelativeLocation(FVector(25, 20, 30)); //right
     camera_front_right_base_->SetupAttachment(GetMesh());
 
-    // Note by SSG: Not spawning driver and rear cameras to reduce GPU usage and because exploration algorithm does not use them
+    // Note by SSG: Not spawning driver and rear cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
     // camera_driver_base_ = CreateDefaultSubobject<USceneComponent>(TEXT("camera_driver_base_"));
     // camera_driver_base_->SetRelativeLocation(FVector(0, -25, 125)); //driver
     // camera_driver_base_->SetupAttachment(GetMesh());

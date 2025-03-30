@@ -86,7 +86,7 @@ private:
     UPROPERTY()
     USceneComponent* camera_front_right_base_;
 
-    // Note by SSG: Not spawning driver and rear cameras to reduce GPU usage and because exploration algorithm does not use them
+    // Note by SSG: Not spawning driver and rear cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
     // UPROPERTY()
     // USceneComponent* camera_driver_base_;
     // UPROPERTY()
@@ -99,7 +99,7 @@ private:
     UPROPERTY()
     APIPCamera* camera_front_right_;
 
-    // Note by SSG: Not spawning driver and rear cameras to reduce GPU usage and because exploration algorithm does not use them
+    // Note by SSG: Not spawning driver and rear cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
     // UPROPERTY()
     // APIPCamera* camera_driver_;
     // UPROPERTY()

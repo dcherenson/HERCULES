@@ -48,12 +48,14 @@ ASkidVehiclePawn::ASkidVehiclePawn()
 	camera_front_right_base_ = CreateDefaultSubobject<USceneComponent>(TEXT("camera_front_right_base_"));
 	camera_front_right_base_->SetRelativeLocation(FVector(45, 20, 45)); //right
 	camera_front_right_base_->SetupAttachment(GetMesh());
-	camera_driver_base_ = CreateDefaultSubobject<USceneComponent>(TEXT("camera_driver_base_"));
-	camera_driver_base_->SetRelativeLocation(FVector(3, 0, 75)); //driver
-	camera_driver_base_->SetupAttachment(GetMesh());
-	camera_back_center_base_ = CreateDefaultSubobject<USceneComponent>(TEXT("camera_back_center_base_"));
-	camera_back_center_base_->SetRelativeLocation(FVector(-190, 0, 75)); //rear
-	camera_back_center_base_->SetupAttachment(GetMesh());
+
+	// Note by SSG: Not spawning driver and back cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
+	// camera_driver_base_ = CreateDefaultSubobject<USceneComponent>(TEXT("camera_driver_base_"));
+	// camera_driver_base_->SetRelativeLocation(FVector(3, 0, 75)); //driver
+	// camera_driver_base_->SetupAttachment(GetMesh());
+	// camera_back_center_base_ = CreateDefaultSubobject<USceneComponent>(TEXT("camera_back_center_base_"));
+	// camera_back_center_base_->SetRelativeLocation(FVector(-190, 0, 75)); //rear
+	// camera_back_center_base_->SetupAttachment(GetMesh());
 
 	// In car HUD
 	// Create text render component for in car speed display
@@ -194,14 +196,15 @@ void ASkidVehiclePawn::initializeForBeginPlay(bool engine_sound)
 	camera_front_right_ = this->GetWorld()->SpawnActor<APIPCamera>(pip_camera_class_, camera_transform, camera_spawn_params);
 	camera_front_right_->AttachToComponent(camera_front_right_base_, FAttachmentTransformRules::KeepRelativeTransform);
 
-	camera_spawn_params.Name = FName(*(this->GetName() + "_camera_driver"));
-	camera_driver_ = this->GetWorld()->SpawnActor<APIPCamera>(pip_camera_class_, camera_transform, camera_spawn_params);
-	camera_driver_->AttachToComponent(camera_driver_base_, FAttachmentTransformRules::KeepRelativeTransform);
+	// Note by SSG: Not spawning driver and back cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
+	// camera_spawn_params.Name = FName(*(this->GetName() + "_camera_driver"));
+	// camera_driver_ = this->GetWorld()->SpawnActor<APIPCamera>(pip_camera_class_, camera_transform, camera_spawn_params);
+	// camera_driver_->AttachToComponent(camera_driver_base_, FAttachmentTransformRules::KeepRelativeTransform);
 
-	camera_spawn_params.Name = FName(*(this->GetName() + "_camera_back_center"));
-	camera_back_center_ = this->GetWorld()->SpawnActor<APIPCamera>(pip_camera_class_,
-		FTransform(FRotator(0, -180, 0), FVector::ZeroVector), camera_spawn_params);
-	camera_back_center_->AttachToComponent(camera_back_center_base_, FAttachmentTransformRules::KeepRelativeTransform);
+	// camera_spawn_params.Name = FName(*(this->GetName() + "_camera_back_center"));
+	// camera_back_center_ = this->GetWorld()->SpawnActor<APIPCamera>(pip_camera_class_,
+	// 	FTransform(FRotator(0, -180, 0), FVector::ZeroVector), camera_spawn_params);
+	// camera_back_center_->AttachToComponent(camera_back_center_base_, FAttachmentTransformRules::KeepRelativeTransform);
 
 	setupInputBindings();
 }
@@ -212,14 +215,14 @@ const common_utils::UniqueValueMap<std::string, APIPCamera*> ASkidVehiclePawn::g
 	cameras.insert_or_assign("front_center", camera_front_center_);
 	cameras.insert_or_assign("front_right", camera_front_right_);
 	cameras.insert_or_assign("front_left", camera_front_left_);
-	cameras.insert_or_assign("fpv", camera_driver_);
-	cameras.insert_or_assign("back_center", camera_back_center_);
+	// cameras.insert_or_assign("fpv", camera_driver_);
+	// cameras.insert_or_assign("back_center", camera_back_center_);
 
 	cameras.insert_or_assign("0", camera_front_center_);
 	cameras.insert_or_assign("1", camera_front_right_);
 	cameras.insert_or_assign("2", camera_front_left_);
-	cameras.insert_or_assign("3", camera_driver_);
-	cameras.insert_or_assign("4", camera_back_center_);
+	// cameras.insert_or_assign("3", camera_driver_);
+	// cameras.insert_or_assign("4", camera_back_center_);
 
 	cameras.insert_or_assign("", camera_front_center_);
 
@@ -231,14 +234,14 @@ void ASkidVehiclePawn::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	camera_front_center_ = nullptr;
 	camera_front_left_ = nullptr;
 	camera_front_right_ = nullptr;
-	camera_driver_ = nullptr;
-	camera_back_center_ = nullptr;
+	// camera_driver_ = nullptr;
+	// camera_back_center_ = nullptr;
 
 	camera_front_center_base_ = nullptr;
 	camera_front_left_base_ = nullptr;
 	camera_front_right_base_ = nullptr;
-	camera_driver_base_ = nullptr;
-	camera_back_center_base_ = nullptr;
+	// camera_driver_base_ = nullptr;
+	// camera_back_center_base_ = nullptr;
 }
 
 void ASkidVehiclePawn::Tick(float Delta)

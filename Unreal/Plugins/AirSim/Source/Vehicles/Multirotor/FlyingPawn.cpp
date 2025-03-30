@@ -24,10 +24,12 @@ void AFlyingPawn::initializeForBeginPlay()
         (UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("FrontLeftCamera")))->GetChildActor());
     camera_front_center_ = Cast<APIPCamera>(
         (UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("FrontCenterCamera")))->GetChildActor());
-    camera_back_center_ = Cast<APIPCamera>(
-        (UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("BackCenterCamera")))->GetChildActor());
-    camera_bottom_center_ = Cast<APIPCamera>(
-        (UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("BottomCenterCamera")))->GetChildActor());
+
+    // Note by SSG: Not spawning back and bottom cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
+    // camera_back_center_ = Cast<APIPCamera>(
+    //     (UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("BackCenterCamera")))->GetChildActor());
+    // camera_bottom_center_ = Cast<APIPCamera>(
+    //     (UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("BottomCenterCamera")))->GetChildActor());
 }
 
 void AFlyingPawn::Tick(float DeltaSeconds)
@@ -41,8 +43,8 @@ void AFlyingPawn::EndPlay(const EEndPlayReason::Type EndPlayReason)
     camera_front_right_ = nullptr;
     camera_front_left_ = nullptr;
     camera_front_center_ = nullptr;
-    camera_back_center_ = nullptr;
-    camera_bottom_center_ = nullptr;
+    // camera_back_center_ = nullptr;
+    // camera_bottom_center_ = nullptr;
 
     pawn_events_.getActuatorSignal().disconnect_all();
     rotating_movements_.Empty();
@@ -56,14 +58,18 @@ const common_utils::UniqueValueMap<std::string, APIPCamera*> AFlyingPawn::getCam
     cameras.insert_or_assign("front_center", camera_front_center_);
     cameras.insert_or_assign("front_right", camera_front_right_);
     cameras.insert_or_assign("front_left", camera_front_left_);
-    cameras.insert_or_assign("bottom_center", camera_bottom_center_);
-    cameras.insert_or_assign("back_center", camera_back_center_);
+
+    // Note by SSG: Not spawning back and bottom cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
+    // cameras.insert_or_assign("bottom_center", camera_bottom_center_);
+    // cameras.insert_or_assign("back_center", camera_back_center_);
 
     cameras.insert_or_assign("0", camera_front_center_);
     cameras.insert_or_assign("1", camera_front_right_);
     cameras.insert_or_assign("2", camera_front_left_);
-    cameras.insert_or_assign("3", camera_bottom_center_);
-    cameras.insert_or_assign("4", camera_back_center_);
+
+    // Note by SSG: Not spawning back and bottom cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
+    // cameras.insert_or_assign("3", camera_bottom_center_);
+    // cameras.insert_or_assign("4", camera_back_center_);
 
     cameras.insert_or_assign("", camera_front_center_);
     cameras.insert_or_assign("fpv", camera_front_center_);
