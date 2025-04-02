@@ -53,6 +53,11 @@ set(INCLUDE_DIRS include
   )
 include_directories(${INCLUDE_DIRS})
 
+# hercules settings parser____
+add_library(hercules_settings_parser src/hercules_settings_parser.cpp)
+target_link_libraries(hercules_settings_parser AirLib)
+# ____________________________
+
 add_library(airsim_settings_parser src/airsim_settings_parser.cpp)
 target_link_libraries(airsim_settings_parser AirLib)
 
@@ -67,6 +72,29 @@ ament_target_dependencies(pd_position_controller_simple
   tf2_ros
   tf2_geometry_msgs
 )
+
+# hercules ros wrapper___________
+add_library(hercules_ros src/hercules_ros_wrapper.cpp)
+target_link_libraries(hercules_ros ${OpenCV_LIBS} yaml-cpp AirLib hercules_settings_parser)
+ament_target_dependencies(hercules_ros 
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  nav_msgs
+  image_transport
+  tf2_ros
+  cv_bridge
+  airsim_interfaces
+  mavros_msgs
+  std_srvs
+  tf2_geometry_msgs
+  tf2_sensor_msgs
+  tf2
+  pcl_conversions
+  PCL
+)
+# _______________________________
+
 
 add_library(airsim_ros src/airsim_ros_wrapper.cpp)
 target_link_libraries(airsim_ros ${OpenCV_LIBS} yaml-cpp AirLib airsim_settings_parser)
@@ -88,6 +116,15 @@ ament_target_dependencies(airsim_ros
   PCL
 )
 
+# hercules node______
+add_executable(hercules_node src/airsim_node_hercules.cpp)
+target_link_libraries(hercules_node hercules_ros AirLib)
+ament_target_dependencies(hercules_node 
+  rclcpp
+)
+# _______________________________
+
+
 add_executable(airsim_node src/airsim_node.cpp)
 target_link_libraries(airsim_node airsim_ros AirLib)
 ament_target_dependencies(airsim_node 
@@ -97,7 +134,7 @@ ament_target_dependencies(airsim_node
 add_executable(pd_position_controller_simple_node
   src/pd_position_controller_simple_node.cpp)
 target_link_libraries(pd_position_controller_simple_node
-  pd_position_controller_simple airsim_ros AirLib)
+  pd_position_controller_simple airsim_ros hercules_ros AirLib)
 ament_target_dependencies(pd_position_controller_simple_node 
   rclcpp
   mavros_msgs
@@ -112,10 +149,10 @@ ament_target_dependencies(pd_position_controller_simple_node
 # rosidl_target_interfaces(pd_position_controller_simple_node
 #   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
-install(TARGETS airsim_node pd_position_controller_simple_node
+install(TARGETS airsim_node hercules_node pd_position_controller_simple_node
   DESTINATION lib/${PROJECT_NAME})
 
-install(TARGETS airsim_ros pd_position_controller_simple
+install(TARGETS airsim_ros hercules_ros pd_position_controller_simple
   ARCHIVE
   DESTINATION lib
   LIBRARY
@@ -154,7 +191,7 @@ ament_export_dependencies(pcl_conversions)
 ament_export_dependencies(PCL)
 
 ament_export_include_directories(${INCLUDE_DIRS})
-ament_export_libraries(airsim_settings_parser pd_position_controller_simple
-  airsim_ros)
+ament_export_libraries(airsim_settings_parser hercules_settings_parser pd_position_controller_simple
+  airsim_ros hercules_ros)
 
 ament_package()
