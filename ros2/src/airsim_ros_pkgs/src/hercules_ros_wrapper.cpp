@@ -14,56 +14,54 @@ constexpr char AirsimROSWrapper::P_YML_NAME[];
 constexpr char AirsimROSWrapper::DMODEL_YML_NAME[];
 
 const std::unordered_map<int, std::string> AirsimROSWrapper::image_type_int_to_string_map_ = {
-    { 0, "Scene" },
-    { 1, "DepthPlanar" },
-    { 2, "DepthPerspective" },
-    { 3, "DepthVis" },
-    { 4, "DisparityNormalized" },
-    { 5, "Segmentation" },
-    { 6, "SurfaceNormals" },
-    { 7, "Infrared" },
-    { 8, "OpticalFlow" },
-    { 9, "OpticalFlowVis" },
-    { 10, "Annotation" }
+    {0, "Scene"},
+    {1, "DepthPlanar"},
+    {2, "DepthPerspective"},
+    {3, "DepthVis"},
+    {4, "DisparityNormalized"},
+    {5, "Segmentation"},
+    {6, "SurfaceNormals"},
+    {7, "Infrared"},
+    {8, "OpticalFlow"},
+    {9, "OpticalFlowVis"},
+    {10, "Annotation"}
 
 };
 
-AirsimROSWrapper::AirsimROSWrapper(const std::shared_ptr<rclcpp::Node> nh, const std::shared_ptr<rclcpp::Node> nh_img, const std::shared_ptr<rclcpp::Node> nh_lidar, const std::shared_ptr<rclcpp::Node> nh_gpulidar, const std::shared_ptr<rclcpp::Node> nh_echo, const std::string& host_ip, const std::shared_ptr<rclcpp::CallbackGroup> callbackGroup, bool enable_api_control, bool enable_object_transforms_list, uint16_t host_port)
-    : is_used_lidar_timer_cb_queue_(false)
-    , is_used_img_timer_cb_queue_(false)
-    , is_used_gpulidar_timer_cb_queue_(false)
-    , is_used_echo_timer_cb_queue_(false)
-    , airsim_settings_parser_(host_ip, host_port)
-    , host_ip_(host_ip)
-    , host_port_(host_port)
-    , enable_api_control_(enable_api_control)
-    , enable_object_transforms_list_(enable_object_transforms_list)
-    , airsim_client_(nullptr)
-    , airsim_client_images_(host_ip, host_port)
-    , airsim_client_lidar_(host_ip, host_port)
-    , airsim_client_gpulidar_(host_ip, host_port)
-    , airsim_client_echo_(host_ip, host_port)
-    , nh_(nh)
-    , nh_img_(nh_img)
-    , nh_lidar_(nh_lidar)
-    , nh_gpulidar_(nh_gpulidar)
-    , nh_echo_(nh_echo)
-    , cb_(callbackGroup)
-    , publish_clock_(false)
+AirsimROSWrapper::AirsimROSWrapper(const std::shared_ptr<rclcpp::Node> nh, const std::shared_ptr<rclcpp::Node> nh_img, const std::shared_ptr<rclcpp::Node> nh_lidar, const std::shared_ptr<rclcpp::Node> nh_gpulidar, const std::shared_ptr<rclcpp::Node> nh_echo, const std::string &host_ip, const std::shared_ptr<rclcpp::CallbackGroup> callbackGroup, bool enable_api_control, bool enable_object_transforms_list, uint16_t host_port)
+    : is_used_lidar_timer_cb_queue_(false), is_used_img_timer_cb_queue_(false), is_used_gpulidar_timer_cb_queue_(false), is_used_echo_timer_cb_queue_(false), airsim_settings_parser_(host_ip, host_port), host_ip_(host_ip), host_port_(host_port), enable_api_control_(enable_api_control), enable_object_transforms_list_(enable_object_transforms_list), airsim_client_(nullptr), airsim_client_images_(host_ip, host_port), airsim_client_lidar_(host_ip, host_port), airsim_client_gpulidar_(host_ip, host_port), airsim_client_echo_(host_ip, host_port), nh_(nh), nh_img_(nh_img), nh_lidar_(nh_lidar), nh_gpulidar_(nh_gpulidar), nh_echo_(nh_echo), cb_(callbackGroup), publish_clock_(false)
 {
     ros_clock_.clock = rclcpp::Time(0);
 
-    if (AirSimSettings::singleton().simmode_name == AirSimSettings::kSimModeTypeMultirotor) {
+    if (AirSimSettings::singleton().simmode_name == AirSimSettings::kSimModeTypeMultirotor)
+    {
         airsim_mode_ = AIRSIM_MODE::DRONE;
         RCLCPP_INFO(nh_->get_logger(), "Setting ROS wrapper to DRONE mode");
     }
-    else if (AirSimSettings::singleton().simmode_name == AirSimSettings::kSimModeTypeCar || AirSimSettings::singleton().simmode_name == AirSimSettings::kSimModeTypeSkidVehicle){
+    else if (AirSimSettings::singleton().simmode_name == AirSimSettings::kSimModeTypeCar || AirSimSettings::singleton().simmode_name == AirSimSettings::kSimModeTypeSkidVehicle)
+    {
         airsim_mode_ = AIRSIM_MODE::CAR;
         RCLCPP_INFO(nh_->get_logger(), "Setting ROS wrapper to CAR mode");
-    }else{
+    }
+    else if (AirSimSettings::singleton().simmode_name == "ComputerVision")
+    {
         airsim_mode_ = AIRSIM_MODE::COMPUTERVISION;
         RCLCPP_INFO(nh_->get_logger(), "Setting ROS wrapper to COMPUTERVISION mode");
     }
+    else if (AirSimSettings::singleton().simmode_name == "Hero")
+    {
+        if (host_port_ == 41451)
+        {
+            airsim_mode_ = AIRSIM_MODE::DRONE;
+            RCLCPP_INFO(nh_->get_logger(), "Setting ROS wrapper to DRONE mode based on host_port 41451");
+        }
+        else if (host_port_ == 41452)
+        {
+            airsim_mode_ = AIRSIM_MODE::CAR;
+            RCLCPP_INFO(nh_->get_logger(), "Setting ROS wrapper to CAR mode based on host_port 41452");
+        }
+    }
+
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(nh_);
     static_tf_pub_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(nh_);
 
@@ -75,14 +73,19 @@ AirsimROSWrapper::AirsimROSWrapper(const std::shared_ptr<rclcpp::Node> nh, const
 void AirsimROSWrapper::initialize_airsim()
 {
     // todo do not reset if already in air?
-    try {
+    try
+    {
 
-        if (airsim_mode_ == AIRSIM_MODE::DRONE) {
+        if (airsim_mode_ == AIRSIM_MODE::DRONE)
+        {
             airsim_client_ = std::unique_ptr<msr::airlib::RpcLibClientBase>(new msr::airlib::MultirotorRpcLibClient(host_ip_, host_port_));
         }
-        else if(airsim_mode_ == AIRSIM_MODE::CAR) {
+        else if (airsim_mode_ == AIRSIM_MODE::CAR)
+        {
             airsim_client_ = std::unique_ptr<msr::airlib::RpcLibClientBase>(new msr::airlib::CarRpcLibClient(host_ip_, host_port_));
-        }else{
+        }
+        else
+        {
             airsim_client_ = std::unique_ptr<msr::airlib::RpcLibClientBase>(new msr::airlib::ComputerVisionRpcLibClient(host_ip_, host_port_));
         }
         airsim_client_->confirmConnection();
@@ -91,30 +94,34 @@ void AirsimROSWrapper::initialize_airsim()
         airsim_client_gpulidar_.confirmConnection();
         airsim_client_echo_.confirmConnection();
 
-        if(enable_api_control_){
-            for (const auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_) {            
+        if (enable_api_control_)
+        {
+            for (const auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+            {
                 airsim_client_->enableApiControl(true, vehicle_name_ptr_pair.first); // todo expose as rosservice?
-                airsim_client_->armDisarm(true, vehicle_name_ptr_pair.first); // todo exposes as rosservice?
+                airsim_client_->armDisarm(true, vehicle_name_ptr_pair.first);        // todo exposes as rosservice?
             }
         }
 
         origin_geo_point_ = get_origin_geo_point();
         // todo there's only one global origin geopoint for environment. but airsim API accept a parameter vehicle_name? inside carsimpawnapi.cpp, there's a geopoint being assigned in the constructor. by?
         origin_geo_point_msg_ = get_gps_msg_from_airsim_geo_point(origin_geo_point_);
-        
+
         auto vehicle_name_ptr_pair = vehicle_name_ptr_map_.begin();
-        auto& vehicle_ros = vehicle_name_ptr_pair->second;
-        airsim_interfaces::msg::InstanceSegmentationList instance_segmentation_list_msg = get_instance_segmentation_list_msg_from_airsim();      
+        auto &vehicle_ros = vehicle_name_ptr_pair->second;
+        airsim_interfaces::msg::InstanceSegmentationList instance_segmentation_list_msg = get_instance_segmentation_list_msg_from_airsim();
         instance_segmentation_list_msg.header.stamp = vehicle_ros->stamp_;
         instance_segmentation_list_msg.header.frame_id = world_frame_id_;
         vehicle_ros->instance_segmentation_pub_->publish(instance_segmentation_list_msg);
 
-        if(enable_object_transforms_list_){
-            airsim_interfaces::msg::ObjectTransformsList object_transforms_list_msg = get_object_transforms_list_msg_from_airsim(vehicle_ros->stamp_);      
+        if (enable_object_transforms_list_)
+        {
+            airsim_interfaces::msg::ObjectTransformsList object_transforms_list_msg = get_object_transforms_list_msg_from_airsim(vehicle_ros->stamp_);
             vehicle_ros->object_transforms_pub_->publish(object_transforms_list_msg);
         }
     }
-    catch (rpc::rpc_error& e) {
+    catch (rpc::rpc_error &e)
+    {
         std::string msg = e.get_error().as<std::string>();
         RCLCPP_ERROR(nh_->get_logger(), "Exception raised by the API, something went wrong.\n%s", msg.c_str());
         rclcpp::shutdown();
@@ -160,24 +167,55 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
     image_transport::ImageTransport image_transporter(nh_);
 
     // iterate over std::map<std::string, std::unique_ptr<VehicleSetting>> vehicles;
-    for (const auto& curr_vehicle_elem : AirSimSettings::singleton().vehicles) {
-        auto& vehicle_setting = curr_vehicle_elem.second;
-        auto curr_vehicle_name = curr_vehicle_elem.first;
-
-        nh_->set_parameter(rclcpp::Parameter("vehicle_name", curr_vehicle_name));
-
-        set_nans_to_zeros_in_pose(*vehicle_setting);
-
+    for (const auto &curr_vehicle_elem : AirSimSettings::singleton().vehicles)
+    {
         std::unique_ptr<VehicleROS> vehicle_ros = nullptr;
 
-        if (airsim_mode_ == AIRSIM_MODE::DRONE) {
+        if (airsim_mode_ == AIRSIM_MODE::DRONE)
+        {
             vehicle_ros = std::unique_ptr<MultiRotorROS>(new MultiRotorROS());
         }
-        else if(airsim_mode_ == AIRSIM_MODE::CAR){
+        else if (airsim_mode_ == AIRSIM_MODE::CAR)
+        {
             vehicle_ros = std::unique_ptr<CarROS>(new CarROS());
-        }else{
+        }
+        else if (airsim_mode_ == AIRSIM_MODE::COMPUTERVISION)
+        {
             vehicle_ros = std::unique_ptr<ComputerVisionROS>(new ComputerVisionROS());
         }
+        else if (airsim_mode_ == AIRSIM_MODE::HERO)
+        {
+            if (host_port_ == 41451)
+            {
+                vehicle_ros = std::unique_ptr<MultiRotorROS>(new MultiRotorROS());
+            }
+            else if (host_port_ == 41452)
+            {
+                vehicle_ros = std::unique_ptr<CarROS>(new CarROS());
+            }
+        }
+
+        auto &vehicle_setting = curr_vehicle_elem.second;
+        auto curr_vehicle_name = curr_vehicle_elem.first;
+
+        // If block to check whether the host port is drone or car, then skip if it is not starting with Drone or Husky
+        if (host_port_ == 41451) // drone
+        {
+            if (curr_vehicle_name.rfind("Drone", 0) != 0)
+            {
+                continue;
+            }
+        }
+        else if (host_port_ == 41452) // ugv
+        {
+            if (curr_vehicle_name.rfind("Husky", 0) != 0)
+            {
+                continue;
+            }
+        }
+
+        nh_->set_parameter(rclcpp::Parameter("vehicle_name", curr_vehicle_name));
+        set_nans_to_zeros_in_pose(*vehicle_setting);
 
         vehicle_ros->odom_frame_id_ = curr_vehicle_name + "/" + odom_frame_id_;
         vehicle_ros->vehicle_name_ = curr_vehicle_name;
@@ -198,15 +236,17 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
         std::function<bool(std::shared_ptr<airsim_interfaces::srv::RefreshInstanceSegmentation::Request>, std::shared_ptr<airsim_interfaces::srv::RefreshInstanceSegmentation::Response>)> fcn_ins_seg_refresh_srvr = std::bind(&AirsimROSWrapper::instance_segmentation_refresh_cb, this, _1, _2);
         vehicle_ros->instance_segmentation_refresh_srvr_ = nh_->create_service<airsim_interfaces::srv::RefreshInstanceSegmentation>(topic_prefix + "/instance_segmentation_refresh", fcn_ins_seg_refresh_srvr);
 
-        if(enable_object_transforms_list_){
+        if (enable_object_transforms_list_)
+        {
             vehicle_ros->object_transforms_pub_ = nh_->create_publisher<airsim_interfaces::msg::ObjectTransformsList>("~/object_transforms", qos_settings);
 
             std::function<bool(std::shared_ptr<airsim_interfaces::srv::RefreshObjectTransforms::Request>, std::shared_ptr<airsim_interfaces::srv::RefreshObjectTransforms::Response>)> fcn_obj_trans_refresh_srvr = std::bind(&AirsimROSWrapper::object_transforms_refresh_cb, this, _1, _2);
             vehicle_ros->object_transforms_refresh_srvr_ = nh_->create_service<airsim_interfaces::srv::RefreshObjectTransforms>(topic_prefix + "/object_transforms_refresh", fcn_obj_trans_refresh_srvr);
         }
 
-        if (airsim_mode_ == AIRSIM_MODE::DRONE) {
-            auto drone = static_cast<MultiRotorROS*>(vehicle_ros.get());
+        if (airsim_mode_ == AIRSIM_MODE::DRONE || host_port_ == 41451)
+        {
+            auto drone = static_cast<MultiRotorROS *>(vehicle_ros.get());
 
             // bind to a single callback. todo optimal subs queue length
             // bind multiple topics to a single callback, but keep track of which vehicle name it was by passing curr_vehicle_name as the 2nd argument
@@ -225,22 +265,27 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
 
             // vehicle_ros.reset_srvr = nh_->create_service(curr_vehicle_name + "/reset",&AirsimROSWrapper::reset_srv_cb, this);
         }
-        else if(airsim_mode_ == AIRSIM_MODE::CAR) {
-            auto car = static_cast<CarROS*>(vehicle_ros.get());
-            if(enable_api_control_){
+        else if (airsim_mode_ == AIRSIM_MODE::CAR || host_port_ == 41452)
+        {
+            auto car = static_cast<CarROS *>(vehicle_ros.get());
+            if (enable_api_control_)
+            {
                 std::function<void(const airsim_interfaces::msg::CarControls::SharedPtr)> fcn_car_cmd_sub = std::bind(&AirsimROSWrapper::car_cmd_cb, this, _1, vehicle_ros->vehicle_name_);
                 car->car_cmd_sub_ = nh_->create_subscription<airsim_interfaces::msg::CarControls>(topic_prefix + "/car_cmd", 1, fcn_car_cmd_sub);
             }
             car->car_state_pub_ = nh_->create_publisher<airsim_interfaces::msg::CarState>(topic_prefix + "/car_state", 10);
-        }else{
-            auto computer_vision = static_cast<ComputerVisionROS*>(vehicle_ros.get());
+        }
+        else if (airsim_mode_ == AIRSIM_MODE::COMPUTERVISION)
+        {
+            auto computer_vision = static_cast<ComputerVisionROS *>(vehicle_ros.get());
             computer_vision->computer_vision_state_pub_ = nh_->create_publisher<airsim_interfaces::msg::ComputerVisionState>(topic_prefix + "/computervision_state", 10);
         }
 
         // iterate over camera map std::map<std::string, CameraSetting> .cameras;
-        for (auto& curr_camera_elem : vehicle_setting->cameras) {
-            auto& camera_setting = curr_camera_elem.second;
-            auto& curr_camera_name = curr_camera_elem.first;
+        for (auto &curr_camera_elem : vehicle_setting->cameras)
+        {
+            auto &camera_setting = curr_camera_elem.second;
+            auto &curr_camera_name = curr_camera_elem.first;
 
             set_nans_to_zeros_in_pose(*vehicle_setting, camera_setting);
             append_static_camera_tf(vehicle_ros.get(), curr_camera_name, camera_setting);
@@ -249,16 +294,20 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
             current_image_request_vec.clear();
 
             // iterate over capture_setting std::map<int, CaptureSetting> capture_settings
-            for (const auto& curr_capture_elem : camera_setting.capture_settings) {
-                auto& capture_setting = curr_capture_elem.second;                
+            for (const auto &curr_capture_elem : camera_setting.capture_settings)
+            {
+                auto &capture_setting = curr_capture_elem.second;
 
                 // todo why does AirSimSettings::loadCaptureSettings calls AirSimSettings::initializeCaptureSettings()
                 // which initializes default capture settings for _all_ NINE msr::airlib::ImageCaptureBase::ImageType
-                if (!(std::isnan(capture_setting.fov_degrees))) {
+                if (!(std::isnan(capture_setting.fov_degrees)))
+                {
                     ImageType curr_image_type = msr::airlib::Utils::toEnum<ImageType>(capture_setting.image_type);
-                    if(curr_image_type == ImageType::Annotation) {
-                        for( const auto& curr_annotation_element :  AirSimSettings::singleton().annotator_settings){
-                            current_image_request_vec.push_back(ImageRequest(curr_camera_name, curr_image_type, false, false, curr_annotation_element.name));            
+                    if (curr_image_type == ImageType::Annotation)
+                    {
+                        for (const auto &curr_annotation_element : AirSimSettings::singleton().annotator_settings)
+                        {
+                            current_image_request_vec.push_back(ImageRequest(curr_camera_name, curr_image_type, false, false, curr_annotation_element.name));
                             const std::string camera_topic_prefix = topic_prefix + "/" + curr_camera_name + "_" + image_type_int_to_string_map_.at(capture_setting.image_type) + "_" + curr_annotation_element.name;
                             const std::string image_topic = camera_topic_prefix + "/image";
                             const std::string camera_info_topic = camera_topic_prefix + "/camera_info";
@@ -266,12 +315,16 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
                             cam_info_pub_vec_.push_back(nh_->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic, 10));
                             camera_info_msg_vec_.push_back(generate_cam_info(curr_camera_name, camera_setting, capture_setting));
                         }
-                    }else{
-                        if (curr_image_type == ImageType::DepthPlanar || curr_image_type == ImageType::DepthPerspective || curr_image_type == ImageType::DepthVis || curr_image_type == ImageType::DisparityNormalized) {
+                    }
+                    else
+                    {
+                        if (curr_image_type == ImageType::DepthPlanar || curr_image_type == ImageType::DepthPerspective || curr_image_type == ImageType::DepthVis || curr_image_type == ImageType::DisparityNormalized)
+                        {
                             current_image_request_vec.push_back(ImageRequest(curr_camera_name, curr_image_type, true));
                         }
-                        else {
-                            current_image_request_vec.push_back(ImageRequest(curr_camera_name, curr_image_type, false, false));                        
+                        else
+                        {
+                            current_image_request_vec.push_back(ImageRequest(curr_camera_name, curr_image_type, false, false));
                         }
                         const std::string camera_topic_prefix = topic_prefix + "/" + curr_camera_name + "_" + image_type_int_to_string_map_.at(capture_setting.image_type);
                         const std::string image_topic = camera_topic_prefix + "/image";
@@ -279,7 +332,7 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
                         image_pub_vec_.push_back(image_transporter.advertise(image_topic, 1));
                         cam_info_pub_vec_.push_back(nh_->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic, 10));
                         camera_info_msg_vec_.push_back(generate_cam_info(curr_camera_name, camera_setting, capture_setting));
-                    }                    
+                    }
                 }
             }
             // push back pair (vector of image captures, current vehicle name)
@@ -287,45 +340,54 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
         }
 
         // iterate over sensors
-        for (auto& curr_sensor_map : vehicle_setting->sensors) {
-            auto& sensor_name = curr_sensor_map.first;
-            auto& sensor_setting = curr_sensor_map.second;
+        for (auto &curr_sensor_map : vehicle_setting->sensors)
+        {
+            auto &sensor_name = curr_sensor_map.first;
+            auto &sensor_setting = curr_sensor_map.second;
 
-            if (sensor_setting->enabled) {
+            if (sensor_setting->enabled)
+            {
 
-                switch (sensor_setting->sensor_type) {
-                case SensorBase::SensorType::Barometer: {
+                switch (sensor_setting->sensor_type)
+                {
+                case SensorBase::SensorType::Barometer:
+                {
                     SensorPublisher<airsim_interfaces::msg::Altimeter> sensor_publisher =
                         create_sensor_publisher<airsim_interfaces::msg::Altimeter>("Barometer sensor", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/altimeter/" + sensor_name, 10);
                     vehicle_ros->barometer_pubs_.emplace_back(sensor_publisher);
                     break;
                 }
-                case SensorBase::SensorType::Imu: {
+                case SensorBase::SensorType::Imu:
+                {
                     SensorPublisher<sensor_msgs::msg::Imu> sensor_publisher =
                         create_sensor_publisher<sensor_msgs::msg::Imu>("Imu sensor", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/imu/" + sensor_name, 10);
                     vehicle_ros->imu_pubs_.emplace_back(sensor_publisher);
                     break;
                 }
-                case SensorBase::SensorType::Gps: {
+                case SensorBase::SensorType::Gps:
+                {
                     SensorPublisher<sensor_msgs::msg::NavSatFix> sensor_publisher =
                         create_sensor_publisher<sensor_msgs::msg::NavSatFix>("Gps sensor", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/gps/" + sensor_name, 10);
                     vehicle_ros->gps_pubs_.emplace_back(sensor_publisher);
                     break;
                 }
-                case SensorBase::SensorType::Magnetometer: {
+                case SensorBase::SensorType::Magnetometer:
+                {
                     SensorPublisher<sensor_msgs::msg::MagneticField> sensor_publisher =
                         create_sensor_publisher<sensor_msgs::msg::MagneticField>("Magnetometer sensor", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/magnetometer/" + sensor_name, 10);
                     vehicle_ros->magnetometer_pubs_.emplace_back(sensor_publisher);
                     break;
                 }
-                case SensorBase::SensorType::Distance: {
+                case SensorBase::SensorType::Distance:
+                {
                     SensorPublisher<sensor_msgs::msg::Range> sensor_publisher =
                         create_sensor_publisher<sensor_msgs::msg::Range>("Distance sensor", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/distance/" + sensor_name, 10);
                     vehicle_ros->distance_pubs_.emplace_back(sensor_publisher);
                     break;
                 }
-                case SensorBase::SensorType::Lidar: {
-                    auto lidar_setting = *static_cast<LidarSetting*>(sensor_setting.get());
+                case SensorBase::SensorType::Lidar:
+                {
+                    auto lidar_setting = *static_cast<LidarSetting *>(sensor_setting.get());
                     msr::airlib::LidarSimpleParams params;
                     params.initializeFromSettings(lidar_setting);
                     append_static_lidar_tf(vehicle_ros.get(), sensor_name, params);
@@ -339,8 +401,9 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
                     lidar_cnt += 1;
                     break;
                 }
-                case SensorBase::SensorType::GPULidar: {
-                    auto gpulidar_setting = *static_cast<GPULidarSetting*>(sensor_setting.get());
+                case SensorBase::SensorType::GPULidar:
+                {
+                    auto gpulidar_setting = *static_cast<GPULidarSetting *>(sensor_setting.get());
                     msr::airlib::GPULidarSimpleParams params;
                     params.initializeFromSettings(gpulidar_setting);
                     append_static_gpulidar_tf(vehicle_ros.get(), sensor_name, params);
@@ -351,32 +414,35 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
                     gpulidar_cnt += 1;
                     break;
                 }
-                case SensorBase::SensorType::Echo: {
-                    auto echo_setting = *static_cast<EchoSetting*>(sensor_setting.get());
+                case SensorBase::SensorType::Echo:
+                {
+                    auto echo_setting = *static_cast<EchoSetting *>(sensor_setting.get());
                     msr::airlib::EchoSimpleParams params;
                     params.initializeFromSettings(echo_setting);
                     append_static_echo_tf(vehicle_ros.get(), sensor_name, params);
-                    if(params.active){
+                    if (params.active)
+                    {
                         SensorPublisher<sensor_msgs::msg::PointCloud2> sensor_publisher =
                             create_sensor_publisher<sensor_msgs::msg::PointCloud2>("Echo (active) sensor", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/echo/active/points/" + sensor_name, 10);
                         vehicle_ros->echo_active_pubs_.emplace_back(sensor_publisher);
                         SensorPublisher<airsim_interfaces::msg::StringArray> sensor_publisher_labels =
-                        create_sensor_publisher<airsim_interfaces::msg::StringArray>("", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/echo/active/labels/" + sensor_name, 10);
+                            create_sensor_publisher<airsim_interfaces::msg::StringArray>("", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/echo/active/labels/" + sensor_name, 10);
                         vehicle_ros->echo_active_labels_pubs_.emplace_back(sensor_publisher_labels);
-
                     }
-                    if(params.passive){
+                    if (params.passive)
+                    {
                         SensorPublisher<sensor_msgs::msg::PointCloud2> sensor_publisher =
                             create_sensor_publisher<sensor_msgs::msg::PointCloud2>("Echo (passive) sensor ", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/echo/passive/points/" + sensor_name, 10);
                         vehicle_ros->echo_passive_pubs_.emplace_back(sensor_publisher);
                         SensorPublisher<airsim_interfaces::msg::StringArray> sensor_publisher_labels =
-                        create_sensor_publisher<airsim_interfaces::msg::StringArray>("", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/echo/passive/labels/" + sensor_name, 10);
+                            create_sensor_publisher<airsim_interfaces::msg::StringArray>("", sensor_setting->sensor_name, sensor_setting->sensor_type, curr_vehicle_name + "/echo/passive/labels/" + sensor_name, 10);
                         vehicle_ros->echo_passive_labels_pubs_.emplace_back(sensor_publisher_labels);
-                    }                    
+                    }
                     echo_cnt += 1;
                     break;
                 }
-                default: {
+                default:
+                {
                     throw std::invalid_argument("Unexpected sensor type");
                 }
                 }
@@ -384,12 +450,11 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
         }
 
         vehicle_name_ptr_map_.emplace(curr_vehicle_name, std::move(vehicle_ros)); // allows fast lookup in command callbacks in case of a lot of drones
-    
-      
-    }   
+    }
 
-    // add takeoff and land all services if more than 2 drones
-    if (vehicle_name_ptr_map_.size() > 1 && airsim_mode_ == AIRSIM_MODE::DRONE) {
+    // add takeoff and land all services if more than 2 drones. NOTE by SSG: skipping this in Hero mode
+    if (vehicle_name_ptr_map_.size() > 1 && airsim_mode_ == AIRSIM_MODE::DRONE)
+    {
         takeoff_all_srvr_ = nh_->create_service<airsim_interfaces::srv::Takeoff>("~/all_robots/takeoff", std::bind(&AirsimROSWrapper::takeoff_all_srv_cb, this, _1, _2));
         land_all_srvr_ = nh_->create_service<airsim_interfaces::srv::Land>("~/all_robots/land", std::bind(&AirsimROSWrapper::land_all_srv_cb, this, _1, _2));
 
@@ -406,12 +471,15 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
     // todo add per vehicle reset in AirLib API
     reset_srvr_ = nh_->create_service<airsim_interfaces::srv::Reset>("~/reset", std::bind(&AirsimROSWrapper::reset_srv_cb, this, _1, _2));
 
-    if (publish_clock_) {
+    if (publish_clock_)
+    {
+        // NOTE by SSG: clock needs to have robot's namespace
         clock_pub_ = nh_->create_publisher<rosgraph_msgs::msg::Clock>("~/clock", 1);
     }
 
     // if >0 cameras, add one more thread for img_request_timer_cb
-    if (!airsim_img_request_vehicle_name_pair_vec_.empty()) {
+    if (!airsim_img_request_vehicle_name_pair_vec_.empty())
+    {
         double update_airsim_img_response_every_n_sec;
         nh_->get_parameter("update_airsim_img_response_every_n_sec", update_airsim_img_response_every_n_sec);
 
@@ -420,26 +488,28 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
     }
 
     // lidar, gpulidar and echo sensors update on their own callbacks/threads at a given rate
-    if (lidar_cnt > 0) {
+    if (lidar_cnt > 0)
+    {
         double update_lidar_every_n_sec;
         nh_->get_parameter("update_lidar_every_n_sec", update_lidar_every_n_sec);
         airsim_lidar_update_timer_ = nh_lidar_->create_wall_timer(std::chrono::duration<double>(update_lidar_every_n_sec), std::bind(&AirsimROSWrapper::lidar_timer_cb, this), cb_);
         is_used_lidar_timer_cb_queue_ = true;
     }
-    if (gpulidar_cnt > 0) {
+    if (gpulidar_cnt > 0)
+    {
         double update_gpulidar_every_n_sec;
         nh_->get_parameter("update_gpulidar_every_n_sec", update_gpulidar_every_n_sec);
         airsim_gpulidar_update_timer_ = nh_gpulidar_->create_wall_timer(std::chrono::duration<double>(update_gpulidar_every_n_sec), std::bind(&AirsimROSWrapper::gpulidar_timer_cb, this), cb_);
         is_used_gpulidar_timer_cb_queue_ = true;
     }
 
-    if (echo_cnt > 0) {
+    if (echo_cnt > 0)
+    {
         double update_echo_every_n_sec;
         nh_->get_parameter("update_echo_every_n_sec", update_echo_every_n_sec);
         airsim_echo_update_timer_ = nh_echo_->create_wall_timer(std::chrono::duration<double>(update_echo_every_n_sec), std::bind(&AirsimROSWrapper::echo_timer_cb, this), cb_);
         is_used_echo_timer_cb_queue_ = true;
     }
-
 
     initialize_airsim();
 }
@@ -447,10 +517,10 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
 // QoS - The depth of the publisher message queue.
 // more details here - https://docs.ros.org/en/foxy/Concepts/About-Quality-of-Service-Settings.html
 template <typename T>
-const SensorPublisher<T> AirsimROSWrapper::create_sensor_publisher(const std::string& sensor_type_name, const std::string& sensor_name,
-                                                                   SensorBase::SensorType sensor_type, const std::string& topic_name, int QoS)
+const SensorPublisher<T> AirsimROSWrapper::create_sensor_publisher(const std::string &sensor_type_name, const std::string &sensor_name,
+                                                                   SensorBase::SensorType sensor_type, const std::string &topic_name, int QoS)
 {
-    if(sensor_type_name != "")
+    if (sensor_type_name != "")
         RCLCPP_INFO_STREAM(nh_->get_logger(), "Publishing " << sensor_type_name << " '" << sensor_name << "'");
 
     SensorPublisher<T> sensor_publisher;
@@ -461,16 +531,16 @@ const SensorPublisher<T> AirsimROSWrapper::create_sensor_publisher(const std::st
 }
 
 // todo: error check. if state is not landed, return error.
-bool AirsimROSWrapper::takeoff_srv_cb(std::shared_ptr<airsim_interfaces::srv::Takeoff::Request> request, std::shared_ptr<airsim_interfaces::srv::Takeoff::Response> response, const std::string& vehicle_name)
+bool AirsimROSWrapper::takeoff_srv_cb(std::shared_ptr<airsim_interfaces::srv::Takeoff::Request> request, std::shared_ptr<airsim_interfaces::srv::Takeoff::Response> response, const std::string &vehicle_name)
 {
     unused(response);
     std::lock_guard<std::mutex> guard(control_mutex_);
 
     if (request->wait_on_last_task)
-        static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->takeoffAsync(20, vehicle_name)->waitOnLastTask(); // todo value for timeout_sec?
+        static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->takeoffAsync(20, vehicle_name)->waitOnLastTask(); // todo value for timeout_sec?
     // response->success =
     else
-        static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->takeoffAsync(20, vehicle_name);
+        static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->takeoffAsync(20, vehicle_name);
     // response->success =
 
     return true;
@@ -482,12 +552,12 @@ bool AirsimROSWrapper::takeoff_group_srv_cb(std::shared_ptr<airsim_interfaces::s
     std::lock_guard<std::mutex> guard(control_mutex_);
 
     if (request->wait_on_last_task)
-        for (const auto& vehicle_name : request->vehicle_names)
-            static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->takeoffAsync(20, vehicle_name)->waitOnLastTask(); // todo value for timeout_sec?
+        for (const auto &vehicle_name : request->vehicle_names)
+            static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->takeoffAsync(20, vehicle_name)->waitOnLastTask(); // todo value for timeout_sec?
     // response->success =
     else
-        for (const auto& vehicle_name : request->vehicle_names)
-            static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->takeoffAsync(20, vehicle_name);
+        for (const auto &vehicle_name : request->vehicle_names)
+            static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->takeoffAsync(20, vehicle_name);
     // response->success =
 
     return true;
@@ -499,12 +569,12 @@ bool AirsimROSWrapper::takeoff_all_srv_cb(std::shared_ptr<airsim_interfaces::srv
     std::lock_guard<std::mutex> guard(control_mutex_);
 
     if (request->wait_on_last_task)
-        for (const auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_)
-            static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->takeoffAsync(20, vehicle_name_ptr_pair.first)->waitOnLastTask(); // todo value for timeout_sec?
+        for (const auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+            static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->takeoffAsync(20, vehicle_name_ptr_pair.first)->waitOnLastTask(); // todo value for timeout_sec?
     // response->success =
     else
-        for (const auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_)
-            static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->takeoffAsync(20, vehicle_name_ptr_pair.first);
+        for (const auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+            static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->takeoffAsync(20, vehicle_name_ptr_pair.first);
     // response->success =
 
     return true;
@@ -519,8 +589,8 @@ bool AirsimROSWrapper::instance_segmentation_refresh_cb(const std::shared_ptr<ai
     RCLCPP_INFO_STREAM(nh_->get_logger(), "Starting instance segmentation refresh...");
 
     auto vehicle_name_ptr_pair = vehicle_name_ptr_map_.begin();
-    auto& vehicle_ros = vehicle_name_ptr_pair->second;
-    airsim_interfaces::msg::InstanceSegmentationList instance_segmentation_list_msg  = get_instance_segmentation_list_msg_from_airsim();      
+    auto &vehicle_ros = vehicle_name_ptr_pair->second;
+    airsim_interfaces::msg::InstanceSegmentationList instance_segmentation_list_msg = get_instance_segmentation_list_msg_from_airsim();
     instance_segmentation_list_msg.header.stamp = vehicle_ros->stamp_;
     instance_segmentation_list_msg.header.frame_id = world_frame_id_;
     vehicle_ros->instance_segmentation_pub_->publish(instance_segmentation_list_msg);
@@ -539,8 +609,8 @@ bool AirsimROSWrapper::object_transforms_refresh_cb(const std::shared_ptr<airsim
     RCLCPP_INFO_STREAM(nh_->get_logger(), "Starting object transforms refresh...");
 
     auto vehicle_name_ptr_pair = vehicle_name_ptr_map_.begin();
-    auto& vehicle_ros = vehicle_name_ptr_pair->second;
-    airsim_interfaces::msg::ObjectTransformsList object_transforms_list_msg  = get_object_transforms_list_msg_from_airsim(vehicle_ros->stamp_);      
+    auto &vehicle_ros = vehicle_name_ptr_pair->second;
+    airsim_interfaces::msg::ObjectTransformsList object_transforms_list_msg = get_object_transforms_list_msg_from_airsim(vehicle_ros->stamp_);
     vehicle_ros->object_transforms_pub_->publish(object_transforms_list_msg);
 
     RCLCPP_INFO_STREAM(nh_->get_logger(), "Completed object transforms refresh!");
@@ -548,17 +618,17 @@ bool AirsimROSWrapper::object_transforms_refresh_cb(const std::shared_ptr<airsim
     return true;
 }
 
-bool AirsimROSWrapper::land_srv_cb(std::shared_ptr<airsim_interfaces::srv::Land::Request> request, std::shared_ptr<airsim_interfaces::srv::Land::Response> response, const std::string& vehicle_name)
+bool AirsimROSWrapper::land_srv_cb(std::shared_ptr<airsim_interfaces::srv::Land::Request> request, std::shared_ptr<airsim_interfaces::srv::Land::Response> response, const std::string &vehicle_name)
 {
     unused(response);
     std::lock_guard<std::mutex> guard(control_mutex_);
 
     if (request->wait_on_last_task)
-        static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->landAsync(60, vehicle_name)->waitOnLastTask();
+        static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->landAsync(60, vehicle_name)->waitOnLastTask();
     else
-        static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->landAsync(60, vehicle_name);
+        static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->landAsync(60, vehicle_name);
 
-    return true; //todo
+    return true; // todo
 }
 
 bool AirsimROSWrapper::land_group_srv_cb(std::shared_ptr<airsim_interfaces::srv::LandGroup::Request> request, std::shared_ptr<airsim_interfaces::srv::LandGroup::Response> response)
@@ -567,13 +637,13 @@ bool AirsimROSWrapper::land_group_srv_cb(std::shared_ptr<airsim_interfaces::srv:
     std::lock_guard<std::mutex> guard(control_mutex_);
 
     if (request->wait_on_last_task)
-        for (const auto& vehicle_name : request->vehicle_names)
-            static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->landAsync(60, vehicle_name)->waitOnLastTask();
+        for (const auto &vehicle_name : request->vehicle_names)
+            static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->landAsync(60, vehicle_name)->waitOnLastTask();
     else
-        for (const auto& vehicle_name : request->vehicle_names)
-            static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->landAsync(60, vehicle_name);
+        for (const auto &vehicle_name : request->vehicle_names)
+            static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->landAsync(60, vehicle_name);
 
-    return true; //todo
+    return true; // todo
 }
 
 bool AirsimROSWrapper::land_all_srv_cb(std::shared_ptr<airsim_interfaces::srv::Land::Request> request, std::shared_ptr<airsim_interfaces::srv::Land::Response> response)
@@ -582,13 +652,13 @@ bool AirsimROSWrapper::land_all_srv_cb(std::shared_ptr<airsim_interfaces::srv::L
     std::lock_guard<std::mutex> guard(control_mutex_);
 
     if (request->wait_on_last_task)
-        for (const auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_)
-            static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->landAsync(60, vehicle_name_ptr_pair.first)->waitOnLastTask();
+        for (const auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+            static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->landAsync(60, vehicle_name_ptr_pair.first)->waitOnLastTask();
     else
-        for (const auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_)
-            static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->landAsync(60, vehicle_name_ptr_pair.first);
+        for (const auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+            static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->landAsync(60, vehicle_name_ptr_pair.first);
 
-    return true; //todo
+    return true; // todo
 }
 
 // todo add reset by vehicle_name API to airlib
@@ -600,29 +670,29 @@ bool AirsimROSWrapper::reset_srv_cb(std::shared_ptr<airsim_interfaces::srv::Rese
     std::lock_guard<std::mutex> guard(control_mutex_);
 
     airsim_client_->reset();
-    return true; //todo
+    return true; // todo
 }
 
-tf2::Quaternion AirsimROSWrapper::get_tf2_quat(const msr::airlib::Quaternionr& airlib_quat) const
+tf2::Quaternion AirsimROSWrapper::get_tf2_quat(const msr::airlib::Quaternionr &airlib_quat) const
 {
     return tf2::Quaternion(airlib_quat.x(), airlib_quat.y(), airlib_quat.z(), airlib_quat.w());
 }
 
-msr::airlib::Quaternionr AirsimROSWrapper::get_airlib_quat(const geometry_msgs::msg::Quaternion& geometry_msgs_quat) const
+msr::airlib::Quaternionr AirsimROSWrapper::get_airlib_quat(const geometry_msgs::msg::Quaternion &geometry_msgs_quat) const
 {
     return msr::airlib::Quaternionr(geometry_msgs_quat.w, geometry_msgs_quat.x, geometry_msgs_quat.y, geometry_msgs_quat.z);
 }
 
-msr::airlib::Quaternionr AirsimROSWrapper::get_airlib_quat(const tf2::Quaternion& tf2_quat) const
+msr::airlib::Quaternionr AirsimROSWrapper::get_airlib_quat(const tf2::Quaternion &tf2_quat) const
 {
     return msr::airlib::Quaternionr(tf2_quat.w(), tf2_quat.x(), tf2_quat.y(), tf2_quat.z());
 }
 
-void AirsimROSWrapper::car_cmd_cb(const airsim_interfaces::msg::CarControls::SharedPtr msg, const std::string& vehicle_name)
+void AirsimROSWrapper::car_cmd_cb(const airsim_interfaces::msg::CarControls::SharedPtr msg, const std::string &vehicle_name)
 {
     std::lock_guard<std::mutex> guard(control_mutex_);
 
-    auto car = static_cast<CarROS*>(vehicle_name_ptr_map_[vehicle_name].get());
+    auto car = static_cast<CarROS *>(vehicle_name_ptr_map_[vehicle_name].get());
     car->car_cmd_.throttle = msg->throttle;
     car->car_cmd_.steering = msg->steering;
     car->car_cmd_.brake = msg->brake;
@@ -634,16 +704,16 @@ void AirsimROSWrapper::car_cmd_cb(const airsim_interfaces::msg::CarControls::Sha
     car->has_car_cmd_ = true;
 }
 
-msr::airlib::Pose AirsimROSWrapper::get_airlib_pose(const float& x, const float& y, const float& z, const msr::airlib::Quaternionr& airlib_quat) const
+msr::airlib::Pose AirsimROSWrapper::get_airlib_pose(const float &x, const float &y, const float &z, const msr::airlib::Quaternionr &airlib_quat) const
 {
     return msr::airlib::Pose(msr::airlib::Vector3r(x, y, z), airlib_quat);
 }
 
-void AirsimROSWrapper::vel_cmd_body_frame_cb(const airsim_interfaces::msg::VelCmd::SharedPtr msg, const std::string& vehicle_name)
+void AirsimROSWrapper::vel_cmd_body_frame_cb(const airsim_interfaces::msg::VelCmd::SharedPtr msg, const std::string &vehicle_name)
 {
     std::lock_guard<std::mutex> guard(control_mutex_);
 
-    auto drone = static_cast<MultiRotorROS*>(vehicle_name_ptr_map_[vehicle_name].get());
+    auto drone = static_cast<MultiRotorROS *>(vehicle_name_ptr_map_[vehicle_name].get());
     drone->vel_cmd_ = get_airlib_body_vel_cmd(*msg, drone->curr_drone_state_.kinematics_estimated.pose.orientation);
     drone->has_vel_cmd_ = true;
 }
@@ -652,8 +722,9 @@ void AirsimROSWrapper::vel_cmd_group_body_frame_cb(const airsim_interfaces::msg:
 {
     std::lock_guard<std::mutex> guard(control_mutex_);
 
-    for (const auto& vehicle_name : msg->vehicle_names) {
-        auto drone = static_cast<MultiRotorROS*>(vehicle_name_ptr_map_[vehicle_name].get());
+    for (const auto &vehicle_name : msg->vehicle_names)
+    {
+        auto drone = static_cast<MultiRotorROS *>(vehicle_name_ptr_map_[vehicle_name].get());
         drone->vel_cmd_ = get_airlib_body_vel_cmd(msg->vel_cmd, drone->curr_drone_state_.kinematics_estimated.pose.orientation);
         drone->has_vel_cmd_ = true;
     }
@@ -664,18 +735,19 @@ void AirsimROSWrapper::vel_cmd_all_body_frame_cb(const airsim_interfaces::msg::V
     std::lock_guard<std::mutex> guard(control_mutex_);
 
     // todo expose wait_on_last_task or nah?
-    for (auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_) {
-        auto drone = static_cast<MultiRotorROS*>(vehicle_name_ptr_pair.second.get());
+    for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+    {
+        auto drone = static_cast<MultiRotorROS *>(vehicle_name_ptr_pair.second.get());
         drone->vel_cmd_ = get_airlib_body_vel_cmd(*msg, drone->curr_drone_state_.kinematics_estimated.pose.orientation);
         drone->has_vel_cmd_ = true;
     }
 }
 
-void AirsimROSWrapper::vel_cmd_world_frame_cb(const airsim_interfaces::msg::VelCmd::SharedPtr msg, const std::string& vehicle_name)
+void AirsimROSWrapper::vel_cmd_world_frame_cb(const airsim_interfaces::msg::VelCmd::SharedPtr msg, const std::string &vehicle_name)
 {
     std::lock_guard<std::mutex> guard(control_mutex_);
 
-    auto drone = static_cast<MultiRotorROS*>(vehicle_name_ptr_map_[vehicle_name].get());
+    auto drone = static_cast<MultiRotorROS *>(vehicle_name_ptr_map_[vehicle_name].get());
     drone->vel_cmd_ = get_airlib_world_vel_cmd(*msg);
     drone->has_vel_cmd_ = true;
 }
@@ -685,8 +757,9 @@ void AirsimROSWrapper::vel_cmd_group_world_frame_cb(const airsim_interfaces::msg
 {
     std::lock_guard<std::mutex> guard(control_mutex_);
 
-    for (const auto& vehicle_name : msg->vehicle_names) {
-        auto drone = static_cast<MultiRotorROS*>(vehicle_name_ptr_map_[vehicle_name].get());
+    for (const auto &vehicle_name : msg->vehicle_names)
+    {
+        auto drone = static_cast<MultiRotorROS *>(vehicle_name_ptr_map_[vehicle_name].get());
         drone->vel_cmd_ = get_airlib_world_vel_cmd(msg->vel_cmd);
         drone->has_vel_cmd_ = true;
     }
@@ -697,8 +770,9 @@ void AirsimROSWrapper::vel_cmd_all_world_frame_cb(const airsim_interfaces::msg::
     std::lock_guard<std::mutex> guard(control_mutex_);
 
     // todo expose wait_on_last_task or nah?
-    for (auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_) {
-        auto drone = static_cast<MultiRotorROS*>(vehicle_name_ptr_pair.second.get());
+    for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+    {
+        auto drone = static_cast<MultiRotorROS *>(vehicle_name_ptr_pair.second.get());
         drone->vel_cmd_ = get_airlib_world_vel_cmd(*msg);
         drone->has_vel_cmd_ = true;
     }
@@ -708,7 +782,8 @@ void AirsimROSWrapper::vel_cmd_all_world_frame_cb(const airsim_interfaces::msg::
 void AirsimROSWrapper::gimbal_angle_quat_cmd_cb(const airsim_interfaces::msg::GimbalAngleQuatCmd::SharedPtr gimbal_angle_quat_cmd_msg)
 {
     tf2::Quaternion quat_control_cmd;
-    try {
+    try
+    {
         tf2::convert(gimbal_angle_quat_cmd_msg->orientation, quat_control_cmd);
         quat_control_cmd.normalize();
         gimbal_cmd_.target_quat = get_airlib_quat(quat_control_cmd); // airsim uses wxyz
@@ -716,7 +791,8 @@ void AirsimROSWrapper::gimbal_angle_quat_cmd_cb(const airsim_interfaces::msg::Gi
         gimbal_cmd_.vehicle_name = gimbal_angle_quat_cmd_msg->vehicle_name;
         has_gimbal_cmd_ = true;
     }
-    catch (tf2::TransformException& ex) {
+    catch (tf2::TransformException &ex)
+    {
         RCLCPP_WARN(nh_->get_logger(), "%s", ex.what());
     }
 }
@@ -727,7 +803,8 @@ void AirsimROSWrapper::gimbal_angle_quat_cmd_cb(const airsim_interfaces::msg::Gi
 // 3. call airsim client's setCameraPose which sets camera pose wrt world (or takeoff?) ned frame. todo
 void AirsimROSWrapper::gimbal_angle_euler_cmd_cb(const airsim_interfaces::msg::GimbalAngleEulerCmd::SharedPtr gimbal_angle_euler_cmd_msg)
 {
-    try {
+    try
+    {
         tf2::Quaternion quat_control_cmd;
         quat_control_cmd.setRPY(math_common::deg2rad(gimbal_angle_euler_cmd_msg->roll), math_common::deg2rad(gimbal_angle_euler_cmd_msg->pitch), math_common::deg2rad(gimbal_angle_euler_cmd_msg->yaw));
         quat_control_cmd.normalize();
@@ -736,12 +813,13 @@ void AirsimROSWrapper::gimbal_angle_euler_cmd_cb(const airsim_interfaces::msg::G
         gimbal_cmd_.vehicle_name = gimbal_angle_euler_cmd_msg->vehicle_name;
         has_gimbal_cmd_ = true;
     }
-    catch (tf2::TransformException& ex) {
+    catch (tf2::TransformException &ex)
+    {
         RCLCPP_WARN(nh_->get_logger(), "%s", ex.what());
     }
 }
 
-airsim_interfaces::msg::CarState AirsimROSWrapper::get_roscarstate_msg_from_car_state(const msr::airlib::CarApiBase::CarState& car_state) const
+airsim_interfaces::msg::CarState AirsimROSWrapper::get_roscarstate_msg_from_car_state(const msr::airlib::CarApiBase::CarState &car_state) const
 {
     airsim_interfaces::msg::CarState state_msg;
     const auto odo = get_odom_msg_from_car_state(car_state);
@@ -758,23 +836,22 @@ airsim_interfaces::msg::CarState AirsimROSWrapper::get_roscarstate_msg_from_car_
     return state_msg;
 }
 
-airsim_interfaces::msg::ComputerVisionState AirsimROSWrapper::get_roscomputervisionstate_msg_from_computer_vision_state(const msr::airlib::ComputerVisionApiBase::ComputerVisionState& computer_vision_state) const
+airsim_interfaces::msg::ComputerVisionState AirsimROSWrapper::get_roscomputervisionstate_msg_from_computer_vision_state(const msr::airlib::ComputerVisionApiBase::ComputerVisionState &computer_vision_state) const
 {
     airsim_interfaces::msg::ComputerVisionState state_msg;
     const auto odo = get_odom_msg_from_computer_vision_state(computer_vision_state);
 
     state_msg.pose = odo.pose;
-    state_msg.twist = odo.twist;    
+    state_msg.twist = odo.twist;
     state_msg.header.stamp = rclcpp::Time(computer_vision_state.timestamp);
 
     return state_msg;
 }
 
-
-nav_msgs::msg::Odometry AirsimROSWrapper::get_odom_msg_from_kinematic_state(const msr::airlib::Kinematics::State& kinematics_estimated) const
+nav_msgs::msg::Odometry AirsimROSWrapper::get_odom_msg_from_kinematic_state(const msr::airlib::Kinematics::State &kinematics_estimated) const
 {
     nav_msgs::msg::Odometry odom_msg;
-   
+
     odom_msg.pose.pose.position.x = kinematics_estimated.pose.position.x();
     odom_msg.pose.pose.position.y = kinematics_estimated.pose.position.y();
     odom_msg.pose.pose.position.z = kinematics_estimated.pose.position.z();
@@ -797,31 +874,35 @@ nav_msgs::msg::Odometry AirsimROSWrapper::get_odom_msg_from_kinematic_state(cons
     odom_msg.twist.twist.linear.y = -odom_msg.twist.twist.linear.y;
     odom_msg.twist.twist.linear.z = -odom_msg.twist.twist.linear.z;
     odom_msg.twist.twist.angular.y = -odom_msg.twist.twist.angular.y;
-    odom_msg.twist.twist.angular.z = -odom_msg.twist.twist.angular.z;   
-    
+    odom_msg.twist.twist.angular.z = -odom_msg.twist.twist.angular.z;
+
     return odom_msg;
 }
 
-nav_msgs::msg::Odometry AirsimROSWrapper::get_odom_msg_from_car_state(const msr::airlib::CarApiBase::CarState& car_state) const
+nav_msgs::msg::Odometry AirsimROSWrapper::get_odom_msg_from_car_state(const msr::airlib::CarApiBase::CarState &car_state) const
 {
     return get_odom_msg_from_kinematic_state(car_state.kinematics_estimated);
 }
 
-nav_msgs::msg::Odometry AirsimROSWrapper::get_odom_msg_from_computer_vision_state(const msr::airlib::ComputerVisionApiBase::ComputerVisionState& computer_vision_state) const
+nav_msgs::msg::Odometry AirsimROSWrapper::get_odom_msg_from_computer_vision_state(const msr::airlib::ComputerVisionApiBase::ComputerVisionState &computer_vision_state) const
 {
     return get_odom_msg_from_kinematic_state(computer_vision_state.kinematics_estimated);
 }
 
-nav_msgs::msg::Odometry AirsimROSWrapper::get_odom_msg_from_multirotor_state(const msr::airlib::MultirotorState& drone_state) const
+nav_msgs::msg::Odometry AirsimROSWrapper::get_odom_msg_from_multirotor_state(const msr::airlib::MultirotorState &drone_state) const
 {
     return get_odom_msg_from_kinematic_state(drone_state.kinematics_estimated);
 }
 
-void fixPointCloud(std::vector<float>& data, int offset, std::vector<int> flip_indexes) {
-    for (size_t i = 1; i < data.size(); i += offset) {
+void fixPointCloud(std::vector<float> &data, int offset, std::vector<int> flip_indexes)
+{
+    for (size_t i = 1; i < data.size(); i += offset)
+    {
         data[i] = -data[i];
-        for (int flip_index : flip_indexes) {
-            if (i + flip_index < data.size()) {
+        for (int flip_index : flip_indexes)
+        {
+            if (i + flip_index < data.size())
+            {
                 data[i + flip_index] = -data[i + flip_index];
             }
         }
@@ -831,13 +912,14 @@ void fixPointCloud(std::vector<float>& data, int offset, std::vector<int> flip_i
 // https://docs.ros.org/jade/api/sensor_msgs/html/point__cloud__conversion_8h_source.html#l00066
 // look at UnrealLidarSensor.cpp UnrealLidarSensor::getPointCloud() for math
 // read this carefully https://docs.ros.org/kinetic/api/sensor_msgs/html/msg/PointCloud2.html
-sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_lidar_msg_from_airsim(const msr::airlib::LidarData& lidar_data, const std::string& vehicle_name, const std::string& sensor_name) const
+sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_lidar_msg_from_airsim(const msr::airlib::LidarData &lidar_data, const std::string &vehicle_name, const std::string &sensor_name) const
 {
     sensor_msgs::msg::PointCloud2 lidar_msg;
     lidar_msg.header.stamp = rclcpp::Time(lidar_data.time_stamp);
     lidar_msg.header.frame_id = vehicle_name + "/" + sensor_name;
 
-    if (lidar_data.point_cloud.size() > 3) {
+    if (lidar_data.point_cloud.size() > 3)
+    {
         lidar_msg.height = 1;
         lidar_msg.width = lidar_data.point_cloud.size() / 3;
 
@@ -848,7 +930,8 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_lidar_msg_from_airsim(const 
 
         int offset = 0;
 
-        for (size_t d = 0; d < lidar_msg.fields.size(); ++d, offset += 4) {
+        for (size_t d = 0; d < lidar_msg.fields.size(); ++d, offset += 4)
+        {
             lidar_msg.fields[d].offset = offset;
             lidar_msg.fields[d].datatype = sensor_msgs::msg::PointField::FLOAT32;
             lidar_msg.fields[d].count = 1;
@@ -862,49 +945,53 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_lidar_msg_from_airsim(const 
         std::vector<float> data_std = lidar_data.point_cloud;
         fixPointCloud(data_std, 3, {1});
 
-        const unsigned char* bytes = reinterpret_cast<const unsigned char*>(data_std.data());
+        const unsigned char *bytes = reinterpret_cast<const unsigned char *>(data_std.data());
         std::vector<unsigned char> lidar_msg_data(bytes, bytes + sizeof(float) * data_std.size());
-        lidar_msg.data = std::move(lidar_msg_data);   
+        lidar_msg.data = std::move(lidar_msg_data);
     }
-    else {
+    else
+    {
         // msg = []
     }
 
     return lidar_msg;
 }
 
-airsim_interfaces::msg::StringArray AirsimROSWrapper::get_lidar_labels_msg_from_airsim(const msr::airlib::LidarData& lidar_data, const std::string& vehicle_name, const std::string& sensor_name) const
+airsim_interfaces::msg::StringArray AirsimROSWrapper::get_lidar_labels_msg_from_airsim(const msr::airlib::LidarData &lidar_data, const std::string &vehicle_name, const std::string &sensor_name) const
 {
     airsim_interfaces::msg::StringArray lidar_labels_msg;
     lidar_labels_msg.header.stamp = rclcpp::Time(lidar_data.time_stamp);
     lidar_labels_msg.header.frame_id = vehicle_name + "/" + sensor_name;
 
-    if (lidar_data.point_cloud.size() > 3) {
-        lidar_labels_msg.data = std::move(lidar_data.groundtruth);           
+    if (lidar_data.point_cloud.size() > 3)
+    {
+        lidar_labels_msg.data = std::move(lidar_data.groundtruth);
     }
-    else {
+    else
+    {
         // msg = []
     }
 
     return lidar_labels_msg;
 }
 
-sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_gpulidar_msg_from_airsim(const msr::airlib::GPULidarData& gpulidar_data, const std::string& vehicle_name, const std::string& sensor_name) const
+sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_gpulidar_msg_from_airsim(const msr::airlib::GPULidarData &gpulidar_data, const std::string &vehicle_name, const std::string &sensor_name) const
 {
-    sensor_msgs::msg::PointCloud2 gpulidar_msg;    
+    sensor_msgs::msg::PointCloud2 gpulidar_msg;
     gpulidar_msg.header.stamp = rclcpp::Time(gpulidar_data.time_stamp);
     gpulidar_msg.header.frame_id = vehicle_name + "/" + sensor_name;
 
-    if (gpulidar_data.point_cloud.size() > 5) {    
-        
+    if (gpulidar_data.point_cloud.size() > 5)
+    {
+
         std::vector<float> data_std = gpulidar_data.point_cloud;
         fixPointCloud(data_std, 5, {1});
 
         size_t num_points = data_std.size() / 5;
-        pcl::PointCloud<PointXYZRGBI> cloud;   
-        cloud.points.resize(num_points); 
+        pcl::PointCloud<PointXYZRGBI> cloud;
+        cloud.points.resize(num_points);
         cloud.width = static_cast<uint32_t>(num_points);
-        cloud.height = 1; 
+        cloud.height = 1;
         cloud.is_dense = true;
 
         for (size_t i = 0; i < num_points; ++i)
@@ -915,7 +1002,7 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_gpulidar_msg_from_airsim(con
             float z = data_std[i * 5 + 2];
             float rgb_packed = data_std[i * 5 + 3];
             float intensity = data_std[i * 5 + 4];
-            
+
             // Unpack the RGB value
             uint8_t r = ((std::uint32_t)rgb_packed >> 16) & 0x0000ff;
             uint8_t g = ((std::uint32_t)rgb_packed >> 8) & 0x0000ff;
@@ -927,7 +1014,7 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_gpulidar_msg_from_airsim(con
             point.y = y;
             point.z = z;
             std::uint32_t rgb = ((std::uint32_t)r << 16 | (std::uint32_t)g << 8 | (std::uint32_t)b);
-            point.rgb = *reinterpret_cast<float*>(&rgb);
+            point.rgb = *reinterpret_cast<float *>(&rgb);
             point.intensity = intensity;
             cloud.points[i] = point;
         }
@@ -936,20 +1023,22 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_gpulidar_msg_from_airsim(con
         gpulidar_msg.header.stamp = rclcpp::Time(gpulidar_data.time_stamp);
         gpulidar_msg.header.frame_id = vehicle_name + "/" + sensor_name;
     }
-    else {
+    else
+    {
         // msg = []
     }
 
     return gpulidar_msg;
 }
 
-sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_active_echo_msg_from_airsim(const msr::airlib::EchoData& echo_data, const std::string& vehicle_name, const std::string& sensor_name) const
+sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_active_echo_msg_from_airsim(const msr::airlib::EchoData &echo_data, const std::string &vehicle_name, const std::string &sensor_name) const
 {
     sensor_msgs::msg::PointCloud2 echo_msg;
     echo_msg.header.stamp = rclcpp::Time(echo_data.time_stamp);
     echo_msg.header.frame_id = vehicle_name + "/" + sensor_name;
 
-    if (echo_data.point_cloud.size() > 6) {
+    if (echo_data.point_cloud.size() > 6)
+    {
         echo_msg.height = 1;
         echo_msg.width = echo_data.point_cloud.size() / 6;
 
@@ -961,9 +1050,9 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_active_echo_msg_from_airsim(
         echo_msg.fields[4].name = "d";
         echo_msg.fields[5].name = "r";
 
-
         int offset = 0;
-        for (size_t d = 0; d < echo_msg.fields.size(); ++d, offset += 4) {
+        for (size_t d = 0; d < echo_msg.fields.size(); ++d, offset += 4)
+        {
             echo_msg.fields[d].offset = offset;
             echo_msg.fields[d].datatype = sensor_msgs::msg::PointField::FLOAT32;
             echo_msg.fields[d].count = 1;
@@ -973,44 +1062,48 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_active_echo_msg_from_airsim(
         echo_msg.point_step = offset;
         echo_msg.row_step = echo_msg.point_step * echo_msg.width;
 
-        echo_msg.is_dense = true; 
+        echo_msg.is_dense = true;
         std::vector<float> data_std = echo_data.point_cloud;
         fixPointCloud(data_std, 6, {1});
 
-        const unsigned char* bytes = reinterpret_cast<const unsigned char*>(data_std.data());
+        const unsigned char *bytes = reinterpret_cast<const unsigned char *>(data_std.data());
         std::vector<unsigned char> echo_msg_data(bytes, bytes + sizeof(float) * data_std.size());
-        echo_msg.data = std::move(echo_msg_data);   
+        echo_msg.data = std::move(echo_msg_data);
     }
-    else {
+    else
+    {
         // msg = []
     }
 
     return echo_msg;
 }
 
-airsim_interfaces::msg::StringArray AirsimROSWrapper::get_active_echo_labels_msg_from_airsim(const msr::airlib::EchoData& echo_data, const std::string& vehicle_name, const std::string& sensor_name) const
+airsim_interfaces::msg::StringArray AirsimROSWrapper::get_active_echo_labels_msg_from_airsim(const msr::airlib::EchoData &echo_data, const std::string &vehicle_name, const std::string &sensor_name) const
 {
     airsim_interfaces::msg::StringArray echo_active_labels_msg;
     echo_active_labels_msg.header.stamp = rclcpp::Time(echo_data.time_stamp);
     echo_active_labels_msg.header.frame_id = vehicle_name + "/" + sensor_name;
 
-    if (echo_data.point_cloud.size() > 6) {
-        echo_active_labels_msg.data = std::move(echo_data.groundtruth);           
+    if (echo_data.point_cloud.size() > 6)
+    {
+        echo_active_labels_msg.data = std::move(echo_data.groundtruth);
     }
-    else {
+    else
+    {
         // msg = []
     }
 
     return echo_active_labels_msg;
 }
 
-sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_passive_echo_msg_from_airsim(const msr::airlib::EchoData& echo_data, const std::string& vehicle_name, const std::string& sensor_name) const
+sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_passive_echo_msg_from_airsim(const msr::airlib::EchoData &echo_data, const std::string &vehicle_name, const std::string &sensor_name) const
 {
     sensor_msgs::msg::PointCloud2 echo_msg;
     echo_msg.header.stamp = rclcpp::Time(echo_data.time_stamp);
     echo_msg.header.frame_id = vehicle_name + "/" + sensor_name;
 
-    if (echo_data.passive_beacons_point_cloud.size() > 9) {
+    if (echo_data.passive_beacons_point_cloud.size() > 9)
+    {
         echo_msg.height = 1;
         echo_msg.width = echo_data.passive_beacons_point_cloud.size() / 9;
 
@@ -1025,9 +1118,9 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_passive_echo_msg_from_airsim
         echo_msg.fields[7].name = "yd";
         echo_msg.fields[8].name = "zd";
 
-
         int offset = 0;
-        for (size_t d = 0; d < echo_msg.fields.size(); ++d, offset += 4) {
+        for (size_t d = 0; d < echo_msg.fields.size(); ++d, offset += 4)
+        {
             echo_msg.fields[d].offset = offset;
             echo_msg.fields[d].datatype = sensor_msgs::msg::PointField::FLOAT32;
             echo_msg.fields[d].count = 1;
@@ -1037,38 +1130,41 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_passive_echo_msg_from_airsim
         echo_msg.point_step = offset;
         echo_msg.row_step = echo_msg.point_step * echo_msg.width;
 
-        echo_msg.is_dense = true; 
+        echo_msg.is_dense = true;
         std::vector<float> data_std = echo_data.passive_beacons_point_cloud;
         fixPointCloud(data_std, 9, {1, 6, 7});
 
-        const unsigned char* bytes = reinterpret_cast<const unsigned char*>(data_std.data());
+        const unsigned char *bytes = reinterpret_cast<const unsigned char *>(data_std.data());
         std::vector<unsigned char> echo_msg_data(bytes, bytes + sizeof(float) * data_std.size());
-        echo_msg.data = std::move(echo_msg_data);   
+        echo_msg.data = std::move(echo_msg_data);
     }
-    else {
+    else
+    {
         // msg = []
     }
 
     return echo_msg;
 }
 
-airsim_interfaces::msg::StringArray AirsimROSWrapper::get_passive_echo_labels_msg_from_airsim(const msr::airlib::EchoData& echo_data, const std::string& vehicle_name, const std::string& sensor_name) const
+airsim_interfaces::msg::StringArray AirsimROSWrapper::get_passive_echo_labels_msg_from_airsim(const msr::airlib::EchoData &echo_data, const std::string &vehicle_name, const std::string &sensor_name) const
 {
     airsim_interfaces::msg::StringArray echo_passive_labels_msg;
     echo_passive_labels_msg.header.stamp = rclcpp::Time(echo_data.time_stamp);
     echo_passive_labels_msg.header.frame_id = vehicle_name + "/" + sensor_name;
 
-    if (echo_data.point_cloud.size() > 9) {
-        echo_passive_labels_msg.data = std::move(echo_data.passive_beacons_groundtruth);           
+    if (echo_data.point_cloud.size() > 9)
+    {
+        echo_passive_labels_msg.data = std::move(echo_data.passive_beacons_groundtruth);
     }
-    else {
+    else
+    {
         // msg = []
     }
 
     return echo_passive_labels_msg;
 }
 
-airsim_interfaces::msg::Environment AirsimROSWrapper::get_environment_msg_from_airsim(const msr::airlib::Environment::State& env_data) const
+airsim_interfaces::msg::Environment AirsimROSWrapper::get_environment_msg_from_airsim(const msr::airlib::Environment::State &env_data) const
 {
     airsim_interfaces::msg::Environment env_msg;
     env_msg.position.x = env_data.position.x();
@@ -1087,7 +1183,7 @@ airsim_interfaces::msg::Environment AirsimROSWrapper::get_environment_msg_from_a
     return env_msg;
 }
 
-sensor_msgs::msg::MagneticField AirsimROSWrapper::get_mag_msg_from_airsim(const msr::airlib::MagnetometerBase::Output& mag_data) const
+sensor_msgs::msg::MagneticField AirsimROSWrapper::get_mag_msg_from_airsim(const msr::airlib::MagnetometerBase::Output &mag_data) const
 {
     sensor_msgs::msg::MagneticField mag_msg;
     mag_msg.magnetic_field.x = mag_data.magnetic_field_body.x();
@@ -1102,7 +1198,7 @@ sensor_msgs::msg::MagneticField AirsimROSWrapper::get_mag_msg_from_airsim(const 
 }
 
 // todo covariances
-sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_msg_from_airsim(const msr::airlib::GpsBase::Output& gps_data) const
+sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_msg_from_airsim(const msr::airlib::GpsBase::Output &gps_data) const
 {
     sensor_msgs::msg::NavSatFix gps_msg;
     gps_msg.header.stamp = rclcpp::Time(gps_data.time_stamp);
@@ -1117,7 +1213,7 @@ sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_msg_from_airsim(const msr:
     return gps_msg;
 }
 
-sensor_msgs::msg::Range AirsimROSWrapper::get_range_from_airsim(const msr::airlib::DistanceSensorData& dist_data) const
+sensor_msgs::msg::Range AirsimROSWrapper::get_range_from_airsim(const msr::airlib::DistanceSensorData &dist_data) const
 {
     sensor_msgs::msg::Range dist_msg;
     dist_msg.header.stamp = rclcpp::Time(dist_data.time_stamp);
@@ -1128,14 +1224,14 @@ sensor_msgs::msg::Range AirsimROSWrapper::get_range_from_airsim(const msr::airli
     return dist_msg;
 }
 
-
-airsim_interfaces::msg::InstanceSegmentationList AirsimROSWrapper::get_instance_segmentation_list_msg_from_airsim() const{
+airsim_interfaces::msg::InstanceSegmentationList AirsimROSWrapper::get_instance_segmentation_list_msg_from_airsim() const
+{
     airsim_interfaces::msg::InstanceSegmentationList instance_segmentation_list_msg;
     std::vector<std::string> object_name_list = airsim_client_->simListInstanceSegmentationObjects();
     std::vector<msr::airlib::Vector3r> color_map = airsim_client_->simGetInstanceSegmentationColorMap();
     int object_index = 0;
     std::vector<std::string>::iterator it = object_name_list.begin();
-    for(; it < object_name_list.end(); it++, object_index++ )
+    for (; it < object_name_list.end(); it++, object_index++)
     {
         airsim_interfaces::msg::InstanceSegmentationLabel instance_segmentation_label_msg;
         instance_segmentation_label_msg.name = *it;
@@ -1148,16 +1244,18 @@ airsim_interfaces::msg::InstanceSegmentationList AirsimROSWrapper::get_instance_
     return instance_segmentation_list_msg;
 }
 
-airsim_interfaces::msg::ObjectTransformsList AirsimROSWrapper::get_object_transforms_list_msg_from_airsim(rclcpp::Time timestamp) const{
+airsim_interfaces::msg::ObjectTransformsList AirsimROSWrapper::get_object_transforms_list_msg_from_airsim(rclcpp::Time timestamp) const
+{
     airsim_interfaces::msg::ObjectTransformsList object_transforms_list_msg;
     std::vector<std::string> object_name_list = airsim_client_->simListInstanceSegmentationObjects();
     std::vector<msr::airlib::Pose> poses = airsim_client_->simListInstanceSegmentationPoses();
     int object_index = 0;
     std::vector<std::string>::iterator it = object_name_list.begin();
-    for(; it < object_name_list.end(); it++, object_index++ )
+    for (; it < object_name_list.end(); it++, object_index++)
     {
-        msr::airlib::Pose cur_object_pose = poses[object_index]; 
-        if(!std::isnan(cur_object_pose.position.x())){
+        msr::airlib::Pose cur_object_pose = poses[object_index];
+        if (!std::isnan(cur_object_pose.position.x()))
+        {
             geometry_msgs::msg::TransformStamped object_transform_msg;
             object_transform_msg.child_frame_id = *it;
             object_transform_msg.transform.translation.x = cur_object_pose.position.x();
@@ -1168,7 +1266,7 @@ airsim_interfaces::msg::ObjectTransformsList AirsimROSWrapper::get_object_transf
             object_transform_msg.transform.rotation.z = cur_object_pose.orientation.inverse().z();
             object_transform_msg.transform.rotation.w = cur_object_pose.orientation.inverse().w();
             object_transform_msg.header.stamp = timestamp;
-            object_transforms_list_msg.objects.push_back(object_transform_msg);            
+            object_transforms_list_msg.objects.push_back(object_transform_msg);
         }
     }
     object_transforms_list_msg.header.stamp = timestamp;
@@ -1176,7 +1274,7 @@ airsim_interfaces::msg::ObjectTransformsList AirsimROSWrapper::get_object_transf
     return object_transforms_list_msg;
 }
 
-airsim_interfaces::msg::Altimeter AirsimROSWrapper::get_altimeter_msg_from_airsim(const msr::airlib::BarometerBase::Output& alt_data) const
+airsim_interfaces::msg::Altimeter AirsimROSWrapper::get_altimeter_msg_from_airsim(const msr::airlib::BarometerBase::Output &alt_data) const
 {
     airsim_interfaces::msg::Altimeter alt_msg;
     alt_msg.header.stamp = rclcpp::Time(alt_data.time_stamp);
@@ -1188,10 +1286,10 @@ airsim_interfaces::msg::Altimeter AirsimROSWrapper::get_altimeter_msg_from_airsi
 }
 
 // todo covariances
-sensor_msgs::msg::Imu AirsimROSWrapper::get_imu_msg_from_airsim(const msr::airlib::ImuBase::Output& imu_data) const
+sensor_msgs::msg::Imu AirsimROSWrapper::get_imu_msg_from_airsim(const msr::airlib::ImuBase::Output &imu_data) const
 {
     sensor_msgs::msg::Imu imu_msg;
-    
+
     // imu_msg.header.frame_id = "/airsim/odom_local_ned";// todo multiple drones
     imu_msg.header.stamp = rclcpp::Time(imu_data.time_stamp);
     imu_msg.orientation.x = imu_data.orientation.inverse().x();
@@ -1209,11 +1307,10 @@ sensor_msgs::msg::Imu AirsimROSWrapper::get_imu_msg_from_airsim(const msr::airli
     imu_msg.linear_acceleration.y = -imu_data.linear_acceleration.y();
     imu_msg.linear_acceleration.z = -imu_data.linear_acceleration.z();
 
-
     return imu_msg;
 }
 
-void AirsimROSWrapper::publish_odom_tf(const nav_msgs::msg::Odometry& odom_msg)
+void AirsimROSWrapper::publish_odom_tf(const nav_msgs::msg::Odometry &odom_msg)
 {
     geometry_msgs::msg::TransformStamped odom_tf;
     odom_tf.header = odom_msg.header;
@@ -1225,7 +1322,7 @@ void AirsimROSWrapper::publish_odom_tf(const nav_msgs::msg::Odometry& odom_msg)
     tf_broadcaster_->sendTransform(odom_tf);
 }
 
-airsim_interfaces::msg::GPSYaw AirsimROSWrapper::get_gps_msg_from_airsim_geo_point(const msr::airlib::GeoPoint& geo_point) const
+airsim_interfaces::msg::GPSYaw AirsimROSWrapper::get_gps_msg_from_airsim_geo_point(const msr::airlib::GeoPoint &geo_point) const
 {
     airsim_interfaces::msg::GPSYaw gps_msg;
     gps_msg.latitude = geo_point.latitude;
@@ -1234,7 +1331,7 @@ airsim_interfaces::msg::GPSYaw AirsimROSWrapper::get_gps_msg_from_airsim_geo_poi
     return gps_msg;
 }
 
-sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_sensor_msg_from_airsim_geo_point(const msr::airlib::GeoPoint& geo_point) const
+sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_sensor_msg_from_airsim_geo_point(const msr::airlib::GeoPoint &geo_point) const
 {
     sensor_msgs::msg::NavSatFix gps_msg;
     gps_msg.latitude = geo_point.latitude;
@@ -1249,7 +1346,7 @@ msr::airlib::GeoPoint AirsimROSWrapper::get_origin_geo_point() const
     return geo_point.home_geo_point;
 }
 
-VelCmd AirsimROSWrapper::get_airlib_world_vel_cmd(const airsim_interfaces::msg::VelCmd& msg) const
+VelCmd AirsimROSWrapper::get_airlib_world_vel_cmd(const airsim_interfaces::msg::VelCmd &msg) const
 {
     VelCmd vel_cmd;
     vel_cmd.x = msg.twist.linear.x;
@@ -1261,15 +1358,15 @@ VelCmd AirsimROSWrapper::get_airlib_world_vel_cmd(const airsim_interfaces::msg::
     return vel_cmd;
 }
 
-VelCmd AirsimROSWrapper::get_airlib_body_vel_cmd(const airsim_interfaces::msg::VelCmd& msg, const msr::airlib::Quaternionr& airlib_quat) const
+VelCmd AirsimROSWrapper::get_airlib_body_vel_cmd(const airsim_interfaces::msg::VelCmd &msg, const msr::airlib::Quaternionr &airlib_quat) const
 {
     VelCmd vel_cmd;
     double roll, pitch, yaw;
     tf2::Matrix3x3(get_tf2_quat(airlib_quat)).getRPY(roll, pitch, yaw); // ros uses xyzw
 
     // todo do actual body frame?
-    vel_cmd.x = (msg.twist.linear.x * cos(yaw)) - (msg.twist.linear.y * sin(yaw)); //body frame assuming zero pitch roll
-    vel_cmd.y = (msg.twist.linear.x * sin(yaw)) + (msg.twist.linear.y * cos(yaw)); //body frame
+    vel_cmd.x = (msg.twist.linear.x * cos(yaw)) - (msg.twist.linear.y * sin(yaw)); // body frame assuming zero pitch roll
+    vel_cmd.y = (msg.twist.linear.x * sin(yaw)) + (msg.twist.linear.y * cos(yaw)); // body frame
     vel_cmd.z = msg.twist.linear.z;
     vel_cmd.drivetrain = msr::airlib::DrivetrainType::MaxDegreeOfFreedom;
     vel_cmd.yaw_mode.is_rate = true;
@@ -1279,7 +1376,7 @@ VelCmd AirsimROSWrapper::get_airlib_body_vel_cmd(const airsim_interfaces::msg::V
     return vel_cmd;
 }
 
-geometry_msgs::msg::Transform AirsimROSWrapper::get_transform_msg_from_airsim(const msr::airlib::Vector3r& position, const msr::airlib::AirSimSettings::Rotation& rotation)
+geometry_msgs::msg::Transform AirsimROSWrapper::get_transform_msg_from_airsim(const msr::airlib::Vector3r &position, const msr::airlib::AirSimSettings::Rotation &rotation)
 {
     geometry_msgs::msg::Transform transform;
     transform.translation.x = position.x();
@@ -1295,7 +1392,7 @@ geometry_msgs::msg::Transform AirsimROSWrapper::get_transform_msg_from_airsim(co
     return transform;
 }
 
-geometry_msgs::msg::Transform AirsimROSWrapper::get_transform_msg_from_airsim(const msr::airlib::Vector3r& position, const msr::airlib::Quaternionr& quaternion)
+geometry_msgs::msg::Transform AirsimROSWrapper::get_transform_msg_from_airsim(const msr::airlib::Vector3r &position, const msr::airlib::Quaternionr &quaternion)
 {
     geometry_msgs::msg::Transform transform;
     transform.translation.x = position.x();
@@ -1311,7 +1408,8 @@ geometry_msgs::msg::Transform AirsimROSWrapper::get_transform_msg_from_airsim(co
 
 void AirsimROSWrapper::drone_state_timer_cb()
 {
-    try {
+    try
+    {
         // todo this is global origin
         origin_geo_point_pub_->publish(origin_geo_point_msg_);
 
@@ -1319,12 +1417,14 @@ void AirsimROSWrapper::drone_state_timer_cb()
         const auto now = update_state();
 
         // on init, will publish 0 to /clock as expected for use_sim_time compatibility
-        if (!airsim_client_->simIsPaused()) {
+        if (!airsim_client_->simIsPaused())
+        {
             // airsim_client needs to provide the simulation time in a future version of the API
             ros_clock_.clock = now;
         }
         // publish the simulation clock
-        if (publish_clock_) {
+        if (publish_clock_)
+        {
             clock_pub_->publish(ros_clock_);
         }
 
@@ -1334,16 +1434,19 @@ void AirsimROSWrapper::drone_state_timer_cb()
         // send any commands out to the vehicles
         update_commands();
     }
-    catch (rpc::rpc_error& e) {
+    catch (rpc::rpc_error &e)
+    {
         std::string msg = e.get_error().as<std::string>();
         RCLCPP_ERROR(nh_->get_logger(), "Exception raised by the API:\n%s", msg.c_str());
     }
 }
 
-void AirsimROSWrapper::update_and_publish_static_transforms(VehicleROS* vehicle_ros)
+void AirsimROSWrapper::update_and_publish_static_transforms(VehicleROS *vehicle_ros)
 {
-    if (vehicle_ros && !vehicle_ros->static_tf_msg_vec_.empty()) {
-        for (auto& static_tf_msg : vehicle_ros->static_tf_msg_vec_) {
+    if (vehicle_ros && !vehicle_ros->static_tf_msg_vec_.empty())
+    {
+        for (auto &static_tf_msg : vehicle_ros->static_tf_msg_vec_)
+        {
             static_tf_msg.header.stamp = vehicle_ros->stamp_;
             static_tf_pub_->sendTransform(static_tf_msg);
         }
@@ -1355,26 +1458,29 @@ rclcpp::Time AirsimROSWrapper::update_state()
     bool got_sim_time = false;
     rclcpp::Time curr_ros_time = nh_->now();
 
-    //should be easier way to get the sim time through API, something like:
-    //msr::airlib::Environment::State env = airsim_client_->simGetGroundTruthEnvironment("");
-    //curr_ros_time = rclcpp::Time(env.clock().nowNanos());
+    // should be easier way to get the sim time through API, something like:
+    // msr::airlib::Environment::State env = airsim_client_->simGetGroundTruthEnvironment("");
+    // curr_ros_time = rclcpp::Time(env.clock().nowNanos());
 
     // iterate over drones
-    for (auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_) {
+    for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+    {
         rclcpp::Time vehicle_time;
         // get drone state from airsim
-        auto& vehicle_ros = vehicle_name_ptr_pair.second;
+        auto &vehicle_ros = vehicle_name_ptr_pair.second;
 
         // vehicle environment, we can get ambient temperature here and other truths
         auto env_data = airsim_client_->simGetGroundTruthEnvironment(vehicle_ros->vehicle_name_);
 
-        if (airsim_mode_ == AIRSIM_MODE::DRONE) {
-            auto drone = static_cast<MultiRotorROS*>(vehicle_ros.get());
-            auto rpc = static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get());
+        if (airsim_mode_ == AIRSIM_MODE::DRONE)
+        {
+            auto drone = static_cast<MultiRotorROS *>(vehicle_ros.get());
+            auto rpc = static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get());
             drone->curr_drone_state_ = rpc->getMultirotorState(vehicle_ros->vehicle_name_);
 
             vehicle_time = rclcpp::Time(drone->curr_drone_state_.timestamp);
-            if (!got_sim_time) {
+            if (!got_sim_time)
+            {
                 curr_ros_time = vehicle_time;
                 got_sim_time = true;
             }
@@ -1384,13 +1490,15 @@ rclcpp::Time AirsimROSWrapper::update_state()
 
             vehicle_ros->curr_odom_ = get_odom_msg_from_multirotor_state(drone->curr_drone_state_);
         }
-        else if(airsim_mode_ == AIRSIM_MODE::CAR) {
-            auto car = static_cast<CarROS*>(vehicle_ros.get());
-            auto rpc = static_cast<msr::airlib::CarRpcLibClient*>(airsim_client_.get());
+        else if (airsim_mode_ == AIRSIM_MODE::CAR)
+        {
+            auto car = static_cast<CarROS *>(vehicle_ros.get());
+            auto rpc = static_cast<msr::airlib::CarRpcLibClient *>(airsim_client_.get());
             car->curr_car_state_ = rpc->getCarState(vehicle_ros->vehicle_name_);
 
             vehicle_time = rclcpp::Time(car->curr_car_state_.timestamp);
-            if (!got_sim_time) {
+            if (!got_sim_time)
+            {
                 curr_ros_time = vehicle_time;
                 got_sim_time = true;
             }
@@ -1403,13 +1511,16 @@ rclcpp::Time AirsimROSWrapper::update_state()
             airsim_interfaces::msg::CarState state_msg = get_roscarstate_msg_from_car_state(car->curr_car_state_);
             state_msg.header.frame_id = vehicle_ros->vehicle_name_;
             car->car_state_msg_ = state_msg;
-        }else{
-            auto computer_vision = static_cast<ComputerVisionROS*>(vehicle_ros.get());
-            auto rpc = static_cast<msr::airlib::ComputerVisionRpcLibClient*>(airsim_client_.get());
+        }
+        else
+        {
+            auto computer_vision = static_cast<ComputerVisionROS *>(vehicle_ros.get());
+            auto rpc = static_cast<msr::airlib::ComputerVisionRpcLibClient *>(airsim_client_.get());
             computer_vision->curr_computer_vision_state_ = rpc->getComputerVisionState(vehicle_ros->vehicle_name_);
 
             vehicle_time = rclcpp::Time(computer_vision->curr_computer_vision_state_.timestamp);
-            if (!got_sim_time) {
+            if (!got_sim_time)
+            {
                 curr_ros_time = vehicle_time;
                 got_sim_time = true;
             }
@@ -1442,18 +1553,22 @@ rclcpp::Time AirsimROSWrapper::update_state()
 
 void AirsimROSWrapper::publish_vehicle_state()
 {
-    for (auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_) {
-        auto& vehicle_ros = vehicle_name_ptr_pair.second;
+    for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+    {
+        auto &vehicle_ros = vehicle_name_ptr_pair.second;
 
         // simulation environment truth
         vehicle_ros->env_pub_->publish(vehicle_ros->env_msg_);
 
-        if (airsim_mode_ == AIRSIM_MODE::CAR) {
+        if (airsim_mode_ == AIRSIM_MODE::CAR)
+        {
             // dashboard reading from car, RPM, gear, etc
-            auto car = static_cast<CarROS*>(vehicle_ros.get());
+            auto car = static_cast<CarROS *>(vehicle_ros.get());
             car->car_state_pub_->publish(car->car_state_msg_);
-        }else if(airsim_mode_ == AIRSIM_MODE::COMPUTERVISION){
-            auto computer_vision = static_cast<ComputerVisionROS*>(vehicle_ros.get());
+        }
+        else if (airsim_mode_ == AIRSIM_MODE::COMPUTERVISION)
+        {
+            auto computer_vision = static_cast<ComputerVisionROS *>(vehicle_ros.get());
             computer_vision->computer_vision_state_pub_->publish(computer_vision->computer_vision_state_msg_);
         }
 
@@ -1464,32 +1579,37 @@ void AirsimROSWrapper::publish_vehicle_state()
         // ground truth GPS position from sim/HITL
         vehicle_ros->global_gps_pub_->publish(vehicle_ros->gps_sensor_msg_);
 
-        for (auto& sensor_publisher : vehicle_ros->barometer_pubs_) {
+        for (auto &sensor_publisher : vehicle_ros->barometer_pubs_)
+        {
             auto baro_data = airsim_client_->getBarometerData(sensor_publisher.sensor_name, vehicle_ros->vehicle_name_);
             airsim_interfaces::msg::Altimeter alt_msg = get_altimeter_msg_from_airsim(baro_data);
             alt_msg.header.frame_id = vehicle_ros->vehicle_name_;
             sensor_publisher.publisher->publish(alt_msg);
         }
 
-        for (auto& sensor_publisher : vehicle_ros->imu_pubs_) {
+        for (auto &sensor_publisher : vehicle_ros->imu_pubs_)
+        {
             auto imu_data = airsim_client_->getImuData(sensor_publisher.sensor_name, vehicle_ros->vehicle_name_);
             sensor_msgs::msg::Imu imu_msg = get_imu_msg_from_airsim(imu_data);
             imu_msg.header.frame_id = vehicle_ros->vehicle_name_;
             sensor_publisher.publisher->publish(imu_msg);
         }
-        for (auto& sensor_publisher : vehicle_ros->distance_pubs_) {
+        for (auto &sensor_publisher : vehicle_ros->distance_pubs_)
+        {
             auto distance_data = airsim_client_->getDistanceSensorData(sensor_publisher.sensor_name, vehicle_ros->vehicle_name_);
             sensor_msgs::msg::Range dist_msg = get_range_from_airsim(distance_data);
             dist_msg.header.frame_id = vehicle_ros->vehicle_name_;
             sensor_publisher.publisher->publish(dist_msg);
         }
-        for (auto& sensor_publisher : vehicle_ros->gps_pubs_) {
+        for (auto &sensor_publisher : vehicle_ros->gps_pubs_)
+        {
             auto gps_data = airsim_client_->getGpsData(sensor_publisher.sensor_name, vehicle_ros->vehicle_name_);
             sensor_msgs::msg::NavSatFix gps_msg = get_gps_msg_from_airsim(gps_data);
             gps_msg.header.frame_id = vehicle_ros->vehicle_name_;
             sensor_publisher.publisher->publish(gps_msg);
         }
-        for (auto& sensor_publisher : vehicle_ros->magnetometer_pubs_) {
+        for (auto &sensor_publisher : vehicle_ros->magnetometer_pubs_)
+        {
             auto mag_data = airsim_client_->getMagnetometerData(sensor_publisher.sensor_name, vehicle_ros->vehicle_name_);
             sensor_msgs::msg::MagneticField mag_msg = get_mag_msg_from_airsim(mag_data);
             mag_msg.header.frame_id = vehicle_ros->vehicle_name_;
@@ -1502,26 +1622,32 @@ void AirsimROSWrapper::publish_vehicle_state()
 
 void AirsimROSWrapper::update_commands()
 {
-    for (auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_) {
-        auto& vehicle_ros = vehicle_name_ptr_pair.second;
+    for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+    {
+        auto &vehicle_ros = vehicle_name_ptr_pair.second;
 
-        if (airsim_mode_ == AIRSIM_MODE::DRONE) {
-            auto drone = static_cast<MultiRotorROS*>(vehicle_ros.get());
+        if (airsim_mode_ == AIRSIM_MODE::DRONE)
+        {
+            auto drone = static_cast<MultiRotorROS *>(vehicle_ros.get());
 
             // send control commands from the last callback to airsim
-            if (drone->has_vel_cmd_) {
+            if (drone->has_vel_cmd_)
+            {
                 std::lock_guard<std::mutex> guard(control_mutex_);
-                static_cast<msr::airlib::MultirotorRpcLibClient*>(airsim_client_.get())->moveByVelocityAsync(drone->vel_cmd_.x, drone->vel_cmd_.y, drone->vel_cmd_.z, vel_cmd_duration_, msr::airlib::DrivetrainType::MaxDegreeOfFreedom, drone->vel_cmd_.yaw_mode, drone->vehicle_name_);
+                static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->moveByVelocityAsync(drone->vel_cmd_.x, drone->vel_cmd_.y, drone->vel_cmd_.z, vel_cmd_duration_, msr::airlib::DrivetrainType::MaxDegreeOfFreedom, drone->vel_cmd_.yaw_mode, drone->vehicle_name_);
             }
             drone->has_vel_cmd_ = false;
         }
-        else if (airsim_mode_ == AIRSIM_MODE::CAR){
+        else if (airsim_mode_ == AIRSIM_MODE::CAR)
+        {
             // send control commands from the last callback to airsim
-            auto car = static_cast<CarROS*>(vehicle_ros.get());
-            if(enable_api_control_){
-                if (car->has_car_cmd_) {
+            auto car = static_cast<CarROS *>(vehicle_ros.get());
+            if (enable_api_control_)
+            {
+                if (car->has_car_cmd_)
+                {
                     std::lock_guard<std::mutex> guard(control_mutex_);
-                    static_cast<msr::airlib::CarRpcLibClient*>(airsim_client_.get())->setCarControls(car->car_cmd_, vehicle_ros->vehicle_name_);
+                    static_cast<msr::airlib::CarRpcLibClient *>(airsim_client_.get())->setCarControls(car->car_cmd_, vehicle_ros->vehicle_name_);
                 }
             }
             car->has_car_cmd_ = false;
@@ -1529,7 +1655,8 @@ void AirsimROSWrapper::update_commands()
     }
 
     // Only camera rotation, no translation movement of camera
-    if (has_gimbal_cmd_) {
+    if (has_gimbal_cmd_)
+    {
         std::lock_guard<std::mutex> guard(control_mutex_);
         airsim_client_->simSetCameraPose(gimbal_cmd_.camera_name, get_airlib_pose(0, 0, 0, gimbal_cmd_.target_quat), gimbal_cmd_.vehicle_name);
     }
@@ -1538,7 +1665,7 @@ void AirsimROSWrapper::update_commands()
 }
 
 // airsim uses nans for zeros in settings.json. we set them to zeros here for handling tfs in ROS
-void AirsimROSWrapper::set_nans_to_zeros_in_pose(VehicleSetting& vehicle_setting) const
+void AirsimROSWrapper::set_nans_to_zeros_in_pose(VehicleSetting &vehicle_setting) const
 {
     if (std::isnan(vehicle_setting.position.x()))
         vehicle_setting.position.x() = 0.0;
@@ -1560,7 +1687,7 @@ void AirsimROSWrapper::set_nans_to_zeros_in_pose(VehicleSetting& vehicle_setting
 }
 
 // if any nan's in camera pose, set them to match vehicle pose (which has already converted any potential nans to zeros)
-void AirsimROSWrapper::set_nans_to_zeros_in_pose(const VehicleSetting& vehicle_setting, CameraSetting& camera_setting) const
+void AirsimROSWrapper::set_nans_to_zeros_in_pose(const VehicleSetting &vehicle_setting, CameraSetting &camera_setting) const
 {
     if (std::isnan(camera_setting.position.x()))
         camera_setting.position.x() = vehicle_setting.position.x();
@@ -1581,7 +1708,7 @@ void AirsimROSWrapper::set_nans_to_zeros_in_pose(const VehicleSetting& vehicle_s
         camera_setting.rotation.roll = vehicle_setting.rotation.roll;
 }
 
-void AirsimROSWrapper::convert_tf_msg_to_enu(geometry_msgs::msg::TransformStamped& tf_msg)
+void AirsimROSWrapper::convert_tf_msg_to_enu(geometry_msgs::msg::TransformStamped &tf_msg)
 {
     std::swap(tf_msg.transform.translation.x, tf_msg.transform.translation.y);
     std::swap(tf_msg.transform.rotation.x, tf_msg.transform.rotation.y);
@@ -1589,7 +1716,7 @@ void AirsimROSWrapper::convert_tf_msg_to_enu(geometry_msgs::msg::TransformStampe
     tf_msg.transform.rotation.z = -tf_msg.transform.rotation.z;
 }
 
-void AirsimROSWrapper::convert_tf_msg_to_ros(geometry_msgs::msg::TransformStamped& tf_msg)
+void AirsimROSWrapper::convert_tf_msg_to_ros(geometry_msgs::msg::TransformStamped &tf_msg)
 {
     tf_msg.transform.translation.z = -tf_msg.transform.translation.z;
     tf_msg.transform.translation.y = -tf_msg.transform.translation.y;
@@ -1597,11 +1724,11 @@ void AirsimROSWrapper::convert_tf_msg_to_ros(geometry_msgs::msg::TransformStampe
     tf_msg.transform.rotation.y = -tf_msg.transform.rotation.y;
 }
 
-geometry_msgs::msg::Transform AirsimROSWrapper::get_camera_optical_tf_from_body_tf(const geometry_msgs::msg::Transform& body_tf) const
+geometry_msgs::msg::Transform AirsimROSWrapper::get_camera_optical_tf_from_body_tf(const geometry_msgs::msg::Transform &body_tf) const
 {
-    geometry_msgs::msg::Transform optical_tf = body_tf; //same translation
+    geometry_msgs::msg::Transform optical_tf = body_tf; // same translation
     auto opticalQ = msr::airlib::Quaternionr(optical_tf.rotation.w, optical_tf.rotation.x, optical_tf.rotation.y, optical_tf.rotation.z);
-    opticalQ *= msr::airlib::Quaternionr(0.5, -0.5, 0.5, -0.5); 
+    opticalQ *= msr::airlib::Quaternionr(0.5, -0.5, 0.5, -0.5);
     optical_tf.rotation.w = opticalQ.w();
     optical_tf.rotation.x = opticalQ.x();
     optical_tf.rotation.y = opticalQ.y();
@@ -1609,7 +1736,7 @@ geometry_msgs::msg::Transform AirsimROSWrapper::get_camera_optical_tf_from_body_
     return optical_tf;
 }
 
-void AirsimROSWrapper::append_static_vehicle_tf(VehicleROS* vehicle_ros, const VehicleSetting& vehicle_setting)
+void AirsimROSWrapper::append_static_vehicle_tf(VehicleROS *vehicle_ros, const VehicleSetting &vehicle_setting)
 {
     geometry_msgs::msg::TransformStamped vehicle_tf_msg;
     vehicle_tf_msg.header.frame_id = world_frame_id_;
@@ -1622,15 +1749,15 @@ void AirsimROSWrapper::append_static_vehicle_tf(VehicleROS* vehicle_ros, const V
     vehicle_ros->static_tf_msg_vec_.emplace_back(vehicle_tf_msg);
 }
 
-void AirsimROSWrapper::append_static_lidar_tf(VehicleROS* vehicle_ros, const std::string& lidar_name, const msr::airlib::LidarSimpleParams& lidar_setting)
+void AirsimROSWrapper::append_static_lidar_tf(VehicleROS *vehicle_ros, const std::string &lidar_name, const msr::airlib::LidarSimpleParams &lidar_setting)
 {
     geometry_msgs::msg::TransformStamped lidar_tf_msg;
-    if(lidar_setting.external)
+    if (lidar_setting.external)
         lidar_tf_msg.header.frame_id = world_frame_id_;
     else
         lidar_tf_msg.header.frame_id = vehicle_ros->vehicle_name_ + "/" + odom_frame_id_;
     lidar_tf_msg.child_frame_id = vehicle_ros->vehicle_name_ + "/" + lidar_name;
-    auto lidar_data  = airsim_client_lidar_.getLidarData(lidar_name, vehicle_ros->vehicle_name_);
+    auto lidar_data = airsim_client_lidar_.getLidarData(lidar_name, vehicle_ros->vehicle_name_);
 
     lidar_tf_msg.transform = get_transform_msg_from_airsim(lidar_data.pose.position, lidar_data.pose.orientation);
 
@@ -1639,15 +1766,15 @@ void AirsimROSWrapper::append_static_lidar_tf(VehicleROS* vehicle_ros, const std
     vehicle_ros->static_tf_msg_vec_.emplace_back(lidar_tf_msg);
 }
 
-void AirsimROSWrapper::append_static_gpulidar_tf(VehicleROS* vehicle_ros, const std::string& gpulidar_name, const msr::airlib::GPULidarSimpleParams& gpulidar_setting)
+void AirsimROSWrapper::append_static_gpulidar_tf(VehicleROS *vehicle_ros, const std::string &gpulidar_name, const msr::airlib::GPULidarSimpleParams &gpulidar_setting)
 {
     geometry_msgs::msg::TransformStamped gpulidar_tf_msg;
-    if(gpulidar_setting.external)
+    if (gpulidar_setting.external)
         gpulidar_tf_msg.header.frame_id = world_frame_id_;
     else
         gpulidar_tf_msg.header.frame_id = vehicle_ros->vehicle_name_ + "/" + odom_frame_id_;
     gpulidar_tf_msg.child_frame_id = vehicle_ros->vehicle_name_ + "/" + gpulidar_name;
-    auto gpulidar_data  = airsim_client_gpulidar_.getGPULidarData(gpulidar_name, vehicle_ros->vehicle_name_);
+    auto gpulidar_data = airsim_client_gpulidar_.getGPULidarData(gpulidar_name, vehicle_ros->vehicle_name_);
 
     gpulidar_tf_msg.transform = get_transform_msg_from_airsim(gpulidar_data.pose.position, gpulidar_data.pose.orientation);
 
@@ -1656,15 +1783,15 @@ void AirsimROSWrapper::append_static_gpulidar_tf(VehicleROS* vehicle_ros, const 
     vehicle_ros->static_tf_msg_vec_.emplace_back(gpulidar_tf_msg);
 }
 
-void AirsimROSWrapper::append_static_echo_tf(VehicleROS* vehicle_ros, const std::string& echo_name, const msr::airlib::EchoSimpleParams& echo_setting)
+void AirsimROSWrapper::append_static_echo_tf(VehicleROS *vehicle_ros, const std::string &echo_name, const msr::airlib::EchoSimpleParams &echo_setting)
 {
     geometry_msgs::msg::TransformStamped echo_tf_msg;
-    if(echo_setting.external)
+    if (echo_setting.external)
         echo_tf_msg.header.frame_id = world_frame_id_;
     else
         echo_tf_msg.header.frame_id = vehicle_ros->vehicle_name_ + "/" + odom_frame_id_;
     echo_tf_msg.child_frame_id = vehicle_ros->vehicle_name_ + "/" + echo_name;
-    auto echo_data  = airsim_client_echo_.getEchoData(echo_name, vehicle_ros->vehicle_name_);
+    auto echo_data = airsim_client_echo_.getEchoData(echo_name, vehicle_ros->vehicle_name_);
 
     echo_tf_msg.transform = get_transform_msg_from_airsim(echo_data.pose.position, echo_data.pose.orientation);
 
@@ -1673,10 +1800,10 @@ void AirsimROSWrapper::append_static_echo_tf(VehicleROS* vehicle_ros, const std:
     vehicle_ros->static_tf_msg_vec_.emplace_back(echo_tf_msg);
 }
 
-void AirsimROSWrapper::append_static_camera_tf(VehicleROS* vehicle_ros, const std::string& camera_name, const CameraSetting& camera_setting)
+void AirsimROSWrapper::append_static_camera_tf(VehicleROS *vehicle_ros, const std::string &camera_name, const CameraSetting &camera_setting)
 {
     geometry_msgs::msg::TransformStamped static_cam_tf_body_msg;
-    if(camera_setting.external)
+    if (camera_setting.external)
         static_cam_tf_body_msg.header.frame_id = world_frame_id_;
     else
         static_cam_tf_body_msg.header.frame_id = vehicle_ros->vehicle_name_ + "/" + odom_frame_id_;
@@ -1688,7 +1815,7 @@ void AirsimROSWrapper::append_static_camera_tf(VehicleROS* vehicle_ros, const st
     convert_tf_msg_to_ros(static_cam_tf_body_msg);
 
     geometry_msgs::msg::TransformStamped static_cam_tf_optical_msg = static_cam_tf_body_msg;
-    if(camera_setting.external)
+    if (camera_setting.external)
         static_cam_tf_body_msg.header.frame_id = world_frame_id_;
     else
         static_cam_tf_body_msg.header.frame_id = vehicle_ros->vehicle_name_ + "/" + odom_frame_id_;
@@ -1701,19 +1828,23 @@ void AirsimROSWrapper::append_static_camera_tf(VehicleROS* vehicle_ros, const st
 
 void AirsimROSWrapper::img_response_timer_cb()
 {
-    try {
+    try
+    {
         int image_response_idx = 0;
-        for (const auto& airsim_img_request_vehicle_name_pair : airsim_img_request_vehicle_name_pair_vec_) {
-            const std::vector<ImageResponse>& img_response = airsim_client_images_.simGetImages(airsim_img_request_vehicle_name_pair.first, airsim_img_request_vehicle_name_pair.second);
+        for (const auto &airsim_img_request_vehicle_name_pair : airsim_img_request_vehicle_name_pair_vec_)
+        {
+            const std::vector<ImageResponse> &img_response = airsim_client_images_.simGetImages(airsim_img_request_vehicle_name_pair.first, airsim_img_request_vehicle_name_pair.second);
 
-            if (img_response.size() == airsim_img_request_vehicle_name_pair.first.size()) {
+            if (img_response.size() == airsim_img_request_vehicle_name_pair.first.size())
+            {
                 process_and_publish_img_response(img_response, image_response_idx, airsim_img_request_vehicle_name_pair.second);
                 image_response_idx += img_response.size();
             }
         }
     }
 
-    catch (rpc::rpc_error& e) {
+    catch (rpc::rpc_error &e)
+    {
         std::string msg = e.get_error().as<std::string>();
         RCLCPP_ERROR(nh_->get_logger(), "Exception raised by the API, didn't get image response.\n%s", msg.c_str());
     }
@@ -1721,23 +1852,30 @@ void AirsimROSWrapper::img_response_timer_cb()
 
 void AirsimROSWrapper::lidar_timer_cb()
 {
-    try {
-        for (auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_) {
-            if (!vehicle_name_ptr_pair.second->lidar_pubs_.empty()) {
+    try
+    {
+        for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+        {
+            if (!vehicle_name_ptr_pair.second->lidar_pubs_.empty())
+            {
                 std::unordered_map<std::string, msr::airlib::LidarData> sensor_names_to_lidar_data_map;
-                for (auto& lidar_publisher : vehicle_name_ptr_pair.second->lidar_pubs_) {
+                for (auto &lidar_publisher : vehicle_name_ptr_pair.second->lidar_pubs_)
+                {
                     auto lidar_data = airsim_client_lidar_.getLidarData(lidar_publisher.sensor_name, vehicle_name_ptr_pair.first);
                     sensor_names_to_lidar_data_map[lidar_publisher.sensor_name] = lidar_data;
                     sensor_msgs::msg::PointCloud2 lidar_msg = get_lidar_msg_from_airsim(lidar_data, vehicle_name_ptr_pair.first, lidar_publisher.sensor_name);
                     lidar_publisher.publisher->publish(lidar_msg);
                 }
-                for (auto& lidar_labels_publisher : vehicle_name_ptr_pair.second->lidar_labels_pubs_) {
+                for (auto &lidar_labels_publisher : vehicle_name_ptr_pair.second->lidar_labels_pubs_)
+                {
                     msr::airlib::LidarData lidar_data;
                     auto it = sensor_names_to_lidar_data_map.find(lidar_labels_publisher.sensor_name);
-                    if (it != sensor_names_to_lidar_data_map.end()) {
+                    if (it != sensor_names_to_lidar_data_map.end())
+                    {
                         lidar_data = it->second;
                     }
-                    else {
+                    else
+                    {
                         lidar_data = airsim_client_echo_.getLidarData(lidar_labels_publisher.sensor_name, vehicle_name_ptr_pair.first);
                     }
                     airsim_interfaces::msg::StringArray lidar_label_msg = get_lidar_labels_msg_from_airsim(lidar_data, vehicle_name_ptr_pair.first, lidar_labels_publisher.sensor_name);
@@ -1746,7 +1884,8 @@ void AirsimROSWrapper::lidar_timer_cb()
             }
         }
     }
-    catch (rpc::rpc_error& e) {
+    catch (rpc::rpc_error &e)
+    {
         std::string msg = e.get_error().as<std::string>();
         RCLCPP_ERROR(nh_->get_logger(), "Exception raised by the API, didn't get lidar response.\n%s", msg.c_str());
     }
@@ -1754,10 +1893,14 @@ void AirsimROSWrapper::lidar_timer_cb()
 
 void AirsimROSWrapper::gpulidar_timer_cb()
 {
-    try {
-        for (auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_) {
-            if (!vehicle_name_ptr_pair.second->gpulidar_pubs_.empty()) {
-                for (auto& gpulidar_publisher : vehicle_name_ptr_pair.second->gpulidar_pubs_) {
+    try
+    {
+        for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+        {
+            if (!vehicle_name_ptr_pair.second->gpulidar_pubs_.empty())
+            {
+                for (auto &gpulidar_publisher : vehicle_name_ptr_pair.second->gpulidar_pubs_)
+                {
                     auto gpulidar_data = airsim_client_gpulidar_.getGPULidarData(gpulidar_publisher.sensor_name, vehicle_name_ptr_pair.first);
                     sensor_msgs::msg::PointCloud2 gpulidar_msg = get_gpulidar_msg_from_airsim(gpulidar_data, vehicle_name_ptr_pair.first, gpulidar_publisher.sensor_name);
                     gpulidar_publisher.publisher->publish(gpulidar_msg);
@@ -1765,7 +1908,8 @@ void AirsimROSWrapper::gpulidar_timer_cb()
             }
         }
     }
-    catch (rpc::rpc_error& e) {
+    catch (rpc::rpc_error &e)
+    {
         std::string msg = e.get_error().as<std::string>();
         RCLCPP_ERROR(nh_->get_logger(), "Exception raised by the API, didn't get gpulidar response.\n%s", msg.c_str());
     }
@@ -1773,49 +1917,62 @@ void AirsimROSWrapper::gpulidar_timer_cb()
 
 void AirsimROSWrapper::echo_timer_cb()
 {
-    try {
-        for (auto& vehicle_name_ptr_pair : vehicle_name_ptr_map_) {
-            if (!vehicle_name_ptr_pair.second->echo_active_pubs_.empty() && !vehicle_name_ptr_pair.second->echo_passive_pubs_.empty()) {
+    try
+    {
+        for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+        {
+            if (!vehicle_name_ptr_pair.second->echo_active_pubs_.empty() && !vehicle_name_ptr_pair.second->echo_passive_pubs_.empty())
+            {
                 std::unordered_map<std::string, msr::airlib::EchoData> sensor_names_to_echo_data_map;
-                for (auto& active_echo_publisher : vehicle_name_ptr_pair.second->echo_active_pubs_) {                    
+                for (auto &active_echo_publisher : vehicle_name_ptr_pair.second->echo_active_pubs_)
+                {
                     auto echo_data = airsim_client_echo_.getEchoData(active_echo_publisher.sensor_name, vehicle_name_ptr_pair.first);
                     sensor_names_to_echo_data_map[active_echo_publisher.sensor_name] = echo_data;
                     sensor_msgs::msg::PointCloud2 echo_msg = get_active_echo_msg_from_airsim(echo_data, vehicle_name_ptr_pair.first, active_echo_publisher.sensor_name);
                     active_echo_publisher.publisher->publish(echo_msg);
                 }
-                for (auto& passive_echo_publisher : vehicle_name_ptr_pair.second->echo_passive_pubs_) {
+                for (auto &passive_echo_publisher : vehicle_name_ptr_pair.second->echo_passive_pubs_)
+                {
                     msr::airlib::EchoData echo_data;
                     auto it = sensor_names_to_echo_data_map.find(passive_echo_publisher.sensor_name);
-                    if (it != sensor_names_to_echo_data_map.end()) {
+                    if (it != sensor_names_to_echo_data_map.end())
+                    {
                         echo_data = it->second;
                     }
-                    else {
+                    else
+                    {
                         echo_data = airsim_client_echo_.getEchoData(passive_echo_publisher.sensor_name, vehicle_name_ptr_pair.first);
                         sensor_names_to_echo_data_map[passive_echo_publisher.sensor_name] = echo_data;
                     }
                     sensor_msgs::msg::PointCloud2 echo_msg = get_passive_echo_msg_from_airsim(echo_data, vehicle_name_ptr_pair.first, passive_echo_publisher.sensor_name);
                     passive_echo_publisher.publisher->publish(echo_msg);
                 }
-                for (auto& active_echo_labels_publisher : vehicle_name_ptr_pair.second->echo_active_labels_pubs_) {
+                for (auto &active_echo_labels_publisher : vehicle_name_ptr_pair.second->echo_active_labels_pubs_)
+                {
                     msr::airlib::EchoData echo_data;
                     auto it = sensor_names_to_echo_data_map.find(active_echo_labels_publisher.sensor_name);
-                    if (it != sensor_names_to_echo_data_map.end()) {
+                    if (it != sensor_names_to_echo_data_map.end())
+                    {
                         echo_data = it->second;
                     }
-                    else {
+                    else
+                    {
                         echo_data = airsim_client_echo_.getEchoData(active_echo_labels_publisher.sensor_name, vehicle_name_ptr_pair.first);
                         sensor_names_to_echo_data_map[active_echo_labels_publisher.sensor_name] = echo_data;
                     }
                     airsim_interfaces::msg::StringArray echo_labels_msg = get_active_echo_labels_msg_from_airsim(echo_data, vehicle_name_ptr_pair.first, active_echo_labels_publisher.sensor_name);
                     active_echo_labels_publisher.publisher->publish(echo_labels_msg);
                 }
-                for (auto& passive_echo_labels_publisher : vehicle_name_ptr_pair.second->echo_passive_labels_pubs_) {
+                for (auto &passive_echo_labels_publisher : vehicle_name_ptr_pair.second->echo_passive_labels_pubs_)
+                {
                     msr::airlib::EchoData echo_data;
                     auto it = sensor_names_to_echo_data_map.find(passive_echo_labels_publisher.sensor_name);
-                    if (it != sensor_names_to_echo_data_map.end()) {
+                    if (it != sensor_names_to_echo_data_map.end())
+                    {
                         echo_data = it->second;
                     }
-                    else {
+                    else
+                    {
                         echo_data = airsim_client_echo_.getEchoData(passive_echo_labels_publisher.sensor_name, vehicle_name_ptr_pair.first);
                     }
                     airsim_interfaces::msg::StringArray echo_labels_msg = get_passive_echo_labels_msg_from_airsim(echo_data, vehicle_name_ptr_pair.first, passive_echo_labels_publisher.sensor_name);
@@ -1824,13 +1981,14 @@ void AirsimROSWrapper::echo_timer_cb()
             }
         }
     }
-    catch (rpc::rpc_error& e) {
+    catch (rpc::rpc_error &e)
+    {
         std::string msg = e.get_error().as<std::string>();
         RCLCPP_ERROR(nh_->get_logger(), "Exception raised by the API, didn't get echo response.\n%s", msg.c_str());
     }
 }
 
-std::shared_ptr<sensor_msgs::msg::Image> AirsimROSWrapper::get_img_msg_from_response(const ImageResponse& img_response,
+std::shared_ptr<sensor_msgs::msg::Image> AirsimROSWrapper::get_img_msg_from_response(const ImageResponse &img_response,
                                                                                      const rclcpp::Time curr_ros_time,
                                                                                      const std::string frame_id)
 {
@@ -1849,7 +2007,7 @@ std::shared_ptr<sensor_msgs::msg::Image> AirsimROSWrapper::get_img_msg_from_resp
     return img_msg_ptr;
 }
 
-std::shared_ptr<sensor_msgs::msg::Image> AirsimROSWrapper::get_depth_img_msg_from_response(const ImageResponse& img_response,
+std::shared_ptr<sensor_msgs::msg::Image> AirsimROSWrapper::get_depth_img_msg_from_response(const ImageResponse &img_response,
                                                                                            const rclcpp::Time curr_ros_time,
                                                                                            const std::string frame_id)
 {
@@ -1868,9 +2026,9 @@ std::shared_ptr<sensor_msgs::msg::Image> AirsimROSWrapper::get_depth_img_msg_fro
 }
 
 // todo have a special stereo pair mode and get projection matrix by calculating offset wrt drone body frame?
-sensor_msgs::msg::CameraInfo AirsimROSWrapper::generate_cam_info(const std::string& camera_name,
-                                                                 const CameraSetting& camera_setting,
-                                                                 const CaptureSetting& capture_setting) const
+sensor_msgs::msg::CameraInfo AirsimROSWrapper::generate_cam_info(const std::string &camera_name,
+                                                                 const CameraSetting &camera_setting,
+                                                                 const CaptureSetting &capture_setting) const
 {
     unused(camera_setting);
     sensor_msgs::msg::CameraInfo cam_info_msg;
@@ -1880,21 +2038,22 @@ sensor_msgs::msg::CameraInfo AirsimROSWrapper::generate_cam_info(const std::stri
     float f_x = (capture_setting.width / 2.0) / tan(math_common::deg2rad(capture_setting.fov_degrees / 2.0));
     // todo focal length in Y direction should be same as X it seems. this can change in future a scene capture component which exactly correponds to a cine camera
     // float f_y = (capture_setting.height / 2.0) / tan(math_common::deg2rad(fov_degrees / 2.0));
-    cam_info_msg.k = { f_x, 0.0, capture_setting.width / 2.0, 0.0, f_x, capture_setting.height / 2.0, 0.0, 0.0, 1.0 };
-    cam_info_msg.p = { f_x, 0.0, capture_setting.width / 2.0, 0.0, 0.0, f_x, capture_setting.height / 2.0, 0.0, 0.0, 0.0, 1.0, 0.0 };
-    cam_info_msg.d = { 0.0, 0.0, 0.0, 0.0, 0.0 };
-    cam_info_msg.r = { 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 };
+    cam_info_msg.k = {f_x, 0.0, capture_setting.width / 2.0, 0.0, f_x, capture_setting.height / 2.0, 0.0, 0.0, 1.0};
+    cam_info_msg.p = {f_x, 0.0, capture_setting.width / 2.0, 0.0, 0.0, f_x, capture_setting.height / 2.0, 0.0, 0.0, 0.0, 1.0, 0.0};
+    cam_info_msg.d = {0.0, 0.0, 0.0, 0.0, 0.0};
+    cam_info_msg.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
     return cam_info_msg;
 }
 
-void AirsimROSWrapper::process_and_publish_img_response(const std::vector<ImageResponse>& img_response_vec, const int img_response_idx, const std::string& vehicle_name)
+void AirsimROSWrapper::process_and_publish_img_response(const std::vector<ImageResponse> &img_response_vec, const int img_response_idx, const std::string &vehicle_name)
 {
     // todo add option to use airsim time (image_response.TTimePoint) like Gazebo /use_sim_time param
     rclcpp::Time curr_ros_time = nh_->now();
     int img_response_idx_internal = img_response_idx;
 
-    for (const auto& curr_img_response : img_response_vec) {
-   
+    for (const auto &curr_img_response : img_response_vec)
+    {
+
         // todo simGetCameraInfo is wrong + also it's only for image type -1.
         // msr::airlib::CameraInfo camera_info = airsim_client_.simGetCameraInfo(curr_img_response.camera_name);
 
@@ -1904,13 +2063,15 @@ void AirsimROSWrapper::process_and_publish_img_response(const std::vector<ImageR
         cam_info_pub_vec_[img_response_idx_internal]->publish(camera_info_msg_vec_[img_response_idx_internal]);
 
         // DepthPlanar / DepthPerspective / DepthVis / DisparityNormalized
-        if (curr_img_response.pixels_as_float) {
+        if (curr_img_response.pixels_as_float)
+        {
             image_pub_vec_[img_response_idx_internal].publish(get_depth_img_msg_from_response(curr_img_response,
                                                                                               curr_ros_time,
                                                                                               vehicle_name + "/" + curr_img_response.camera_name + "_optical"));
         }
         // All the others
-        else {
+        else
+        {
             image_pub_vec_[img_response_idx_internal].publish(get_img_msg_from_response(curr_img_response,
                                                                                         curr_ros_time,
                                                                                         vehicle_name + "/" + curr_img_response.camera_name + "_optical"));
@@ -1919,18 +2080,19 @@ void AirsimROSWrapper::process_and_publish_img_response(const std::vector<ImageR
     }
 }
 
-void AirsimROSWrapper::convert_yaml_to_simple_mat(const YAML::Node& node, SimpleMatrix& m) const
+void AirsimROSWrapper::convert_yaml_to_simple_mat(const YAML::Node &node, SimpleMatrix &m) const
 {
     int rows, cols;
     rows = node["rows"].as<int>();
     cols = node["cols"].as<int>();
-    const YAML::Node& data = node["data"];
-    for (int i = 0; i < rows * cols; ++i) {
+    const YAML::Node &data = node["data"];
+    for (int i = 0; i < rows * cols; ++i)
+    {
         m.data[i] = data[i].as<double>();
     }
 }
 
-void AirsimROSWrapper::read_params_from_yaml_and_fill_cam_info_msg(const std::string& file_name, sensor_msgs::msg::CameraInfo& cam_info) const
+void AirsimROSWrapper::read_params_from_yaml_and_fill_cam_info_msg(const std::string &file_name, sensor_msgs::msg::CameraInfo &cam_info) const
 {
     std::ifstream fin(file_name.c_str());
     YAML::Node doc = YAML::Load(fin);
@@ -1947,13 +2109,14 @@ void AirsimROSWrapper::read_params_from_yaml_and_fill_cam_info_msg(const std::st
 
     cam_info.distortion_model = doc[DMODEL_YML_NAME].as<std::string>();
 
-    const YAML::Node& D_node = doc[D_YML_NAME];
+    const YAML::Node &D_node = doc[D_YML_NAME];
     int D_rows, D_cols;
     D_rows = D_node["rows"].as<int>();
     D_cols = D_node["cols"].as<int>();
-    const YAML::Node& D_data = D_node["data"];
+    const YAML::Node &D_data = D_node["data"];
     cam_info.d.resize(D_rows * D_cols);
-    for (int i = 0; i < D_rows * D_cols; ++i) {
+    for (int i = 0; i < D_rows * D_cols; ++i)
+    {
         cam_info.d[i] = D_data[i].as<float>();
     }
 }
