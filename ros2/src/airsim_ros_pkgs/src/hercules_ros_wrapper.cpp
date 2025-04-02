@@ -473,9 +473,15 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
 
     if (publish_clock_)
     {
-        // NOTE by SSG: clock needs to have robot's namespace
         clock_pub_ = nh_->create_publisher<rosgraph_msgs::msg::Clock>("~/clock", 1);
     }
+
+    // if (publish_clock_)
+    // {   
+    //     // NOTE by SSG: namespaced clock here needs such member
+    //     const std::string clock_topic = topic_prefix + "/clock";
+    //     vehicle_ros->clock_pub_ = nh_->create_publisher<rosgraph_msgs::msg::Clock>(clock_topic, 1);
+    // }
 
     // if >0 cameras, add one more thread for img_request_timer_cb
     if (!airsim_img_request_vehicle_name_pair_vec_.empty())
