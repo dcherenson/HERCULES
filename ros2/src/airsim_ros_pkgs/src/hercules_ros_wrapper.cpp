@@ -225,7 +225,7 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
         const std::string topic_prefix = "~/" + curr_vehicle_name;
         vehicle_ros->odom_local_pub_ = nh_->create_publisher<nav_msgs::msg::Odometry>(topic_prefix + "/" + odom_frame_id_, 10);
 
-        vehicle_ros->env_pub_ = nh_->create_publisher<airsim_interfaces::msg::Environment>(topic_prefix + "/environment", 10);
+        // vehicle_ros->env_pub_ = nh_->create_publisher<airsim_interfaces::msg::Environment>(topic_prefix + "/environment", 10);
 
         vehicle_ros->global_gps_pub_ = nh_->create_publisher<sensor_msgs::msg::NavSatFix>(topic_prefix + "/global_gps", 10);
 
@@ -273,7 +273,9 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
                 std::function<void(const airsim_interfaces::msg::CarControls::SharedPtr)> fcn_car_cmd_sub = std::bind(&AirsimROSWrapper::car_cmd_cb, this, _1, vehicle_ros->vehicle_name_);
                 car->car_cmd_sub_ = nh_->create_subscription<airsim_interfaces::msg::CarControls>(topic_prefix + "/car_cmd", 1, fcn_car_cmd_sub);
             }
-            car->car_state_pub_ = nh_->create_publisher<airsim_interfaces::msg::CarState>(topic_prefix + "/car_state", 10);
+
+            // !NOTE by SSG: Removed because odom local gives needed information
+            // car->car_state_pub_ = nh_->create_publisher<airsim_interfaces::msg::CarState>(topic_prefix + "/car_state", 10);
         }
         else if (airsim_mode_ == AIRSIM_MODE::COMPUTERVISION)
         {
@@ -477,7 +479,7 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
     }
 
     // if (publish_clock_)
-    // {   
+    // {
     //     // NOTE by SSG: namespaced clock here needs such member
     //     const std::string clock_topic = topic_prefix + "/clock";
     //     vehicle_ros->clock_pub_ = nh_->create_publisher<rosgraph_msgs::msg::Clock>(clock_topic, 1);
@@ -1468,15 +1470,15 @@ rclcpp::Time AirsimROSWrapper::update_state()
     // msr::airlib::Environment::State env = airsim_client_->simGetGroundTruthEnvironment("");
     // curr_ros_time = rclcpp::Time(env.clock().nowNanos());
 
-    // iterate over drones
+    // iterate over vehicles
     for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
     {
         rclcpp::Time vehicle_time;
         // get drone state from airsim
         auto &vehicle_ros = vehicle_name_ptr_pair.second;
 
-        // vehicle environment, we can get ambient temperature here and other truths
-        auto env_data = airsim_client_->simGetGroundTruthEnvironment(vehicle_ros->vehicle_name_);
+        // vehicle environment, we can get ambient temperature here and other truths !NOTE by SSG: disabling because not needed.
+        // auto env_data = airsim_client_->simGetGroundTruthEnvironment(vehicle_ros->vehicle_name_);
 
         if (airsim_mode_ == AIRSIM_MODE::DRONE)
         {
@@ -1509,14 +1511,15 @@ rclcpp::Time AirsimROSWrapper::update_state()
                 got_sim_time = true;
             }
 
-            vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(env_data.geo_point);
-            vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
+            // !NOTE by SSG: Removing gpssensor topic because call to get GT env is not used; saving # of calls
+            // vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(env_data.geo_point);
+            // vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
 
             vehicle_ros->curr_odom_ = get_odom_msg_from_car_state(car->curr_car_state_);
 
-            airsim_interfaces::msg::CarState state_msg = get_roscarstate_msg_from_car_state(car->curr_car_state_);
-            state_msg.header.frame_id = vehicle_ros->vehicle_name_;
-            car->car_state_msg_ = state_msg;
+            // airsim_interfaces::msg::CarState state_msg = get_roscarstate_msg_from_car_state(car->curr_car_state_);
+            // state_msg.header.frame_id = vehicle_ros->vehicle_name_;
+            // car->car_state_msg_ = state_msg;
         }
         else
         {
@@ -1531,8 +1534,9 @@ rclcpp::Time AirsimROSWrapper::update_state()
                 got_sim_time = true;
             }
 
-            vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(env_data.geo_point);
-            vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
+            // !NOTE by SSG: Removing gpssensor topic because call to get GT env is not used; saving # of calls
+            // vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(env_data.geo_point);
+            // vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
 
             vehicle_ros->curr_odom_ = get_odom_msg_from_computer_vision_state(computer_vision->curr_computer_vision_state_);
 
@@ -1543,10 +1547,11 @@ rclcpp::Time AirsimROSWrapper::update_state()
 
         vehicle_ros->stamp_ = vehicle_time;
 
-        airsim_interfaces::msg::Environment env_msg = get_environment_msg_from_airsim(env_data);
-        env_msg.header.frame_id = vehicle_ros->vehicle_name_;
-        env_msg.header.stamp = vehicle_time;
-        vehicle_ros->env_msg_ = env_msg;
+        // !NOTE by SSG: Removing gpssensor topic because call to get GT env is not used; saving # of calls
+        // airsim_interfaces::msg::Environment env_msg = get_environment_msg_from_airsim(env_data);
+        // env_msg.header.frame_id = vehicle_ros->vehicle_name_;
+        // env_msg.header.stamp = vehicle_time;
+        // vehicle_ros->env_msg_ = env_msg;
 
         // convert airsim drone state to ROS msgs
         vehicle_ros->curr_odom_.header.frame_id = vehicle_ros->vehicle_name_;
@@ -1564,13 +1569,15 @@ void AirsimROSWrapper::publish_vehicle_state()
         auto &vehicle_ros = vehicle_name_ptr_pair.second;
 
         // simulation environment truth
-        vehicle_ros->env_pub_->publish(vehicle_ros->env_msg_);
+        // vehicle_ros->env_pub_->publish(vehicle_ros->env_msg_);
 
         if (airsim_mode_ == AIRSIM_MODE::CAR)
         {
             // dashboard reading from car, RPM, gear, etc
             auto car = static_cast<CarROS *>(vehicle_ros.get());
-            car->car_state_pub_->publish(car->car_state_msg_);
+
+            // !NOTE by SSG: Removed because it is redundant information for UGV
+            // car->car_state_pub_->publish(car->car_state_msg_);
         }
         else if (airsim_mode_ == AIRSIM_MODE::COMPUTERVISION)
         {
