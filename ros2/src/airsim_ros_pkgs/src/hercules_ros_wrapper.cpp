@@ -28,8 +28,8 @@ const std::unordered_map<int, std::string> AirsimROSWrapper::image_type_int_to_s
 
 };
 
-AirsimROSWrapper::AirsimROSWrapper(const std::shared_ptr<rclcpp::Node> nh, const std::shared_ptr<rclcpp::Node> nh_img, const std::shared_ptr<rclcpp::Node> nh_lidar, const std::shared_ptr<rclcpp::Node> nh_gpulidar, const std::shared_ptr<rclcpp::Node> nh_echo, const std::string &host_ip, const std::shared_ptr<rclcpp::CallbackGroup> callbackGroup, bool enable_api_control, bool enable_object_transforms_list, uint16_t host_port)
-    : is_used_lidar_timer_cb_queue_(false), is_used_img_timer_cb_queue_(false), is_used_gpulidar_timer_cb_queue_(false), is_used_echo_timer_cb_queue_(false), airsim_settings_parser_(host_ip, host_port), host_ip_(host_ip), host_port_(host_port), enable_api_control_(enable_api_control), enable_object_transforms_list_(enable_object_transforms_list), airsim_client_(nullptr), airsim_client_images_(host_ip, host_port), airsim_client_lidar_(host_ip, host_port), airsim_client_gpulidar_(host_ip, host_port), airsim_client_echo_(host_ip, host_port), nh_(nh), nh_img_(nh_img), nh_lidar_(nh_lidar), nh_gpulidar_(nh_gpulidar), nh_echo_(nh_echo), cb_(callbackGroup), publish_clock_(false)
+AirsimROSWrapper::AirsimROSWrapper(const std::shared_ptr<rclcpp::Node> nh, const std::shared_ptr<rclcpp::Node> nh_img, const std::shared_ptr<rclcpp::Node> nh_lidar, const std::shared_ptr<rclcpp::Node> nh_gpulidar, const std::shared_ptr<rclcpp::Node> nh_echo, const std::string &host_ip, const std::shared_ptr<rclcpp::CallbackGroup> callbackGroup, bool enable_api_control, bool enable_object_transforms_list, uint16_t host_port, const std::shared_ptr<rclcpp::Node> nh_imu)
+    : is_used_lidar_timer_cb_queue_(false), is_used_img_timer_cb_queue_(false), is_used_gpulidar_timer_cb_queue_(false), is_used_echo_timer_cb_queue_(false), airsim_settings_parser_(host_ip, host_port), host_ip_(host_ip), host_port_(host_port), enable_api_control_(enable_api_control), enable_object_transforms_list_(enable_object_transforms_list), airsim_client_(nullptr), airsim_client_images_(host_ip, host_port), airsim_client_lidar_(host_ip, host_port), airsim_client_gpulidar_(host_ip, host_port), airsim_client_echo_(host_ip, host_port), nh_(nh), nh_img_(nh_img), nh_lidar_(nh_lidar), nh_gpulidar_(nh_gpulidar), nh_echo_(nh_echo), nh_imu_(nh_imu), cb_(callbackGroup), publish_clock_(false)
 {
     ros_clock_.clock = rclcpp::Time(0);
 
@@ -519,6 +519,16 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
         is_used_echo_timer_cb_queue_ = true;
     }
 
+    // === IMU Timer Setup ===
+    double update_imu_every_n_sec;
+    nh_->declare_parameter("update_imu_every_n_sec", 0.01);
+    nh_->get_parameter("update_imu_every_n_sec", update_imu_every_n_sec);
+
+    airsim_imu_update_timer_ = nh_imu_->create_wall_timer(
+        std::chrono::duration<double>(update_imu_every_n_sec),
+        std::bind(&AirsimROSWrapper::imu_timer_cb, this),
+        cb_);
+
     initialize_airsim();
 }
 
@@ -536,6 +546,22 @@ const SensorPublisher<T> AirsimROSWrapper::create_sensor_publisher(const std::st
     sensor_publisher.sensor_type = sensor_type;
     sensor_publisher.publisher = nh_->create_publisher<T>("~/" + topic_name, QoS);
     return sensor_publisher;
+}
+
+void AirsimROSWrapper::imu_timer_cb()
+{
+    for (auto &vehicle_pair : vehicle_name_ptr_map_)
+    {
+        const std::string &vehicle_name = vehicle_pair.first;
+        auto &vehicle_ros = vehicle_pair.second;
+
+        for (const auto &imu_pub : vehicle_ros->imu_pubs_)
+        {
+            auto imu_data = airsim_client_->getImuData(imu_pub.sensor_name, vehicle_name);
+            auto imu_msg = get_imu_msg_from_airsim(imu_data);
+            imu_pub.publisher->publish(imu_msg);
+        }
+    }
 }
 
 // todo: error check. if state is not landed, return error.
@@ -1600,13 +1626,14 @@ void AirsimROSWrapper::publish_vehicle_state()
             sensor_publisher.publisher->publish(alt_msg);
         }
 
-        for (auto &sensor_publisher : vehicle_ros->imu_pubs_)
-        {
-            auto imu_data = airsim_client_->getImuData(sensor_publisher.sensor_name, vehicle_ros->vehicle_name_);
-            sensor_msgs::msg::Imu imu_msg = get_imu_msg_from_airsim(imu_data);
-            imu_msg.header.frame_id = vehicle_ros->vehicle_name_;
-            sensor_publisher.publisher->publish(imu_msg);
-        }
+        // for (auto &sensor_publisher : vehicle_ros->imu_pubs_)
+        // {
+        //     auto imu_data = airsim_client_->getImuData(sensor_publisher.sensor_name, vehicle_ros->vehicle_name_);
+        //     sensor_msgs::msg::Imu imu_msg = get_imu_msg_from_airsim(imu_data);
+        //     imu_msg.header.frame_id = vehicle_ros->vehicle_name_;
+        //     sensor_publisher.publisher->publish(imu_msg);
+        // }
+        
         for (auto &sensor_publisher : vehicle_ros->distance_pubs_)
         {
             auto distance_data = airsim_client_->getDistanceSensorData(sensor_publisher.sensor_name, vehicle_ros->vehicle_name_);

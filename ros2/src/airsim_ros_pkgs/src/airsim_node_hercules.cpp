@@ -1,5 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
-#include "airsim_ros_wrapper.h"
+#include "hercules_ros_wrapper.h"
 
 int main(int argc, char** argv)
 {
@@ -11,6 +11,8 @@ int main(int argc, char** argv)
     std::shared_ptr<rclcpp::Node> nh_lidar = nh->create_sub_node("lidar");
     std::shared_ptr<rclcpp::Node> nh_gpulidar = nh->create_sub_node("gpulidar");
     std::shared_ptr<rclcpp::Node> nh_echo = nh->create_sub_node("echo");
+    std::shared_ptr<rclcpp::Node> nh_imu = nh->create_sub_node("imu");
+
     std::string host_ip;
     uint16_t host_port = 41451;
     bool enable_api_control = false;
@@ -20,7 +22,8 @@ int main(int argc, char** argv)
     nh->get_parameter("enable_api_control", enable_api_control);
     nh->get_parameter("enable_object_transforms_list", enable_object_transforms_list);
     auto callbackGroup = nh->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
-    AirsimROSWrapper airsim_ros_wrapper(nh, nh_img, nh_lidar, nh_gpulidar, nh_echo, host_ip, callbackGroup, enable_api_control, enable_object_transforms_list, host_port);
+    AirsimROSWrapper airsim_ros_wrapper(nh, nh_img, nh_lidar, nh_gpulidar, nh_echo, host_ip, callbackGroup, 
+    enable_api_control, enable_object_transforms_list, host_port, nh_imu);
 
     rclcpp::executors::MultiThreadedExecutor executor;
     executor.add_node(nh);
