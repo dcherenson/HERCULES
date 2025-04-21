@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <functional>
+#include <Eigen/Geometry>
 
 using namespace std::chrono_literals;
 
@@ -178,34 +179,23 @@ private:
                                       double alpha,
                                       int64_t timestamp_ns)
     {
-        // Create interpolated message
         sensor_msgs::msg::Imu interpolated_msg;
 
-        // Set header with the interpolated timestamp
         interpolated_msg.header.stamp.sec = timestamp_ns / 1000000000LL;
         interpolated_msg.header.stamp.nanosec = timestamp_ns % 1000000000LL;
         interpolated_msg.header.frame_id = imu1.header.frame_id;
 
-        // Linear interpolation of orientation quaternion
-        interpolated_msg.orientation.w = (1.0 - alpha) * imu1.orientation.w + alpha * imu2.orientation.w;
-        interpolated_msg.orientation.x = (1.0 - alpha) * imu1.orientation.x + alpha * imu2.orientation.x;
-        interpolated_msg.orientation.y = (1.0 - alpha) * imu1.orientation.y + alpha * imu2.orientation.y;
-        interpolated_msg.orientation.z = (1.0 - alpha) * imu1.orientation.z + alpha * imu2.orientation.z;
+        // Convert to Eigen quaternions
+        Eigen::Quaterniond q1(imu1.orientation.w, imu1.orientation.x, imu1.orientation.y, imu1.orientation.z);
+        Eigen::Quaterniond q2(imu2.orientation.w, imu2.orientation.x, imu2.orientation.y, imu2.orientation.z);
 
-        // Normalize the quaternion
-        double norm = std::sqrt(
-            interpolated_msg.orientation.w * interpolated_msg.orientation.w +
-            interpolated_msg.orientation.x * interpolated_msg.orientation.x +
-            interpolated_msg.orientation.y * interpolated_msg.orientation.y +
-            interpolated_msg.orientation.z * interpolated_msg.orientation.z);
+        // Use SLERP
+        Eigen::Quaterniond q_interp = q1.slerp(alpha, q2);
 
-        if (norm > 1e-10)
-        {
-            interpolated_msg.orientation.w /= norm;
-            interpolated_msg.orientation.x /= norm;
-            interpolated_msg.orientation.y /= norm;
-            interpolated_msg.orientation.z /= norm;
-        }
+        interpolated_msg.orientation.w = q_interp.w();
+        interpolated_msg.orientation.x = q_interp.x();
+        interpolated_msg.orientation.y = q_interp.y();
+        interpolated_msg.orientation.z = q_interp.z();
 
         // Linear interpolation of angular velocity
         interpolated_msg.angular_velocity.x = (1.0 - alpha) * imu1.angular_velocity.x + alpha * imu2.angular_velocity.x;
@@ -217,7 +207,7 @@ private:
         interpolated_msg.linear_acceleration.y = (1.0 - alpha) * imu1.linear_acceleration.y + alpha * imu2.linear_acceleration.y;
         interpolated_msg.linear_acceleration.z = (1.0 - alpha) * imu1.linear_acceleration.z + alpha * imu2.linear_acceleration.z;
 
-        // Copy covariance matrices (or interpolate them if needed)
+        // Interpolate covariances (optional but included)
         for (size_t j = 0; j < 9; j++)
         {
             interpolated_msg.orientation_covariance[j] = (1.0 - alpha) * imu1.orientation_covariance[j] + alpha * imu2.orientation_covariance[j];
@@ -225,11 +215,7 @@ private:
             interpolated_msg.linear_acceleration_covariance[j] = (1.0 - alpha) * imu1.linear_acceleration_covariance[j] + alpha * imu2.linear_acceleration_covariance[j];
         }
 
-        // Publish the interpolated message
         publisher_->publish(interpolated_msg);
-
-        RCLCPP_DEBUG(this->get_logger(), "Published interpolated IMU message with timestamp %d.%09d",
-                     interpolated_msg.header.stamp.sec, interpolated_msg.header.stamp.nanosec);
     }
 
     // Member variables
