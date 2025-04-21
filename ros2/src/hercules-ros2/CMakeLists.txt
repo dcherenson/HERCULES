@@ -58,4 +58,22 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
+
+add_executable(imu_linear_interpolator_node src/imu_linear_interpolator.cpp)
+ament_target_dependencies(imu_linear_interpolator_node
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_sensor_msgs
+)
+
+install(TARGETS
+  imu_linear_interpolator_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+
 ament_package()
