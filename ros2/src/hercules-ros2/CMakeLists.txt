@@ -76,4 +76,22 @@ install(TARGETS
 )
 
 
+add_executable(imu_linear_interpolator_v2_node src/imu_linear_interpolator_v2.cpp)
+ament_target_dependencies(imu_linear_interpolator_v2_node
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_sensor_msgs
+)
+
+install(TARGETS
+  imu_linear_interpolator_v2_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+
+
 ament_package()
