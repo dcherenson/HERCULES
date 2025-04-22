@@ -57,7 +57,7 @@ namespace airlib
                 last_time_ = times_.front();
 
                 times_.pop_front();
-                values_.pop_front();
+                values_.pop_front();  // seg fault type 1 here
             }
         }
         //*** End: UpdatableState implementation ***//
@@ -74,7 +74,7 @@ namespace airlib
         void push_back(const T& val, TTimePoint time_offset = 0)
         {
             values_.push_back(val);
-            times_.push_back(clock()->nowNanos() + time_offset);
+            times_.push_back(clock()->nowNanos() + time_offset); // seg fault type 2 here
         }
 
     private:
