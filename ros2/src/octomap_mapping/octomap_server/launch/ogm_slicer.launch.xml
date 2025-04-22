@@ -12,7 +12,9 @@
         <!-- <param name="slice_altitude" type="float" value="0.5"/> -->
 
         <!-- for ground level, 0.5m octomap resolution -->
+        <!-- original -->
         <param name="slice_altitude" type="float" value="-0.25"/>
+        <!-- <param name="slice_altitude" type="float" value="0.0"/> -->
 
         <!-- for altitude, both (0.5m and 1m) octomap resolutions -->
         <!-- <param name="slice_altitude" type="float" value="35.0"/> -->
