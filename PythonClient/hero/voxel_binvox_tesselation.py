@@ -10,11 +10,12 @@ def main():
     # Parameters
     world_size = 1100       # Total extent in meters for X and Y (world assumed to be square)
     patch_size = 100        # Each patch covers 100m x 100m x 100m
-    resolution = 1.0       # Voxel resolution in meters
+    resolution = 0.5       # Voxel resolution in meters
     
-    # The world’s geometric center (from your PlayerStart in UE)
+    # The world’s geometric center (from your PlayerStart in UE) in meters
+    # world_center = (0, 0, 0) #original
     world_center = (0, 0, 0)
-    
+
     # For X and Y, we assume the world is centered at 0,0 so:
     min_x = -world_size / 2
     min_y = -world_size / 2
@@ -26,7 +27,8 @@ def main():
     
     # Make sure the output directory exists
     # output_dir = "/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_0p5mcubed"
-    output_dir = "/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_1mcubed"
+    # output_dir = "/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_1mcubed"
+    output_dir = "/home/sgarimella34/Downloads/data_binvox_octomap/blocks_0p5mcubed"
     os.makedirs(output_dir, exist_ok=True)
     
     # Create a single client for efficiency
