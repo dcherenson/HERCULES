@@ -59,20 +59,20 @@ ASkidVehiclePawn::ASkidVehiclePawn()
 
 	// In car HUD
 	// Create text render component for in car speed display
-	speed_text_render_ = CreateDefaultSubobject<UTextRenderComponent>(TEXT("IncarSpeed"));
-	speed_text_render_->SetRelativeScale3D(FVector(0.1f, 0.1f, 0.1f));
-	speed_text_render_->SetRelativeLocation(FVector(0.0f, 0.0f, 5.0f));
-	speed_text_render_->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
-	speed_text_render_->SetupAttachment(GetMesh());
-	speed_text_render_->SetVisibility(true);
+	// speed_text_render_ = CreateDefaultSubobject<UTextRenderComponent>(TEXT("IncarSpeed"));
+	// speed_text_render_->SetRelativeScale3D(FVector(0.1f, 0.1f, 0.1f));
+	// speed_text_render_->SetRelativeLocation(FVector(0.0f, 0.0f, 5.0f));
+	// speed_text_render_->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
+	// speed_text_render_->SetupAttachment(GetMesh());
+	// speed_text_render_->SetVisibility(true);
 
 	// Create text render component for in car gear display
-	gear_text_render_ = CreateDefaultSubobject<UTextRenderComponent>(TEXT("IncarGear"));
-	gear_text_render_->SetRelativeScale3D(FVector(0.1f, 0.1f, 0.1f));
-	gear_text_render_->SetRelativeLocation(FVector(0.0f, 0.0f, 5.0f));
-	gear_text_render_->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
-	gear_text_render_->SetupAttachment(GetMesh());
-	gear_text_render_->SetVisibility(true);
+	// gear_text_render_ = CreateDefaultSubobject<UTextRenderComponent>(TEXT("IncarGear"));
+	// gear_text_render_->SetRelativeScale3D(FVector(0.1f, 0.1f, 0.1f));
+	// gear_text_render_->SetRelativeLocation(FVector(0.0f, 0.0f, 5.0f));
+	// gear_text_render_->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
+	// gear_text_render_->SetupAttachment(GetMesh());
+	// gear_text_render_->SetVisibility(true);
 
 	// Setup the audio component and allocate it a sound cue
 	ConstructorHelpers::FObjectFinder<USoundCue> SoundCue(TEXT("/AirSim/VehicleAdv/Sound/Engine_Loop_Cue.Engine_Loop_Cue"));
@@ -261,7 +261,7 @@ void ASkidVehiclePawn::Tick(float Delta)
 	updateHUDStrings();
 
 	// Set the string in the in-car HUD
-	updateInCarHUD();
+	// updateInCarHUD();
 
 	// Pass the engine RPM to the sound component
 	UChaosWheeledVehicleMovementComponent* movement = CastChecked<UChaosWheeledVehicleMovementComponent>(getVehicleMovementComponent());
