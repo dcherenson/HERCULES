@@ -7,87 +7,95 @@
 #include "common/Common.hpp"
 #include "UpdatableObject.hpp"
 #include <list>
+#include <mutex>
 
 namespace msr
 {
-namespace airlib
-{
-
-    template <typename T>
-    class DelayLine : public UpdatableObject
+    namespace airlib
     {
-    public:
-        DelayLine()
-        {
-        }
-        DelayLine(TTimeDelta delay) //in seconds
-        {
-            initialize(delay);
-        }
-        void initialize(TTimeDelta delay) //in seconds
-        {
-            setDelay(delay);
-        }
-        void setDelay(TTimeDelta delay)
-        {
-            delay_ = delay;
-        }
-        double getDelay() const
-        {
-            return delay_;
-        }
 
-        //*** Start: UpdatableState implementation ***//
-        virtual void resetImplementation() override
+        template <typename T>
+        class DelayLine : public UpdatableObject
         {
-            values_.clear();
-            times_.clear();
-            last_time_ = 0;
-            last_value_ = T();
-        }
-
-        virtual void update(float delta = 0) override
-        {
-            UpdatableObject::update(delta);
-
-            if (!times_.empty() &&
-                ClockBase::elapsedBetween(clock()->nowNanos(), times_.front()) >= delay_) {
-
-                last_value_ = values_.front();
-                last_time_ = times_.front();
-
-                times_.pop_front();
-                values_.pop_front();  // seg fault type 1 here
+        public:
+            DelayLine()
+            {
             }
-        }
-        //*** End: UpdatableState implementation ***//
+            DelayLine(TTimeDelta delay) // in seconds
+            {
+                initialize(delay);
+            }
+            void initialize(TTimeDelta delay) // in seconds
+            {
+                setDelay(delay);
+            }
+            void setDelay(TTimeDelta delay)
+            {
+                delay_ = delay;
+            }
+            double getDelay() const
+            {
+                return delay_;
+            }
 
-        T getOutput() const
-        {
-            return last_value_;
-        }
-        double getOutputTime() const
-        {
-            return last_time_;
-        }
+            //*** Start: UpdatableState implementation ***//
+            virtual void resetImplementation() override
+            {
+                std::lock_guard<std::mutex> lock(_mtx); // lock before clearing
+                values_.clear();
+                times_.clear();
+                last_time_ = 0;
+                last_value_ = T();
+            }
 
-        void push_back(const T& val, TTimePoint time_offset = 0)
-        {
-            values_.push_back(val);
-            times_.push_back(clock()->nowNanos() + time_offset); // seg fault type 2 here
-        }
+            virtual void update(float delta = 0) override
+            {
+                UpdatableObject::update(delta);
 
-    private:
-        template <typename TItem>
-        using list = std::list<TItem>;
+                std::lock_guard<std::mutex> lock(_mtx); // lock before accessing/popping
 
-        list<T> values_;
-        list<TTimePoint> times_;
-        TTimeDelta delay_;
+                if (!times_.empty() &&
+                    ClockBase::elapsedBetween(clock()->nowNanos(), times_.front()) >= delay_)
+                {
 
-        T last_value_;
-        TTimePoint last_time_;
-    };
-}
-} //namespace
+                    last_value_ = values_.front();
+                    last_time_ = times_.front();
+
+                    times_.pop_front();
+                    values_.pop_front(); // seg fault type 1 here
+                }
+            }
+            //*** End: UpdatableState implementation ***//
+
+            T getOutput() const
+            {
+                return last_value_;
+            }
+            double getOutputTime() const
+            {
+                return last_time_;
+            }
+
+            void push_back(const T &val, TTimePoint time_offset = 0)
+            {
+                std::lock_guard<std::mutex> lock(_mtx); // lock before pushing
+                values_.push_back(val);
+                times_.push_back(clock()->nowNanos() + time_offset); // seg fault type 2 here
+            }
+
+        private:
+            template <typename TItem>
+            using list = std::list<TItem>;
+
+            list<T> values_;
+            list<TTimePoint> times_;
+            TTimeDelta delay_;
+
+            T last_value_;
+            TTimePoint last_time_;
+
+            std::mutex _mtx; // mutex to serialize access
+        };
+    }
+} // namespace
 #endif
