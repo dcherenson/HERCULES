@@ -7,7 +7,7 @@ import time
 # param set MPC_Z_VEL_MAX_UP 5
 # param set MPC_Z_VEL_MAX_DN 5
 
-z = 5
+z = 35
 if len(sys.argv) > 1:
     z = float(sys.argv[1])
 
