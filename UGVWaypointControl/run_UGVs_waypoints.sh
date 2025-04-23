@@ -12,7 +12,9 @@ WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data"
 DEFAULT_NUM_UGVS=2
 
 # Default linear speed (in m/s) to be used when no individual speed is provided
-DEFAULT_SPEED=1.75
+# DEFAULT_SPEED=1.5
+DEFAULT_SPEED=0.175  #has to be scaled according to clock speed time for now
+
 
 # Prefix for UGV names (adjust to match your naming convention)
 PREFIX="Husky"
