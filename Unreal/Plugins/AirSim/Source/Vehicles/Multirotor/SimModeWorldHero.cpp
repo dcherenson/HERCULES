@@ -41,6 +41,9 @@ void ASimModeWorldHero::setupClockSpeed()
 
     float clock_speed = getSettings().clock_speed;
 
+     // SCALE PHYSX/UNREAL WORLD CLOCK FOR CARS
+    UAirBlueprintLib::setUnrealClockSpeed(this, clock_speed);
+
     // setup clock in ClockFactory
     std::string clock_type = getSettings().clock_type;
 
