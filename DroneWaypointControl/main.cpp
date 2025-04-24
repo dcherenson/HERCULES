@@ -1,7 +1,8 @@
 // Created by Sandilya Sai Garimella.
 /*
 This script enables a drone to load its waypoints and follow them in HERCULES simulator. Each drone must
-launch an instance of this script's executable with the drone name and corresponding waypoints text file.
+launch an instance of this script's executable with the drone name, corresponding waypoints text file,
+and an optional velocity parameter.
 */
 
 #include "common/common_utils/StrictMode.hpp"
@@ -55,17 +56,16 @@ std::vector<Vector3r> loadWaypoints(const std::string &file_path, float fixed_z)
 
 int main(int argc, char *argv[])
 {
-    float waypoint_flight_velocity = 2.0f;
-    float return_home_velocity = 3.0f;
-
-    if (argc != 3)
+    if (argc < 3 || argc > 4)
     {
-        std::cerr << "Usage: " << argv[0] << " <DroneName> <WaypointFilePath>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <DroneName> <WaypointFilePath> [WaypointVelocity]" << std::endl;
         return 1;
     }
 
     std::string drone_name = argv[1];
     std::string waypoint_file = argv[2];
+    float waypoint_flight_velocity = (argc == 4) ? std::stof(argv[3]) : 2.0f;
+    float return_home_velocity = 3.0f;
     float fly_altitude = -35.0f;
 
     try
@@ -96,7 +96,9 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        std::cout << "[" << drone_name << "] Flying through " << waypoints.size() << " waypoints..." << std::endl;
+        std::cout << "[" << drone_name << "] Flying through " << waypoints.size()
+                  << " waypoints at velocity " << waypoint_flight_velocity << " m/s..." << std::endl;
+
         client.moveOnPathAsync(waypoints, waypoint_flight_velocity, 120.0f,
                                DrivetrainType::ForwardOnly,
                                YawMode(false, 0), 20.0f, 1.0f,
@@ -109,14 +111,13 @@ int main(int argc, char *argv[])
         client.moveToPositionAsync(0, 0, fly_altitude, return_home_velocity, 30.0f,
                                    DrivetrainType::ForwardOnly,
                                    YawMode(false, 0), -1.0f, 1.0f,
-                                   drone_name)->waitOnLastTask();
+                                   drone_name)
+            ->waitOnLastTask();
 
-        // Give the drone time to settle at the origin position
         std::cout << "[" << drone_name << "] Hovering before landing..." << std::endl;
         client.hoverAsync(drone_name)->waitOnLastTask();
-        sleep_for_seconds(5); // allow stabilization
+        sleep_for_seconds(5);
 
-        // move to lower altitude manually
         client.moveToZAsync(-5.0f, 5.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
         sleep_for_seconds(2);
 
@@ -130,7 +131,8 @@ int main(int argc, char *argv[])
     }
     catch (rpc::rpc_error &e)
     {
-        std::cerr << "RPC Exception occurred for drone [" << drone_name << "]: " << e.get_error().as<std::string>() << std::endl;
+        std::cerr << "RPC Exception occurred for drone [" << drone_name << "]: "
+                  << e.get_error().as<std::string>() << std::endl;
         return 1;
     }
 

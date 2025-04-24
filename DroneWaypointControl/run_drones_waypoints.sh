@@ -4,12 +4,19 @@
 # EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_debug/output/bin/DroneWaypointControl
 EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
 
-
 # Base path for waypoint files
 WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data"
 
 # Default number of drones if none specified
 DEFAULT_NUM_DRONES=1
+
+# Default velocity
+VELOCITY=1.5
+
+# Check if a velocity argument was provided via environment variable
+if [[ -n "$WAYPOINT_VELOCITY" ]]; then
+    VELOCITY=$WAYPOINT_VELOCITY
+fi
 
 # Store PIDs to wait on
 PIDS=()
@@ -20,6 +27,9 @@ usage() {
     echo "  $0                     # Run all drones from Drone1 to Drone$DEFAULT_NUM_DRONES"
     echo "  $0 <num_drones>        # Run all drones from Drone1 to Drone<num_drones>"
     echo "  $0 Drone3              # Run only Drone3"
+    echo ""
+    echo "To set flight velocity, use:"
+    echo "  WAYPOINT_VELOCITY=3.5 $0 Drone1"
     exit 1
 }
 
@@ -30,8 +40,8 @@ if [[ $# -eq 0 ]]; then
         DRONE_NAME="Drone$i"
         WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
 
-        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE"
-        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" &
+        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s"
+        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" &
         PIDS+=($!)
     done
 elif [[ $# -eq 1 ]]; then
@@ -40,8 +50,8 @@ elif [[ $# -eq 1 ]]; then
         DRONE_NAME="$1"
         WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
 
-        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE"
-        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" &
+        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s"
+        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" &
         PIDS+=($!)
     elif [[ $1 =~ ^[0-9]+$ ]]; then
         # Run from Drone1 to DroneN
@@ -49,8 +59,8 @@ elif [[ $# -eq 1 ]]; then
             DRONE_NAME="Drone$i"
             WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
 
-            echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE"
-            $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" &
+            echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s"
+            $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" &
             PIDS+=($!)
         done
     else
@@ -77,3 +87,6 @@ echo "Completed all requested drone flights."
 
 # Run only Drone3
 # ./run_drones.sh Drone3
+
+# Run Drone3 with 4.0 m/s velocity
+# WAYPOINT_VELOCITY=4.0 ./run_drones.sh Drone3
