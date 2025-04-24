@@ -13,9 +13,19 @@ DEFAULT_NUM_DRONES=1
 # Default velocity
 VELOCITY=1.5
 
+# Default fly altitude
+FLY_ALTITUDE=-5.0
+
 # Check if a velocity argument was provided via environment variable
 if [[ -n "$WAYPOINT_VELOCITY" ]]; then
     VELOCITY=$WAYPOINT_VELOCITY
+fi
+
+# Check if altitude argument was provided via environment variable
+if [[ -n "$FLY_ALTITUDE" ]]; then
+    ALTITUDE=$FLY_ALTITUDE
+else
+    ALTITUDE=$FLY_ALTITUDE
 fi
 
 # Store PIDs to wait on
@@ -30,6 +40,8 @@ usage() {
     echo ""
     echo "To set flight velocity, use:"
     echo "  WAYPOINT_VELOCITY=3.5 $0 Drone1"
+    echo "To also set flight altitude, use:"
+    echo "  WAYPOINT_VELOCITY=3.5 FLY_ALTITUDE=-50.0 $0 Drone1"
     exit 1
 }
 
@@ -40,8 +52,8 @@ if [[ $# -eq 0 ]]; then
         DRONE_NAME="Drone$i"
         WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
 
-        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s"
-        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" &
+        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s and altitude ${ALTITUDE} m"
+        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" &
         PIDS+=($!)
     done
 elif [[ $# -eq 1 ]]; then
@@ -50,8 +62,8 @@ elif [[ $# -eq 1 ]]; then
         DRONE_NAME="$1"
         WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
 
-        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s"
-        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" &
+        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s and altitude ${ALTITUDE} m"
+        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" &
         PIDS+=($!)
     elif [[ $1 =~ ^[0-9]+$ ]]; then
         # Run from Drone1 to DroneN
@@ -59,8 +71,8 @@ elif [[ $# -eq 1 ]]; then
             DRONE_NAME="Drone$i"
             WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
 
-            echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s"
-            $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" &
+            echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s and altitude ${ALTITUDE} m"
+            $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" &
             PIDS+=($!)
         done
     else
@@ -88,5 +100,5 @@ echo "Completed all requested drone flights."
 # Run only Drone3
 # ./run_drones.sh Drone3
 
-# Run Drone3 with 4.0 m/s velocity
-# WAYPOINT_VELOCITY=4.0 ./run_drones.sh Drone3
+# Run Drone3 with 4.0 m/s velocity and -50.0 m altitude
+# WAYPOINT_VELOCITY=4.0 FLY_ALTITUDE=-50.0 ./run_drones.sh Drone3

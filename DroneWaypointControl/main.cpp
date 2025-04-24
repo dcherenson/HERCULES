@@ -56,17 +56,17 @@ std::vector<Vector3r> loadWaypoints(const std::string &file_path, float fixed_z)
 
 int main(int argc, char *argv[])
 {
-    if (argc < 3 || argc > 4)
+    if (argc < 3 || argc > 5)
     {
-        std::cerr << "Usage: " << argv[0] << " <DroneName> <WaypointFilePath> [WaypointVelocity]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <DroneName> <WaypointFilePath> [WaypointVelocity] [FlyAltitude]" << std::endl;
         return 1;
     }
 
     std::string drone_name = argv[1];
     std::string waypoint_file = argv[2];
-    float waypoint_flight_velocity = (argc == 4) ? std::stof(argv[3]) : 2.0f;
+    float waypoint_flight_velocity = (argc >= 4) ? std::stof(argv[3]) : 2.0f;
+    float fly_altitude = (argc == 5) ? std::stof(argv[4]) : -35.0f;
     float return_home_velocity = 3.0f;
-    float fly_altitude = -35.0f;
 
     try
     {
@@ -118,7 +118,7 @@ int main(int argc, char *argv[])
         client.hoverAsync(drone_name)->waitOnLastTask();
         sleep_for_seconds(5);
 
-        client.moveToZAsync(-5.0f, 5.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
+        client.moveToZAsync(-2.0f, 5.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
         sleep_for_seconds(2);
 
         std::cout << "[" << drone_name << "] Initiating landing..." << std::endl;
