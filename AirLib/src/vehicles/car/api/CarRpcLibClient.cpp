@@ -166,6 +166,25 @@ __pragma(warning(disable : 4239))
                 float current_lookahead = lookahead;
                 Vector3r target = getLookaheadPoint(current_pos, path, current_lookahead);
 
+                // OPTIONAL DEBUG: Estimate remaining waypoints based on current position. 
+                // COMMENT OUT IF NOT NEEDED
+                /* int closest_index = -1;
+                float min_distance = std::numeric_limits<float>::max();
+
+                for (size_t i = 0; i < path.size(); ++i)
+                {
+                    float dist = distance2D(current_pos, path[i]);
+                    if (dist < min_distance)
+                    {
+                        min_distance = dist;
+                        closest_index = static_cast<int>(i);
+                    }
+                }
+
+                int waypoints_remaining = static_cast<int>(path.size()) - closest_index - 1;
+                std::cout << "[DEBUG] Closest waypoint index: " << closest_index
+                          << ", Estimated waypoints remaining: " << waypoints_remaining << std::endl; */
+
                 // Compute desired heading from current position to target.
                 float desired_heading = std::atan2(target.y() - current_pos.y(), target.x() - current_pos.x());
                 float current_heading = getYawFromQuaternion(car_state.kinematics_estimated.pose.orientation);
@@ -220,8 +239,9 @@ __pragma(warning(disable : 4239))
                         std::cout << "Destination reached." << std::endl;
                         break;
                     }
+                    // NOTE by SSG: works better when this block is commented out
                     // Additional check: if there are at least two waypoints, check if the UGV has passed the last checkpoint.
-                    if (path.size() >= 2)
+                    /* if (path.size() >= 2)
                     {
                         Vector3r last_segment = path.back() - path[path.size() - 2];
                         float segment_length = last_segment.norm();
@@ -237,7 +257,7 @@ __pragma(warning(disable : 4239))
                                 break;
                             }
                         }
-                    }
+                    } */
                 }
 
                 // Wait for the control period.
