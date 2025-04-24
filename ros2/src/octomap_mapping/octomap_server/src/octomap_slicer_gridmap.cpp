@@ -62,7 +62,6 @@ private:
     }
 
     double resolution = tree->getResolution();
-    double tol = resolution / 2.0;
 
     // Retrieve the full extents of the octomap.
     double full_min_x, full_min_y, full_min_z;
@@ -87,48 +86,53 @@ private:
     grid.info.origin.orientation.w = 1.0;
 
     // Determine default cell value based on unknown_flag.
-    // If unknown_flag is true, cells are pre-filled as unknown (10), else free (0).
     int8_t default_value = unknown_flag_ ? 10 : 0;
     grid.data.assign(width * height, default_value);
 
-    // Gather data from leaves that are at the specified slice altitude.
-    std::vector<std::tuple<double, double, bool>> cellData;
+    // Loop through the octomap leaves
+    bool found_voxel = false;
     for (octomap::OcTree::leaf_iterator it = tree->begin_leafs(), end = tree->end_leafs();
          it != end; ++it)
     {
-      if (std::fabs(it.getZ() - slice_altitude_) <= tol)
+      double half_size_z = it.getSize() / 2.0;
+      double z_min = it.getZ() - half_size_z;
+      double z_max = it.getZ() + half_size_z;
+
+      if (slice_altitude_ >= z_min && slice_altitude_ <= z_max)
       {
         double x = it.getX();
         double y = it.getY();
         bool occupied = tree->isNodeOccupied(*it);
-        cellData.push_back(std::make_tuple(x, y, occupied));
-      }
-    }
+        if (!occupied)
+          continue;
 
-    if (cellData.empty())
-    {
-      RCLCPP_WARN(this->get_logger(), "No octree leaves found at the specified altitude: %f", slice_altitude_);
-      delete tree;
-      return;
-    }
+        found_voxel = true;
+        double voxel_size = it.getSize();
 
-    // Mark grid cells as occupied based on the slice data.
-    for (const auto &cell : cellData)
-    {
-      double x, y;
-      bool occ;
-      std::tie(x, y, occ) = cell;
-      if (occ)
-      {
-        // Compute grid indices relative to full map bounds.
-        int col = std::floor((x - full_min_x) / resolution);
-        int row = std::floor((y - full_min_y) / resolution);
-        int index = row * width + col;
-        if (index >= 0 && index < static_cast<int>(grid.data.size()))
+        int min_col = std::floor((x - voxel_size / 2.0 - full_min_x) / resolution);
+        int max_col = std::floor((x + voxel_size / 2.0 - full_min_x) / resolution);
+        int min_row = std::floor((y - voxel_size / 2.0 - full_min_y) / resolution);
+        int max_row = std::floor((y + voxel_size / 2.0 - full_min_y) / resolution);
+
+        for (int row = min_row; row <= max_row; ++row)
         {
-          grid.data[index] = 100;
+          for (int col = min_col; col <= max_col; ++col)
+          {
+            if (row >= 0 && row < height && col >= 0 && col < width)
+            {
+              int index = row * width + col;
+              grid.data[index] = 100;
+            }
+          }
         }
       }
+    }
+
+    if (!found_voxel)
+    {
+      RCLCPP_WARN(this->get_logger(), "No occupied voxels found intersecting slice altitude: %f", slice_altitude_);
+      delete tree;
+      return;
     }
 
     // Apply inflation logic.
