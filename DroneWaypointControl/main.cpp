@@ -89,6 +89,10 @@ int main(int argc, char *argv[])
         std::cout << "[" << drone_name << "] Moving to altitude " << -fly_altitude << " meters..." << std::endl;
         client.moveToZAsync(fly_altitude, 5.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
 
+        // // Block until user hits Enter
+        // std::cout << "[" << drone_name << "] Reached target altitude. Press ENTER to begin waypoint navigation..." << std::endl;
+        // std::cin.get();
+
         std::vector<Vector3r> waypoints = loadWaypoints(waypoint_file, fly_altitude);
         if (waypoints.empty())
         {

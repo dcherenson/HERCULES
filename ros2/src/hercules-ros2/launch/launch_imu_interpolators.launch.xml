@@ -1,0 +1,40 @@
+<launch>
+
+<!-- NOTE!!! Set target frequency according to ClockSpeed in settings json. -->
+
+  <group>
+    <node pkg="hercules-ros2" exec="imu_linear_interpolator_v2_node" name="imu_interpolator_drone1" output="screen">
+      <param name="target_frequency" value="500.0" />
+      <param name="buffer_size" value="10" />
+      <param name="input_topic" value="/hercules_node/Drone1/imu/imu" />
+      <param name="output_topic" value="/hercules_node/Drone1/imu/imu_interpolated" />
+    </node>
+  </group>
+
+  <group>
+    <node pkg="hercules-ros2" exec="imu_linear_interpolator_v2_node" name="imu_interpolator_drone2" output="screen">
+      <param name="target_frequency" value="500.0" />
+      <param name="buffer_size" value="10" />
+      <param name="input_topic" value="/hercules_node/Drone2/imu/imu" />
+      <param name="output_topic" value="/hercules_node/Drone2/imu/imu_interpolated" />
+    </node>
+  </group>
+
+  <group>
+    <node pkg="hercules-ros2" exec="imu_linear_interpolator_v2_node" name="imu_interpolator_husky1" output="screen">
+      <param name="target_frequency" value="500.0" />
+      <param name="buffer_size" value="10" />
+      <param name="input_topic" value="/hercules_node/Husky1/imu/imu" />
+      <param name="output_topic" value="/hercules_node/Husky1/imu/imu_interpolated" />
+    </node>
+  </group>
+
+  <group>
+    <node pkg="hercules-ros2" exec="imu_linear_interpolator_v2_node" name="imu_interpolator_husky2" output="screen">
+      <param name="target_frequency" value="500.0" />
+      <param name="buffer_size" value="10" />
+      <param name="input_topic" value="/hercules_node/Husky2/imu/imu" />
+      <param name="output_topic" value="/hercules_node/Husky2/imu/imu_interpolated" />
+    </node>
+  </group>
+</launch>

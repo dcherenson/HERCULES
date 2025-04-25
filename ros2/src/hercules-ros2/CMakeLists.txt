@@ -87,6 +87,11 @@ ament_target_dependencies(imu_linear_interpolator_v2_node
   tf2_sensor_msgs
 )
 
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+
 install(TARGETS
   imu_linear_interpolator_v2_node
   DESTINATION lib/${PROJECT_NAME}

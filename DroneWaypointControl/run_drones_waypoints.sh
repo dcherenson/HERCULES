@@ -14,7 +14,7 @@ DEFAULT_NUM_DRONES=1
 VELOCITY=1.5
 
 # Default fly altitude
-FLY_ALTITUDE=-5.0
+FLY_ALTITUDE=-35.0
 
 # Check if a velocity argument was provided via environment variable
 if [[ -n "$WAYPOINT_VELOCITY" ]]; then
