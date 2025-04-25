@@ -314,8 +314,22 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
                             const std::string image_topic = camera_topic_prefix + "/image";
                             const std::string camera_info_topic = camera_topic_prefix + "/camera_info";
                             image_pub_vec_.push_back(image_transporter.advertise(image_topic, 1));
-                            cam_info_pub_vec_.push_back(nh_->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic, 10));
-                            camera_info_msg_vec_.push_back(generate_cam_info(curr_camera_name, camera_setting, capture_setting));
+
+                            // OLD BLOCK
+                            // cam_info_pub_vec_.push_back(nh_->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic, 10));
+                            // camera_info_msg_vec_.push_back(generate_cam_info(curr_camera_name, camera_setting, capture_setting));
+                            // new: latched publisher, send once at startup
+                            rclcpp::QoS cam_info_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
+                            auto cam_info_pub = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(
+                                camera_info_topic, cam_info_qos);
+                            auto cam_info_msg = generate_cam_info(curr_camera_name, camera_setting, capture_setting);
+                            // Stamp it and publish just one time:
+                            cam_info_msg.header.stamp = nh_->now();
+                            cam_info_pub->publish(cam_info_msg);
+
+                            // Store the publisher so subscribers can still find it, but we no longer need to
+                            // store the message for republishing.
+                            cam_info_pub_vec_.push_back(cam_info_pub);
                         }
                     }
                     else
@@ -332,8 +346,22 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
                         const std::string image_topic = camera_topic_prefix + "/image";
                         const std::string camera_info_topic = camera_topic_prefix + "/camera_info";
                         image_pub_vec_.push_back(image_transporter.advertise(image_topic, 1));
-                        cam_info_pub_vec_.push_back(nh_->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic, 10));
-                        camera_info_msg_vec_.push_back(generate_cam_info(curr_camera_name, camera_setting, capture_setting));
+
+                        // OLD BLOCK
+                        // cam_info_pub_vec_.push_back(nh_->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic, 10));
+                        // camera_info_msg_vec_.push_back(generate_cam_info(curr_camera_name, camera_setting, capture_setting));
+                        // new: latched publisher, send once at startup
+                        rclcpp::QoS cam_info_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
+                        auto cam_info_pub = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(
+                            camera_info_topic, cam_info_qos);
+                        auto cam_info_msg = generate_cam_info(curr_camera_name, camera_setting, capture_setting);
+                        // Stamp it and publish just one time:
+                        cam_info_msg.header.stamp = nh_->now();
+                        cam_info_pub->publish(cam_info_msg);
+
+                        // Store the publisher so subscribers can still find it, but we no longer need to
+                        // store the message for republishing.
+                        cam_info_pub_vec_.push_back(cam_info_pub);
                     }
                 }
             }
@@ -1633,7 +1661,7 @@ void AirsimROSWrapper::publish_vehicle_state()
         //     imu_msg.header.frame_id = vehicle_ros->vehicle_name_;
         //     sensor_publisher.publisher->publish(imu_msg);
         // }
-        
+
         for (auto &sensor_publisher : vehicle_ros->distance_pubs_)
         {
             auto distance_data = airsim_client_->getDistanceSensorData(sensor_publisher.sensor_name, vehicle_ros->vehicle_name_);
@@ -2099,8 +2127,9 @@ void AirsimROSWrapper::process_and_publish_img_response(const std::vector<ImageR
 
         // update timestamp of saved cam info msgs
 
-        camera_info_msg_vec_[img_response_idx_internal].header.stamp = rclcpp::Time(curr_img_response.time_stamp);
-        cam_info_pub_vec_[img_response_idx_internal]->publish(camera_info_msg_vec_[img_response_idx_internal]);
+        // NOT PUBLISHING CONTINUOUSLY, USING LATCHED MESSAGE
+        // camera_info_msg_vec_[img_response_idx_internal].header.stamp = rclcpp::Time(curr_img_response.time_stamp);
+        // cam_info_pub_vec_[img_response_idx_internal]->publish(camera_info_msg_vec_[img_response_idx_internal]);
 
         // DepthPlanar / DepthPerspective / DepthVis / DisparityNormalized
         if (curr_img_response.pixels_as_float)
