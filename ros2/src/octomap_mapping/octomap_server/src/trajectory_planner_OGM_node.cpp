@@ -65,7 +65,8 @@ public:
         this->declare_parameter("settings_file", "/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json");
         std::string settings_file_;
         this->declare_parameter("trajectory_exploration_radius", 5.0);
-        this->declare_parameter("drone_altitude", 35.0); // meters
+        // this->declare_parameter("drone_altitude", 35.0); // meters
+        this->declare_parameter("drone_altitude", 10.0); // meters
         this->declare_parameter("use_k_rrt_for_checkpoints", false);
 
         // Retrieve parameters.
@@ -91,13 +92,13 @@ public:
         this->get_parameter("drone_max_turn_angle_deg", drone_max_turn_angle_deg_);
         
         // for CSLAM, random explore motion
-        output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/trajectory_" + robot_name_ + ".txt";
+        output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/";
 
         // for BEVP, random explore motion
-        // output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_random_explore/trajectory_" + robot_name_ + ".txt";
+        // output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_random_explore/";
 
         // // for BEVP, convoy motion
-        // output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy/trajectory_" + robot_name_ + ".txt";
+        // output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy/";
 
         // Convert degrees to radians.
         start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
@@ -206,7 +207,6 @@ public:
         occupancy_grid_sub_drone_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
             "Ausenv_10mAlt_OGM_0p5m", 10,
             std::bind(&TrajectoryPlanner::occupancy_grid_drone_callback, this, std::placeholders::_1));
-        
 
         // Publisher for updated occupancy grid (can be used for both types).
         updated_ogm_pub_ground_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("updated_ground_occupancy_grid", 10);
@@ -276,6 +276,7 @@ private:
     double trajectory_exploration_radius_;
     double inflation_radius_;
     std::string output_file_path_;
+    std::string output_folder_string_;
     std::string robot_name_;
     bool use_k_rrt_for_checkpoints_ = false;
     bool current_reach_checkpoints_first_ = true;
@@ -1694,7 +1695,8 @@ private:
                 update_dynamic_occupancy_grid(seg_pair.first, dynamic_ground_grid_);
                 publish_updated_occupancy_grid(dynamic_ground_grid_, false);
 
-                output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                // output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                output_file_path_ = output_folder_string_ + veh.name + "_trajectory.txt";
                 save_trajectory_to_file(seg_pair.second);
                 plannedTrajectories_[veh.name] = seg_pair.second;
                 publish_trajectory_for_robot(veh.name, seg_pair.second);
@@ -1807,7 +1809,9 @@ private:
                         auto seg_pair = plan_trajectory();
                         update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
                         publish_updated_occupancy_grid(dynamic_drone_grid_, true);
-                        output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                        // output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                        output_file_path_ = output_folder_string_ + veh.name + "_trajectory.txt";
+
                         save_trajectory_to_file(seg_pair.second);
                         plannedTrajectories_[veh.name] = seg_pair.second;
                         publish_trajectory_for_robot(veh.name, seg_pair.second);
@@ -1819,7 +1823,8 @@ private:
                         auto seg_pair = plan_convoy_trajectory(ugv_traj_it->second);
                         update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
                         publish_updated_occupancy_grid(dynamic_drone_grid_, true);
-                        output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                        // output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                        output_file_path_ = output_folder_string_ + veh.name + "_trajectory.txt";
                         save_trajectory_to_file(seg_pair.second);
                         plannedTrajectories_[veh.name] = seg_pair.second;
                         publish_trajectory_for_robot(veh.name, seg_pair.second);
@@ -1831,7 +1836,8 @@ private:
                     auto seg_pair = plan_trajectory();
                     update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
                     publish_updated_occupancy_grid(dynamic_drone_grid_, true);
-                    output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                    // output_file_path_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/" + veh.name + "_trajectory.txt";
+                    output_file_path_ = output_folder_string_ + veh.name + "_trajectory.txt";
                     save_trajectory_to_file(seg_pair.second);
                     plannedTrajectories_[veh.name] = seg_pair.second;
                     publish_trajectory_for_robot(veh.name, seg_pair.second);
