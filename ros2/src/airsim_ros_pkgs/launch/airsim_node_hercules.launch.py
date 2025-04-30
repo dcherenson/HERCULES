@@ -46,9 +46,9 @@ def generate_launch_description():
             output=LaunchConfiguration('output'),
             parameters=[{
                 'is_vulkan': LaunchConfiguration('is_vulkan'),
-                'update_airsim_img_response_every_n_sec': 0.25,
+                'update_airsim_img_response_every_n_sec': 0.5,
                 'update_airsim_control_every_n_sec': 0.05,
-                'update_lidar_every_n_sec': 0.25,
+                'update_lidar_every_n_sec': 0.5,
                 'update_gpulidar_every_n_sec': 0.01,
                 'update_echo_every_n_sec': 0.05,
                 'publish_clock': LaunchConfiguration('publish_clock'),

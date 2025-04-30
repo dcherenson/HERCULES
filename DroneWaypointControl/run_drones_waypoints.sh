@@ -5,7 +5,16 @@
 EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
 
 # Base path for waypoint files
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data"
+# BEVP random explore motion
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_random_explore"
+
+# BEVP convoy motion
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy"
+
+# CSLAM random explore motion
+WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
+
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data"
 
 # Default number of drones if none specified
 DEFAULT_NUM_DRONES=1
@@ -14,7 +23,8 @@ DEFAULT_NUM_DRONES=1
 VELOCITY=1.5
 
 # Default fly altitude
-FLY_ALTITUDE=-35.0
+FLY_ALTITUDE=-10.0
+# FLY_ALTITUDE=-35.0
 
 # Check if a velocity argument was provided via environment variable
 if [[ -n "$WAYPOINT_VELOCITY" ]]; then

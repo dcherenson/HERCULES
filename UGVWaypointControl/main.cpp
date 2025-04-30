@@ -101,7 +101,7 @@ int main(int argc, char *argv[])
     // Define parameters for the moveOnPath function.
     float desired_velocity = std::stof(argv[2]); // Desired speed in m/s.
 
-    float timeout_sec = 1000.0f; // Total allowed time (in seconds) for the maneuver.
+    float timeout_sec = 100000.0f; // Total allowed time (in seconds) for the maneuver.
     float lookahead = 4.0f;      // Lookahead distance (in meters).
 
     // Call the moveOnPath function (which you added to CarRpcLibClient).

@@ -6,15 +6,22 @@ EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_r
 
 
 # Base path for waypoint files
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data"
+# BEVP random explore motion
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_random_explore"
+
+# BEVP convoy motion
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy"
+
+# CSLAM random explore motion
+WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
+
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data"
 
 # Default number of UGVs if none specified
 DEFAULT_NUM_UGVS=2
 
 # Default linear speed (in m/s) to be used when no individual speed is provided
 DEFAULT_SPEED=1.5
-# DEFAULT_SPEED=0.175  #has to be scaled according to clock speed time for now
-
 
 # Prefix for UGV names (adjust to match your naming convention)
 PREFIX="Husky"
