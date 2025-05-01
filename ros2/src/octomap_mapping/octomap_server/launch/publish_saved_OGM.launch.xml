@@ -8,19 +8,19 @@
     </node>
 
     <!-- for BEVP motion -->
-    <node pkg="octomap_server" exec="publish_saved_ogm.py" output="screen">
+    <!-- <node pkg="octomap_server" exec="publish_saved_ogm.py" output="screen">
         <param name="yaml_file" value="/home/sgarimella34/multi-robot-coordination/trajectory_data/occupancy_grid_maps/Ausenv_35mAlt_OGM_0p5m.yaml"/>
         <param name="continuous_publish" value="true"/>
         <param name="ogm_topic" value="Ausenv_35mAlt_OGM_0p5m"/>
         <param name="altitude" value="35.0"/>
-    </node>
+    </node> -->
 
     <!-- for CSLAM motion -->
-    <!-- <node pkg="octomap_server" exec="publish_saved_ogm.py" output="screen">
+    <node pkg="octomap_server" exec="publish_saved_ogm.py" output="screen">
         <param name="yaml_file" value="/home/sgarimella34/multi-robot-coordination/trajectory_data/occupancy_grid_maps/Ausenv_10mAlt_OGM_0p5m.yaml"/>
         <param name="continuous_publish" value="true"/>
         <param name="ogm_topic" value="Ausenv_10mAlt_OGM_0p5m"/>
         <param name="altitude" value="10.0"/>
-    </node> -->
+    </node>
 
 </launch>
