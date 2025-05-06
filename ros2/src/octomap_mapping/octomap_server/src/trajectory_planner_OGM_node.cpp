@@ -164,11 +164,11 @@ public:
 
                     if (veh_data.contains("FlightPattern"))
                     {
-                        info.flight_pattern = veh_data.value("FlightPattern", "Loiter");
+                        info.flight_pattern = veh_data.value("FlightPattern", "RandomExplore");
                     }
                     else
                     {
-                        info.flight_pattern = "Loiter";
+                        info.flight_pattern = "RandomExplore";
                     }
                     vehicles_.push_back(info);
                 }
@@ -231,7 +231,7 @@ private:
         double start_x, start_y, start_z, start_yaw;
         std::vector<std::tuple<double, double, double>> checkpoints;
         bool reach_checkpoints_first;
-        std::string flight_pattern; // "Loiter" (default) or "Convoy" for drones
+        std::string flight_pattern; // "RandomExplore" (default) or "Convoy" for drones
     };
     std::vector<VehicleInfo> vehicles_;
 
@@ -1804,7 +1804,7 @@ private:
                     if (ugv_traj_it == plannedTrajectories_.end())
                     {
                         RCLCPP_ERROR(this->get_logger(), "Companion UGV trajectory for %s not found", companion.c_str());
-                        // Fallback to default (Loiter) planning.
+                        // Fallback to default (RandomExplore) planning.
                         auto seg_pair = plan_trajectory();
                         update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
                         publish_updated_occupancy_grid(dynamic_drone_grid_, true);
@@ -1829,7 +1829,7 @@ private:
                     }
                 }
                 else
-                { // "Loiter" mode (default behavior)
+                { // "RandomExplore" mode (default behavior)
                     auto seg_pair = plan_trajectory();
                     update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
                     publish_updated_occupancy_grid(dynamic_drone_grid_, true);
