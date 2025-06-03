@@ -7,6 +7,7 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -26,6 +27,7 @@ find_package(rosidl_default_runtime REQUIRED)
 find_package(octomap_msgs REQUIRED)
 find_package(octomap REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(cv_bridge REQUIRED)
 
 
 # TO BUILD WITH CUSTOM MESSAGES
@@ -98,5 +100,63 @@ install(TARGETS
 )
 
 
+# depth viewing node______________
+add_executable(view_depthperspective_pointcloud_node
+ src/view_depthperspective_pointcloud.cpp)
+ament_target_dependencies(view_depthperspective_pointcloud_node
+
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_sensor_msgs
+  cv_bridge
+)
+
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+
+install(TARGETS
+  view_depthperspective_pointcloud_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# thermal image node___________________
+add_executable(thermal_image_node
+ src/thermal_image_node.cpp)
+ament_target_dependencies(thermal_image_node
+
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_sensor_msgs
+  cv_bridge
+)
+
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+
+install(TARGETS
+thermal_image_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+# ____________________________
+
+# Install Python scripts
+install(PROGRAMS
+  scripts/test_depthperspective.py 
+  scripts/depthvis.py 
+  scripts/multi_robot_topic_monitor.py 
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_package()

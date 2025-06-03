@@ -1,39 +1,34 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-// in header only mode, control library is not available
 #ifndef AIRLIB_HEADER_ONLY
-// RPC code requires C++14. If build system like Unreal doesn't support it then use compiled binaries
 #ifndef AIRLIB_NO_RPC
-// if using Unreal Build system then include precompiled header file first
 
 #include "vehicles/car/api/CarRpcLibClient.hpp"
-
 #include "common/Common.hpp"
 #include "common/ClockFactory.hpp"
 #include <thread>
+#include <algorithm> // for std::clamp, std::min
+#include <limits>    // for std::numeric_limits
 STRICT_MODE_OFF
 
 #ifndef RPCLIB_MSGPACK
 #define RPCLIB_MSGPACK clmdep_msgpack
-#endif // !RPCLIB_MSGPACK
+#endif
 
 #ifdef nil
 #undef nil
-#endif // nil
+#endif
 
 #include "common/common_utils/WindowsApisCommonPre.hpp"
 #undef FLOAT
 #undef check
 #include "rpc/client.h"
-// TODO: HACK: UE4 defines macro with stupid names like "check" that conflicts with msgpack library
 #ifndef check
 #define check(expr) (static_cast<void>((expr)))
 #endif
 #include "common/common_utils/WindowsApisCommonPost.hpp"
-
 #include "vehicles/car/api/CarRpcLibAdaptors.hpp"
-
 STRICT_MODE_ON
 #ifdef _MSC_VER
 __pragma(warning(disable : 4239))
@@ -47,13 +42,9 @@ __pragma(warning(disable : 4239))
         typedef msr::airlib_rpclib::CarRpcLibAdaptors CarRpcLibAdaptors;
 
         CarRpcLibClient::CarRpcLibClient(const string &ip_address, uint16_t port, float timeout_sec)
-            : RpcLibClientBase(ip_address, port, timeout_sec)
-        {
-        }
+            : RpcLibClientBase(ip_address, port, timeout_sec) {}
 
-        CarRpcLibClient::~CarRpcLibClient()
-        {
-        }
+        CarRpcLibClient::~CarRpcLibClient() {}
 
         void CarRpcLibClient::setCarControls(const CarApiBase::CarControls &controls, const std::string &vehicle_name)
         {
@@ -64,14 +55,13 @@ __pragma(warning(disable : 4239))
         {
             return static_cast<rpc::client *>(getClient())->call("getCarState", vehicle_name).as<CarRpcLibAdaptors::CarState>().to();
         }
+
         CarApiBase::CarControls CarRpcLibClient::getCarControls(const std::string &vehicle_name)
         {
             return static_cast<rpc::client *>(getClient())->call("getCarControls", vehicle_name).as<CarRpcLibAdaptors::CarControls>().to();
         }
 
-        // helper functions
-        // Normalize an angle to the range [-pi, pi].
-        float normalizeAngle(float angle)
+        static float normalizeAngle(float angle)
         {
             while (angle > M_PI)
                 angle -= 2 * M_PI;
@@ -80,52 +70,51 @@ __pragma(warning(disable : 4239))
             return angle;
         }
 
-        // Compute Euclidean distance in the XY (horizontal) plane.
-        float distance2D(const Vector3r &a, const Vector3r &b)
+        static float distance2D(const Vector3r &a, const Vector3r &b)
         {
             return std::sqrt(std::pow(a.x() - b.x(), 2) + std::pow(a.y() - b.y(), 2));
         }
 
-        // Helper function to compute a lookahead point on the path.
-        // This function walks through the path segments and returns a point that is
-        // 'lookahead_distance' ahead of the current position.
-        Vector3r getLookaheadPoint(const Vector3r &current, const vector<Vector3r> &path, float lookahead_distance)
+        static Vector3r getLookaheadPoint(const Vector3r &current,
+                                          const vector<Vector3r> &path,
+                                          float lookahead_distance,
+                                          size_t start_index)
         {
-            // Iterate over segments defined by consecutive waypoints.
-            for (size_t i = 0; i < path.size() - 1; ++i)
+            for (size_t i = start_index; i + 1 < path.size(); ++i)
             {
-                Vector3r start = path[i];
-                Vector3r end = path[i + 1];
-                Vector3r segment = end - start;
-                float seg_length = segment.norm();
-                if (seg_length < 1e-6f)
-                    continue; // Skip very short segments.
-                Vector3r dir = segment / seg_length;
-                float t = (current - start).dot(dir);
-                t = std::max(0.0f, std::min(t, seg_length));
-                Vector3r proj = start + dir * t;
-                float dist_to_proj = distance2D(current, proj);
-                // If the lookahead circle intersects this segment:
-                if (dist_to_proj <= lookahead_distance && (lookahead_distance - dist_to_proj) <= (seg_length - t))
+                const Vector3r &A = path[i], &B = path[i + 1];
+                Vector3r seg = B - A;
+                float seg_len = seg.norm();
+                if (seg_len < 1e-6f)
+                    continue;
+
+                Vector3r dir = seg / seg_len;
+                float t = (current - A).dot(dir);
+                t = std::clamp(t, 0.0f, seg_len);
+                Vector3r proj = A + dir * t;
+                float d = distance2D(current, proj);
+
+                if (d <= lookahead_distance && (lookahead_distance - d) <= (seg_len - t))
                 {
-                    float offset = lookahead_distance - dist_to_proj;
+                    float offset = lookahead_distance - d;
                     return proj + dir * offset;
                 }
             }
-            // If no segment meets the condition, return the final waypoint.
-            return path.back();
+            // fallback to next waypoint
+            return (start_index + 1 < path.size()) ? path[start_index + 1] : path.back();
         }
 
-        // Extract yaw (heading angle) from a quaternion.
-        // (This uses the standard conversion formula and assumes the quaternion is in NED frame.)
-        float getYawFromQuaternion(const Quaternionr &q)
+        static float getYawFromQuaternion(const Quaternionr &q)
         {
             return std::atan2(2 * (q.w() * q.z() + q.x() * q.y()),
                               1 - 2 * (q.y() * q.y() + q.z() * q.z()));
         }
 
-        bool CarRpcLibClient::moveOnPath(const vector<Vector3r> &path, float desired_velocity, float timeout_sec,
-                                         float lookahead, const std::string &vehicle_name)
+        bool CarRpcLibClient::moveOnPath(const vector<Vector3r> &path,
+                                         float desired_velocity,
+                                         float timeout_sec,
+                                         float lookahead,
+                                         const std::string &vehicle_name, float control_hz)
         {
             if (path.empty())
             {
@@ -133,149 +122,117 @@ __pragma(warning(disable : 4239))
                 return false;
             }
 
+            const float control_period = 1.0f / control_hz;
+            const float Kp_steering = 1.0f;
+            const float max_steer = 0.5f;
+            const float throttle_gain = 0.5f;
+            const float threshold = 1.0f; // only still used for terminal checks
+
             auto start_time = std::chrono::steady_clock::now();
-            float control_period = 0.1f; // 100 ms control loop period.
-
-            // Controller gains (tune these based on your vehicle dynamics).
-            const float Kp_steering = 1.0f;        // Proportional gain for steering.
-            const float max_steering_angle = 0.5f; // Maximum steering angle in radians.
-            const float throttle_gain = 0.5f;      // Gain for throttle command.
-            const float threshold = 1.0f;          // Distance threshold for waypoint completion.
-
-            // Detect if the path is a closed loop.
             bool closed_loop = (distance2D(path.front(), path.back()) < 1e-3);
-            bool passed_start = false; // Will be set true once the UGV leaves the start area.
+            bool passed_start = false;
+            size_t current_index = 0;
 
             while (true)
             {
-                // Check for timeout.
-                auto current_time = std::chrono::steady_clock::now();
-                float elapsed_sec = std::chrono::duration_cast<std::chrono::duration<float>>(current_time - start_time).count();
-                if (elapsed_sec > timeout_sec)
+                // 1) timeout
+                auto now = std::chrono::steady_clock::now();
+                float elapsed = std::chrono::duration_cast<std::chrono::duration<float>>(now - start_time).count();
+                if (elapsed > timeout_sec)
                 {
                     std::cerr << "Timeout reached while following the path." << std::endl;
                     break;
                 }
 
-                // Retrieve current car state.
-                CarApiBase::CarState car_state = this->getCarState(vehicle_name);
-                Vector3r current_pos = car_state.kinematics_estimated.pose.position;
-                float current_speed = car_state.speed; // In m/s.
+                // 2) state
+                auto car_state = getCarState(vehicle_name);
+                Vector3r pos = car_state.kinematics_estimated.pose.position;
+                float speed = car_state.speed;
 
-                // For this example, we use a fixed lookahead distance.
-                float current_lookahead = lookahead;
-                Vector3r target = getLookaheadPoint(current_pos, path, current_lookahead);
-
-                // OPTIONAL DEBUG: Estimate remaining waypoints based on current position. 
-                // COMMENT OUT IF NOT NEEDED
-                /* int closest_index = -1;
-                float min_distance = std::numeric_limits<float>::max();
-
-                for (size_t i = 0; i < path.size(); ++i)
+                // 3) terminal
+                if (!closed_loop && distance2D(pos, path.back()) < threshold)
                 {
-                    float dist = distance2D(current_pos, path[i]);
-                    if (dist < min_distance)
-                    {
-                        min_distance = dist;
-                        closest_index = static_cast<int>(i);
-                    }
+                    std::cout << "Destination reached." << std::endl;
+                    break;
                 }
-
-                int waypoints_remaining = static_cast<int>(path.size()) - closest_index - 1;
-                std::cout << "[DEBUG] Closest waypoint index: " << closest_index
-                          << ", Estimated waypoints remaining: " << waypoints_remaining << std::endl; */
-
-                // Compute desired heading from current position to target.
-                float desired_heading = std::atan2(target.y() - current_pos.y(), target.x() - current_pos.x());
-                float current_heading = getYawFromQuaternion(car_state.kinematics_estimated.pose.orientation);
-                float heading_error = normalizeAngle(desired_heading - current_heading);
-
-                // Compute steering command.
-                float steering_cmd = Kp_steering * heading_error;
-                if (steering_cmd > max_steering_angle)
-                    steering_cmd = max_steering_angle;
-                else if (steering_cmd < -max_steering_angle)
-                    steering_cmd = -max_steering_angle;
-
-                // Compute throttle command.
-                float throttle_cmd = 0.0f;
-                if (current_speed < desired_velocity)
-                {
-                    throttle_cmd = throttle_gain * (desired_velocity - current_speed);
-                    if (throttle_cmd > 1.0f)
-                        throttle_cmd = 1.0f;
-                }
-                else
-                {
-                    throttle_cmd = 0.0f;
-                }
-
-                // Send the command using the client instance.
-                CarApiBase::CarControls controls;
-                controls.steering = steering_cmd;
-                controls.throttle = throttle_cmd;
-                controls.handbrake = false;
-                controls.is_manual_gear = false;
-                this->setCarControls(controls, vehicle_name);
-
-                // Termination check:
                 if (closed_loop)
                 {
-                    // For closed-loop paths, first ensure the UGV has left the vicinity of the starting point.
-                    if (!passed_start && distance2D(current_pos, path.front()) > threshold * 2)
+                    if (!passed_start && distance2D(pos, path.front()) > threshold * 2)
                         passed_start = true;
-                    // If the UGV has left and then returned close to the starting point, finish.
-                    if (passed_start && distance2D(current_pos, path.front()) < threshold)
+                    if (passed_start && distance2D(pos, path.front()) < threshold)
                     {
-                        std::cout << "Closed-loop: Returned to starting point." << std::endl;
+                        std::cout << "Closed-loop: Returned to start." << std::endl;
                         break;
                     }
-                }
-                else
-                {
-                    // For open paths, check if we're near the final waypoint.
-                    if (distance2D(current_pos, path.back()) < threshold)
-                    {
-                        std::cout << "Destination reached." << std::endl;
-                        break;
-                    }
-                    // NOTE by SSG: works better when this block is commented out
-                    // Additional check: if there are at least two waypoints, check if the UGV has passed the last checkpoint.
-                    /* if (path.size() >= 2)
-                    {
-                        Vector3r last_segment = path.back() - path[path.size() - 2];
-                        float segment_length = last_segment.norm();
-                        // Avoid division by zero.
-                        if (segment_length > 1e-6f)
-                        {
-                            Vector3r dir = last_segment / segment_length;
-                            Vector3r to_vehicle = current_pos - path[path.size() - 2];
-                            float proj = to_vehicle.dot(dir);
-                            if (proj > segment_length)
-                            {
-                                std::cout << "Destination passed." << std::endl;
-                                break;
-                            }
-                        }
-                    } */
                 }
 
-                // Wait for the control period.
-                std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(control_period * 1000)));
+                // 4) **forward-only index stepping**:
+                //    keep advancing current_index while you are closer to the next WP than this one
+                while (current_index + 1 < path.size())
+                {
+                    float d_cur = distance2D(pos, path[current_index]);
+                    float d_next = distance2D(pos, path[current_index + 1]);
+                    if (d_next < d_cur)
+                    {
+                        current_index++;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                // 5) **distance‐based lookahead**:
+                //    find the first waypoint ≥ lookahead meters away
+                size_t target_index = path.size() - 1; // fallback = final WP
+                for (size_t i = current_index + 1; i < path.size(); ++i)
+                {
+                    if (distance2D(pos, path[i]) >= lookahead)
+                    {
+                        target_index = i;
+                        break;
+                    }
+                }
+                Vector3r target = path[target_index];
+
+                /* std::cout << "[DEBUG] cur_idx=" << current_index
+                          << ", tgt_idx=" << target_index
+                          << ", d_cur=" << distance2D(pos, path[current_index])
+                          << ", d_tgt=" << distance2D(pos, target)
+                          << std::endl; */
+
+                // 6) pure‐pursuit to that target
+                float desired_heading = std::atan2(target.y() - pos.y(), target.x() - pos.x());
+                float current_heading = getYawFromQuaternion(car_state.kinematics_estimated.pose.orientation);
+                float steer = std::clamp(
+                    Kp_steering * normalizeAngle(desired_heading - current_heading),
+                    -max_steer, max_steer);
+                float thr = (speed < desired_velocity)
+                                ? std::min(throttle_gain * (desired_velocity - speed), 1.0f)
+                                : 0.0f;
+
+                CarApiBase::CarControls ctrl;
+                ctrl.steering = steer;
+                ctrl.throttle = thr;
+                ctrl.handbrake = false;
+                ctrl.is_manual_gear = false;
+                setCarControls(ctrl, vehicle_name);
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(int(control_period * 1000)));
             }
 
-            // Stop the vehicle by applying the handbrake.
-            CarApiBase::CarControls stop_controls;
-            stop_controls.throttle = 0;
-            stop_controls.steering = 0;
-            stop_controls.handbrake = true;
-            this->setCarControls(stop_controls, vehicle_name);
+            // stop
+            CarApiBase::CarControls stop;
+            stop.throttle = 0;
+            stop.steering = 0;
+            stop.handbrake = true;
+            setCarControls(stop, vehicle_name);
 
             return true;
         }
 
-    }
-} // namespace
+    } // namespace airlib
+} // namespace msr
 
 #endif
 #endif

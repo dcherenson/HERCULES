@@ -2,26 +2,30 @@
 
 # Absolute path to your UGV executable
 # EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_debug/output/bin/UGVWaypointControl
-EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/UGVWaypointControl
-
+# EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/UGVWaypointControl
+EXECUTABLE_PATH=/home/dellg16ssg/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/UGVWaypointControl
 
 # Base path for waypoint files
 # BEVP random explore motion
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_random_explore"
+# WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_random_explore"
 
 # BEVP convoy motion
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy"
+# WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_convoy"
 
 # CSLAM random explore motion
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
-
-# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
+WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
 
 # Default number of UGVs if none specified
 DEFAULT_NUM_UGVS=2
 
-# Default linear speed (in m/s) to be used when no individual speed is provided
+# Default linear speed (in m/s) when no individual speed is provided
 DEFAULT_SPEED=1.5
+
+# Default control-loop frequency (in Hz)
+DEFAULT_CTRL_HZ=2
 
 # Prefix for UGV names (adjust to match your naming convention)
 PREFIX="Husky"
@@ -32,71 +36,87 @@ PIDS=()
 # Usage help function
 usage() {
     echo "Usage:"
-    echo "  $0                           # Run ${PREFIX}1 to ${PREFIX}${DEFAULT_NUM_UGVS} with default speed (${DEFAULT_SPEED} m/s)"
-    echo "  $0 <num_ugvs>                # Run ${PREFIX}1 to ${PREFIX}<num_ugvs> with default speed (${DEFAULT_SPEED} m/s)"
-    echo "  $0 ${PREFIX}3                # Run only ${PREFIX}3 with default speed (${DEFAULT_SPEED} m/s)"
-    echo "  $0 ${PREFIX}3 <speed>        # Run only ${PREFIX}3 with the specified speed"
-    echo "  $0 <num_ugvs> <speed>        # Run ${PREFIX}1 to ${PREFIX}<num_ugvs> with the specified speed for all"
+    echo "  $0"
+    echo "      # Run ${PREFIX}1 to ${PREFIX}${DEFAULT_NUM_UGVS} at ${DEFAULT_SPEED} m/s, ${DEFAULT_CTRL_HZ} Hz"
+    echo "  $0 <num_ugvs>"
+    echo "      # Run ${PREFIX}1 to ${PREFIX}<num_ugvs> at ${DEFAULT_SPEED} m/s, ${DEFAULT_CTRL_HZ} Hz"
+    echo "  $0 <num_ugvs> <speed>"
+    echo "      # Run ${PREFIX}1 to ${PREFIX}<num_ugvs> at <speed> m/s, ${DEFAULT_CTRL_HZ} Hz"
+    echo "  $0 <num_ugvs> <speed> <ctrl_hz>"
+    echo "      # Run ${PREFIX}1 to ${PREFIX}<num_ugvs> at <speed> m/s, <ctrl_hz> Hz"
+    echo "  $0 ${PREFIX}3"
+    echo "      # Run only ${PREFIX}3 at ${DEFAULT_SPEED} m/s, ${DEFAULT_CTRL_HZ} Hz"
+    echo "  $0 ${PREFIX}3 <speed>"
+    echo "      # Run only ${PREFIX}3 at <speed> m/s, ${DEFAULT_CTRL_HZ} Hz"
+    echo "  $0 ${PREFIX}3 <speed> <ctrl_hz>"
+    echo "      # Run only ${PREFIX}3 at <speed> m/s, <ctrl_hz> Hz"
     exit 1
 }
 
-# Determine the launch mode based on the number and type of arguments.
-if [[ $# -eq 0 ]]; then
-    # Default: Run PREFIX1 to PREFIX${DEFAULT_NUM_UGVS} with default speed.
-    for i in $(seq 1 $DEFAULT_NUM_UGVS); do
-        UGV_NAME="${PREFIX}$i"
-        WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
-        echo "Launching $UGV_NAME with speed ${DEFAULT_SPEED} m/s and waypoints from $WAYPOINT_FILE"
-        $EXECUTABLE_PATH "$UGV_NAME" "$DEFAULT_SPEED" "$WAYPOINT_FILE" &
-        PIDS+=($!)
-    done
-elif [[ $# -eq 1 ]]; then
-    if [[ $1 =~ ^[0-9]+$ ]]; then
-        # Numeric argument: run PREFIX1 to PREFIX<num_ugvs> with default speed.
-        NUM_UGVS=$1
-        for i in $(seq 1 $NUM_UGVS); do
-            UGV_NAME="${PREFIX}$i"
-            WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
-            echo "Launching $UGV_NAME with default speed ${DEFAULT_SPEED} m/s and waypoints from $WAYPOINT_FILE"
-            $EXECUTABLE_PATH "$UGV_NAME" "$DEFAULT_SPEED" "$WAYPOINT_FILE" &
-            PIDS+=($!)
-        done
-    else
-        # Otherwise, assume it's a vehicle name.
-        UGV_NAME="$1"
-        WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
-        echo "Launching $UGV_NAME with default speed ${DEFAULT_SPEED} m/s and waypoints from $WAYPOINT_FILE"
-        $EXECUTABLE_PATH "$UGV_NAME" "$DEFAULT_SPEED" "$WAYPOINT_FILE" &
-        PIDS+=($!)
-    fi
-elif [[ $# -eq 2 ]]; then
-    if [[ $1 =~ ^[0-9]+$ ]]; then
-        # Numeric: run PREFIX1 to PREFIX<num_ugvs> with specified speed.
-        NUM_UGVS=$1
-        SPEED="$2"
-        for i in $(seq 1 $NUM_UGVS); do
-            UGV_NAME="${PREFIX}$i"
-            WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
-            echo "Launching $UGV_NAME with specified speed ${SPEED} m/s and waypoints from $WAYPOINT_FILE"
-            $EXECUTABLE_PATH "$UGV_NAME" "$SPEED" "$WAYPOINT_FILE" &
-            PIDS+=($!)
-        done
-    else
-        # Otherwise, assume first argument is a vehicle name and second is the speed.
-        UGV_NAME="$1"
-        SPEED="$2"
-        WAYPOINT_FILE="$WAYPOINT_DIR/${UGV_NAME}_trajectory.txt"
-        echo "Launching $UGV_NAME with specified speed ${SPEED} m/s and waypoints from $WAYPOINT_FILE"
-        $EXECUTABLE_PATH "$UGV_NAME" "$SPEED" "$WAYPOINT_FILE" &
-        PIDS+=($!)
-    fi
-else
-    usage
-fi
+# Launch a single UGV with given parameters
+launch_one() {
+    local name="$1"
+    local speed="$2"
+    local ctrl_hz="$3"
+    local wp_file="${WAYPOINT_DIR}/${name}_trajectory.txt"
+    echo "Launching ${name}: speed=${speed} m/s, ctrl=${ctrl_hz} Hz, waypoints=${wp_file}"
+    "$EXECUTABLE_PATH" "$name" "$speed" "$wp_file" "$ctrl_hz" &
+    PIDS+=($!)
+}
 
-# Wait for all launched UGV processes to complete.
+# Determine the launch mode based on the number and type of arguments
+case "$#" in
+    0)
+        speed=$DEFAULT_SPEED
+        ctrl_hz=$DEFAULT_CTRL_HZ
+        for i in $(seq 1 $DEFAULT_NUM_UGVS); do
+            launch_one "${PREFIX}$i" "$speed" "$ctrl_hz"
+        done
+        ;;
+    1)
+        speed=$DEFAULT_SPEED
+        ctrl_hz=$DEFAULT_CTRL_HZ
+        if [[ $1 =~ ^[0-9]+$ ]]; then
+            num_ugvs=$1
+            for i in $(seq 1 $num_ugvs); do
+                launch_one "${PREFIX}$i" "$speed" "$ctrl_hz"
+            done
+        else
+            launch_one "$1" "$speed" "$ctrl_hz"
+        fi
+        ;;
+    2)
+        ctrl_hz=$DEFAULT_CTRL_HZ
+        if [[ $1 =~ ^[0-9]+$ ]]; then
+            num_ugvs=$1
+            speed=$2
+            for i in $(seq 1 $num_ugvs); do
+                launch_one "${PREFIX}$i" "$speed" "$ctrl_hz"
+            done
+        else
+            launch_one "$1" "$2" "$ctrl_hz"
+        fi
+        ;;
+    3)
+        if [[ $1 =~ ^[0-9]+$ ]]; then
+            num_ugvs=$1
+            speed=$2
+            ctrl_hz=$3
+            for i in $(seq 1 $num_ugvs); do
+                launch_one "${PREFIX}$i" "$speed" "$ctrl_hz"
+            done
+        else
+            launch_one "$1" "$2" "$3"
+        fi
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+# Wait for all launched UGV processes to complete
 for pid in "${PIDS[@]}"; do
-    wait $pid
+    wait "$pid"
 done
 
 echo "Completed all UGV waypoint missions."

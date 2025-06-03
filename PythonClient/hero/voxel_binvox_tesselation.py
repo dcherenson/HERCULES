@@ -26,9 +26,7 @@ def main():
     num_patches_xy = int(world_size / patch_size)
     
     # Make sure the output directory exists
-    # output_dir = "/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_0p5mcubed"
-    # output_dir = "/home/sgarimella34/Downloads/data_binvox_octomap/tesselation_1mcubed"
-    output_dir = "/home/sgarimella34/Downloads/data_binvox_octomap/blocks_0p5mcubed"
+    output_dir = "/home/dellg16ssg/multi-robot-coordination/data_binvox_octomap/oldwest_tesselation_0p5mcubed"
     os.makedirs(output_dir, exist_ok=True)
     
     # Create a single client for efficiency

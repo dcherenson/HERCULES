@@ -40,7 +40,7 @@ public:
         this->declare_parameter("z_height", -0.25);
         this->declare_parameter("trajectory_length", 200.0); // meters
         this->declare_parameter("square_size", 800.0);       // planning area side (meters)
-        this->declare_parameter("max_linear_velocity", 2.0); // default for UGV
+        this->declare_parameter("max_linear_velocity", 1.5); // default for UGV
         this->declare_parameter("robot_name", "Husky1");
 
         // Starting point parameters.
@@ -53,16 +53,20 @@ public:
         this->declare_parameter("max_turn_angle_deg", 45.0); // default for UGV
 
         // Declare UGV and drone specific parameters.
-        this->declare_parameter("ugv_max_linear_velocity", 2.0);
+        this->declare_parameter("ugv_max_linear_velocity", 1.5);
         this->declare_parameter("ugv_max_turn_angle_deg", 45.0);
-        this->declare_parameter("drone_max_linear_velocity", 3.0);
+        this->declare_parameter("drone_max_linear_velocity", 1.5);
         this->declare_parameter("drone_max_turn_angle_deg", 105.0);
+        this->declare_parameter("max_linear_acceleration", 2.5);
 
         // New parameter for obstacle inflation (meters).
-        this->declare_parameter("inflation_radius", 1.0);
+        this->declare_parameter("ugv_inflation_radius", 1.0);
+        this->declare_parameter("uav_inflation_radius", 2.0);
+        this->declare_parameter("uav_astar_inflation_radius", 4.0);
 
         // Settings file and trajectory inflation parameter.
-        this->declare_parameter("settings_file", "/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json");
+        // this->declare_parameter("settings_file", "/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json");
+        this->declare_parameter("settings_file", "/home/dellg16ssg/Documents/AirSim/settings_trajectory_planning.json");
         std::string settings_file_;
         this->declare_parameter("trajectory_exploration_radius", 5.0);
         // this->declare_parameter("drone_altitude", 35.0); // meters
@@ -82,7 +86,10 @@ public:
         this->get_parameter("start_z", start_z_);
         this->get_parameter("start_yaw", start_yaw_deg_);
         this->get_parameter("max_turn_angle_deg", max_turn_angle_deg_);
-        this->get_parameter("inflation_radius", inflation_radius_);
+        this->get_parameter("ugv_inflation_radius", ugv_inflation_radius_);
+        this->get_parameter("uav_inflation_radius", uav_inflation_radius_);
+        this->get_parameter("uav_astar_inflation_radius", uav_astar_inflation_radius_);
+
         this->get_parameter("robot_name", robot_name_);
         this->get_parameter("drone_altitude", drone_altitude_);
 
@@ -90,15 +97,19 @@ public:
         this->get_parameter("ugv_max_turn_angle_deg", ugv_max_turn_angle_deg_);
         this->get_parameter("drone_max_linear_velocity", drone_max_linear_velocity_);
         this->get_parameter("drone_max_turn_angle_deg", drone_max_turn_angle_deg_);
-        
+        this->get_parameter("max_linear_acceleration", max_linear_acceleration_);
+
         // for CSLAM, random explore motion
-        output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/";
+        // output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/";
+        output_folder_string_ = "/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore/";
 
         // for BEVP, random explore motion
         // output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_random_explore/";
+        // output_folder_string_ = "/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_random_explore/";
 
         // // for BEVP, convoy motion
         // output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy/";
+        // output_folder_string_ = "/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_convoy/";
 
         // Convert degrees to radians.
         start_yaw_ = start_yaw_deg_ * M_PI / 180.0;
@@ -270,11 +281,15 @@ private:
     double square_size_;
     int num_waypoints_;
     double max_linear_velocity_;
+    double max_linear_acceleration_;
     double grid_resolution_;
     double grid_origin_x_, grid_origin_y_;
     int grid_width_, grid_height_;
     double trajectory_exploration_radius_;
     double inflation_radius_;
+    double ugv_inflation_radius_, uav_inflation_radius_;
+    double uav_astar_inflation_radius_;
+
     std::string output_file_path_;
     std::string output_folder_string_;
     std::string robot_name_;
@@ -319,7 +334,42 @@ private:
     std::uniform_real_distribution<double> x_dist_;
     std::uniform_real_distribution<double> y_dist_;
 
-    // -------------------- Helper Functions to Determine Vehicle Type --------------------
+    // -------------------- Helper Functions --------------------
+    std::vector<int8_t> inflate_obstacles(const std::vector<int8_t> &grid, double inflation_radius)
+    {
+        std::vector<int8_t> inflated_grid = grid;
+        int inflation_cells = static_cast<int>(std::ceil(inflation_radius / grid_resolution_));
+
+        for (int y = 0; y < grid_height_; ++y)
+        {
+            for (int x = 0; x < grid_width_; ++x)
+            {
+                int idx = y * grid_width_ + x;
+                if (grid[idx] == 100 || grid[idx] == 50)
+                {
+                    for (int dx = -inflation_cells; dx <= inflation_cells; ++dx)
+                    {
+                        for (int dy = -inflation_cells; dy <= inflation_cells; ++dy)
+                        {
+                            int nx = x + dx;
+                            int ny = y + dy;
+                            if (nx < 0 || nx >= grid_width_ || ny < 0 || ny >= grid_height_)
+                                continue;
+                            double dist = std::sqrt(dx * dx + dy * dy) * grid_resolution_;
+                            if (dist <= inflation_radius)
+                            {
+                                int n_idx = ny * grid_width_ + nx;
+                                if (inflated_grid[n_idx] != 100) // Avoid overwriting existing hard obstacles
+                                    inflated_grid[n_idx] = 50;   // Mark inflated cells as soft obstacles
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return inflated_grid;
+    }
+
     // For simplicity, assume names containing "Husky" are UGVs and those containing "Drone" are drones.
     bool isUGV(const VehicleInfo &veh)
     {
@@ -629,16 +679,48 @@ private:
         double curr_x = start_x_, curr_y = start_y_, curr_time = 0.0, curr_theta = start_yaw_;
 
         // Lambda to compute time increment along a segment.
-        auto compute_dt = [this](double x0, double y0, double x1, double y1, double current_theta) -> double
+        auto compute_dt = [this](double x0, double y0,
+                                 double x1, double y1,
+                                 double current_theta) -> double
         {
-            double dx = x1 - x0, dy = y1 - y0;
+            // 1) Linear distance
+            double dx = x1 - x0;
+            double dy = y1 - y0;
             double distance = std::sqrt(dx * dx + dy * dy);
-            double t_linear = distance / max_linear_velocity_;
+
+            // 2) Trapezoidal motion profile: accel → coast → decel
+            double v0 = 0.0; // assume start‐at‐rest each segment
+            double vmax = max_linear_velocity_;
+            double a = max_linear_acceleration_;
+
+            // time to accelerate to vmax
+            double t_acc = (vmax - v0) / a;
+            double d_acc = 0.5 * (v0 + vmax) * t_acc;
+            double t_dec = t_acc; // symmetric decel back to stop
+            double d_dec = d_acc;
+
+            double d_remain = distance - (d_acc + d_dec);
+            double t_coast = d_remain > 0.0 ? d_remain / vmax : 0.0;
+
+            double t_linear;
+            if (d_remain > 0.0)
+            {
+                // can reach vmax
+                t_linear = t_acc + t_coast + t_dec;
+            }
+            else
+            {
+                // too short to hit vmax → triangular profile
+                t_linear = 2.0 * std::sqrt(distance / a);
+            }
+
+            // 3) Yaw‐change time (kept proportional to the linear time as before)
             double new_heading = std::atan2(dy, dx);
             double dtheta = std::fabs(new_heading - current_theta);
             if (dtheta > M_PI)
-                dtheta = 2 * M_PI - dtheta;
+                dtheta = 2.0 * M_PI - dtheta;
             double t_angular = (dtheta / max_turn_angle_rad_) * t_linear;
+
             return t_linear + t_angular;
         };
 
@@ -658,7 +740,18 @@ private:
                 int start_cell_y = static_cast<int>(std::floor((curr_y - grid_origin_y_) / grid_resolution_));
                 int goal_cell_x = static_cast<int>(std::floor((goal_x - grid_origin_x_) / grid_resolution_));
                 int goal_cell_y = static_cast<int>(std::floor((goal_y - grid_origin_y_) / grid_resolution_));
+
+                double effective_inflation = inflation_radius_;
+                if (robot_name_.find("Drone") != std::string::npos && !use_k_rrt_for_checkpoints_)
+                {
+                    effective_inflation = uav_astar_inflation_radius_;
+                }
+                std::vector<int8_t> inflated_grid = inflate_obstacles(dynamic_occupancy_grid_, effective_inflation);
+
+                std::swap(dynamic_occupancy_grid_, inflated_grid);
                 auto path_cells = a_star(start_cell_x, start_cell_y, goal_cell_x, goal_cell_y);
+                std::swap(dynamic_occupancy_grid_, inflated_grid); // restore original grid
+
                 for (size_t i = 1; i < path_cells.size(); ++i)
                 {
                     int cell_x = path_cells[i].first;
@@ -785,7 +878,7 @@ private:
                     }
                     // Check collision along the new step.
                     if (!check_line_free_bresenham(std::make_tuple(nearest.x, nearest.y, start_z_, 0.0),
-                                                   std::make_tuple(new_x, new_y, start_z_, 0.0)))
+                                                   std::make_tuple(new_x, new_y, start_z_, 0.0), inflation_radius_))
                     {
                         continue;
                     }
@@ -938,7 +1031,7 @@ private:
                     continue;
                 }
                 if (!check_line_free_bresenham(std::make_tuple(nearest.x, nearest.y, start_z_, 0.0),
-                                               std::make_tuple(new_x, new_y, start_z_, 0.0)))
+                                               std::make_tuple(new_x, new_y, start_z_, 0.0), inflation_radius_))
                 {
                     continue;
                 }
@@ -1026,28 +1119,23 @@ private:
         }
         else
         {
-            // Otherwise, plan a random segment first, then the checkpoint segments.
-            double checkpoint_total_length = 0.0;
-            double last_x = curr_x, last_y = curr_y;
-            for (const auto &pt : provided_waypoints_)
-            {
-                double cp_x = std::get<0>(pt);
-                double cp_y = std::get<1>(pt);
-                checkpoint_total_length += std::sqrt((cp_x - last_x) * (cp_x - last_x) +
-                                                     (cp_y - last_y) * (cp_y - last_y));
-                last_x = cp_x;
-                last_y = cp_y;
-            }
-            double random_length = trajectory_length_ - checkpoint_total_length;
-            if (random_length < 0)
-                random_length = 0;
-            auto rand_seg_pair = plan_random_segment(random_length);
+            // Plan only the random segment with the specified trajectory_length_
+            auto rand_seg_pair = plan_random_segment(trajectory_length_);
             dense_full_traj = rand_seg_pair.first;
             sparse_full_traj = rand_seg_pair.second;
+
+            // Update current state to end of random segment
             curr_x = std::get<0>(rand_seg_pair.second.back());
             curr_y = std::get<1>(rand_seg_pair.second.back());
             curr_time = std::get<3>(rand_seg_pair.second.back());
-            // Now, plan each checkpoint segment.
+            if (rand_seg_pair.second.size() >= 2)
+            {
+                double prev_x = std::get<0>(rand_seg_pair.second[rand_seg_pair.second.size() - 2]);
+                double prev_y = std::get<1>(rand_seg_pair.second[rand_seg_pair.second.size() - 2]);
+                curr_theta = std::atan2(curr_y - prev_y, curr_x - prev_x);
+            }
+
+            // Plan checkpoint segments sequentially (length-unbounded)
             for (const auto &pt : provided_waypoints_)
             {
                 double goal_x = std::get<0>(pt);
@@ -1376,17 +1464,42 @@ private:
     // Computes the time increment to traverse from (x0, y0) to (x1, y1)
     // given the current heading (current_theta). It uses the member variables
     // max_linear_velocity_ and max_turn_angle_rad_.
-    double compute_dt_segment(double x0, double y0, double x1, double y1, double current_theta)
+    double compute_dt_segment(double x0, double y0,
+                                                 double x1, double y1,
+                                                 double current_theta)
     {
         double dx = x1 - x0;
         double dy = y1 - y0;
         double distance = std::sqrt(dx * dx + dy * dy);
-        double t_linear = distance / max_linear_velocity_;
+
+        double v0 = 0.0;
+        double vmax = max_linear_velocity_;
+        double a = max_linear_acceleration_;
+
+        double t_acc = (vmax - v0) / a;
+        double d_acc = 0.5 * (v0 + vmax) * t_acc;
+        double t_dec = t_acc;
+        double d_dec = d_acc;
+
+        double d_remain = distance - (d_acc + d_dec);
+        double t_coast = d_remain > 0.0 ? d_remain / vmax : 0.0;
+
+        double t_linear;
+        if (d_remain > 0.0)
+        {
+            t_linear = t_acc + t_coast + t_dec;
+        }
+        else
+        {
+            t_linear = 2.0 * std::sqrt(distance / a);
+        }
+
         double new_heading = std::atan2(dy, dx);
         double dtheta = std::fabs(new_heading - current_theta);
         if (dtheta > M_PI)
-            dtheta = 2 * M_PI - dtheta;
+            dtheta = 2.0 * M_PI - dtheta;
         double t_angular = (dtheta / max_turn_angle_rad_) * t_linear;
+
         return t_linear + t_angular;
     }
 
@@ -1415,7 +1528,18 @@ private:
             int start_cell_y = static_cast<int>(std::floor((init_y - grid_origin_y_) / grid_resolution_));
             int goal_cell_x = static_cast<int>(std::floor((goal_x - grid_origin_x_) / grid_resolution_));
             int goal_cell_y = static_cast<int>(std::floor((goal_y - grid_origin_y_) / grid_resolution_));
+
+            double effective_inflation = inflation_radius_;
+            if (robot_name_.find("Drone") != std::string::npos && !use_k_rrt_for_checkpoints_)
+            {
+                effective_inflation = uav_astar_inflation_radius_;
+            }
+            std::vector<int8_t> inflated_grid = inflate_obstacles(dynamic_occupancy_grid_, effective_inflation);
+
+            std::swap(dynamic_occupancy_grid_, inflated_grid);
             auto path_cells = a_star(start_cell_x, start_cell_y, goal_cell_x, goal_cell_y);
+            std::swap(dynamic_occupancy_grid_, inflated_grid); // restore original grid
+
             for (size_t i = 1; i < path_cells.size(); ++i)
             {
                 int cell_x = path_cells[i].first;
@@ -1533,7 +1657,7 @@ private:
                     continue;
                 }
                 if (!check_line_free_bresenham(std::make_tuple(nearest.x, nearest.y, init_z, 0.0),
-                                               std::make_tuple(new_x, new_y, init_z, 0.0)))
+                                               std::make_tuple(new_x, new_y, init_z, 0.0), inflation_radius_))
                 {
                     continue;
                 }
@@ -1691,6 +1815,7 @@ private:
                 // Use the UGV dynamic grid for planning.
                 dynamic_occupancy_grid_ = dynamic_ground_grid_;
                 trajectory_.clear();
+                inflation_radius_ = ugv_inflation_radius_; // setting obstacle inflation specific to ugv
                 auto seg_pair = plan_trajectory();
                 update_dynamic_occupancy_grid(seg_pair.first, dynamic_ground_grid_);
                 publish_updated_occupancy_grid(dynamic_ground_grid_, false);
@@ -1713,14 +1838,16 @@ private:
         // Copy the drone occupancy grid into the drone dynamic grid.
         dynamic_drone_grid_ = occupancy_grid_drone_;
 
-        // Merge UGV-explored cells from dynamic_ground_grid_ into dynamic_drone_grid_.
+        // Merge only the *unknown* drone cells that UGV has now explored:
         if (dynamic_ground_grid_.size() == dynamic_drone_grid_.size())
         {
             for (size_t i = 0; i < dynamic_drone_grid_.size(); i++)
             {
-                // 0 means explored free.
-                if (dynamic_ground_grid_[i] == 0)
+                // if UGV says “free” AND drone still thought it was unknown (-1), now mark explored (0)
+                if (dynamic_ground_grid_[i] == 0 && dynamic_drone_grid_[i] == -1)
+                {
                     dynamic_drone_grid_[i] = 0;
+                }
             }
         }
         else
@@ -1805,6 +1932,9 @@ private:
                     {
                         RCLCPP_ERROR(this->get_logger(), "Companion UGV trajectory for %s not found", companion.c_str());
                         // Fallback to default (RandomExplore) planning.
+
+                        inflation_radius_ = uav_inflation_radius_;
+
                         auto seg_pair = plan_trajectory();
                         update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
                         publish_updated_occupancy_grid(dynamic_drone_grid_, true);
@@ -1818,6 +1948,7 @@ private:
                     else
                     {
                         // Plan the convoy trajectory by tracking the companion UGV's sparse trajectory.
+                        inflation_radius_ = uav_inflation_radius_;
                         auto seg_pair = plan_convoy_trajectory(ugv_traj_it->second);
                         update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
                         publish_updated_occupancy_grid(dynamic_drone_grid_, true);
@@ -1830,6 +1961,9 @@ private:
                 }
                 else
                 { // "RandomExplore" mode (default behavior)
+
+                    inflation_radius_ = uav_inflation_radius_;
+
                     auto seg_pair = plan_trajectory();
                     update_dynamic_occupancy_grid(seg_pair.first, dynamic_drone_grid_);
                     publish_updated_occupancy_grid(dynamic_drone_grid_, true);

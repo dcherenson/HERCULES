@@ -4,7 +4,7 @@
 // commands the UGV to sequentially pass through them using the
 // CarRpcLibClient's moveOnPath function.
 //
-// Usage: UGV_Waypoint_Following <UGVName> <WaypointFilePath>
+// Usage: UGV_Waypoint_Following <UGVName> <UGVLinearVelocity> <WaypointFilePath> [ControlHz]
 
 #include "common/common_utils/StrictMode.hpp"
 STRICT_MODE_OFF
@@ -55,9 +55,9 @@ std::vector<Vector3r> loadWaypoints(const string &file_path, float fixed_z)
         std::istringstream iss(line);
         float x, y, z;
         if (iss >> x >> y >> z)
-            waypoints.push_back(Vector3r(x, y, z));
+            waypoints.emplace_back(x, y, z);
         else if (iss >> x >> y)
-            waypoints.push_back(Vector3r(x, y, fixed_z));
+            waypoints.emplace_back(x, y, fixed_z);
     }
     file.close();
     return waypoints;
@@ -65,51 +65,71 @@ std::vector<Vector3r> loadWaypoints(const string &file_path, float fixed_z)
 
 int main(int argc, char *argv[])
 {
-    if (argc != 4)
+    // Accept 3 or 4 args: name, speed, file, [control loop Hz]
+    if (argc < 4 || argc > 5)
     {
-        cerr << "Usage: " << argv[0] << " <UGVName> <UGVLinearVelocity> <WaypointFilePath>" << endl;
+        cerr << "Usage: " << argv[0]
+             << " <UGVName> <UGVLinearVelocity> <WaypointFilePath> [ControlHz]" << endl;
         return 1;
     }
 
+    // Parse required args
     string ugv_name = argv[1];
-    string ugv_linear_vel = argv[2];
+    float desired_velocity = std::stof(argv[2]);
     string waypoint_file = argv[3];
 
-    // For a ground vehicle, you can assume a fixed z value (e.g. 0 meters).
+    // Optional control-loop frequency (Hz), default = 10 Hz
+    float control_freq = 10.0f;
+    if (argc == 5)
+    {
+        control_freq = std::stof(argv[4]);
+        if (control_freq <= 0.0f)
+        {
+            cerr << "Invalid ControlHz '" << argv[4]
+                 << "', using default 10 Hz." << endl;
+            control_freq = 10.0f;
+        }
+    }
+
+    // Fixed Z for ground vehicle
     float fixed_z = 0.0f;
 
-    // Load the waypoints.
+    // Load waypoints
     std::vector<Vector3r> waypoints = loadWaypoints(waypoint_file, fixed_z);
     if (waypoints.empty())
     {
-        cerr << "[" << ugv_name << "] No valid waypoints found in file: " << waypoint_file << endl;
+        cerr << "[" << ugv_name << "] No valid waypoints found in file: "
+             << waypoint_file << endl;
         return 1;
     }
-    cout << "[" << ugv_name << "] Loaded " << waypoints.size() << " waypoints." << endl;
+    cout << "[" << ugv_name << "] Loaded " << waypoints.size()
+         << " waypoints." << endl;
 
-    // Create a CarRpcLibClient instance.
-    // (Adjust the IP address, port, and timeout as needed.)
-    msr::airlib::CarRpcLibClient client("127.0.0.1", 41452, 60);
-    // msr::airlib::CarRpcLibClient client;
+    // Create and configure client
+    CarRpcLibClient client("127.0.0.1", 41452, 60); // adjust IP/port/timeout if needed
     client.confirmConnection();
     client.enableApiControl(true, ugv_name);
 
-    // (Optional) You may wish to perform any additional initialization here.
+    cout << "[" << ugv_name << "] Starting waypoint navigation at "
+         << control_freq << " Hz control loop..." << endl;
 
-    cout << "[" << ugv_name << "] Starting waypoint navigation..." << endl;
+    // Parameters for moveOnPath
+    float timeout_sec = 1e6f; // max allowed time (s)
+    float lookahead = 4.0f;   // lookahead distance (m)
 
-    // Define parameters for the moveOnPath function.
-    float desired_velocity = std::stof(argv[2]); // Desired speed in m/s.
+    // Execute
+    bool success = client.moveOnPath(
+        waypoints,
+        desired_velocity,
+        timeout_sec,
+        lookahead,
+        ugv_name,
+        control_freq);
 
-    float timeout_sec = 100000.0f; // Total allowed time (in seconds) for the maneuver.
-    float lookahead = 4.0f;      // Lookahead distance (in meters).
-
-    // Call the moveOnPath function (which you added to CarRpcLibClient).
-    bool success = client.moveOnPath(waypoints, desired_velocity, timeout_sec,
-                                     lookahead, ugv_name);
     if (!success)
     {
-        cerr << "[" << ugv_name << "] Failed to complete the waypoint mission." << endl;
+        cerr << "[" << ugv_name << "] Failed to complete the waypoint mission."
+             << endl;
         return 1;
     }
 

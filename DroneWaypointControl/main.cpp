@@ -56,17 +56,22 @@ std::vector<Vector3r> loadWaypoints(const std::string &file_path, float fixed_z)
 
 int main(int argc, char *argv[])
 {
-    if (argc < 3 || argc > 5)
+    if (argc < 3 || argc > 6)
     {
-        std::cerr << "Usage: " << argv[0] << " <DroneName> <WaypointFilePath> [WaypointVelocity] [FlyAltitude]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <DroneName> <WaypointFilePath> [WaypointVelocity] [FlyAltitude] [--no-return-home]" << std::endl;
         return 1;
     }
 
     std::string drone_name = argv[1];
     std::string waypoint_file = argv[2];
     float waypoint_flight_velocity = (argc >= 4) ? std::stof(argv[3]) : 2.0f;
-    float fly_altitude = (argc == 5) ? std::stof(argv[4]) : -35.0f;
+    float fly_altitude = (argc >= 5) ? std::stof(argv[4]) : -35.0f;
     float return_home_velocity = 3.0f;
+    bool enable_return_home = true;
+    if (argc == 6 && std::string(argv[5]) == "--no-return-home")
+    {
+        enable_return_home = false;
+    }
 
     try
     {
@@ -89,10 +94,6 @@ int main(int argc, char *argv[])
         std::cout << "[" << drone_name << "] Moving to altitude " << -fly_altitude << " meters..." << std::endl;
         client.moveToZAsync(fly_altitude, 5.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
 
-        // // Block until user hits Enter
-        // std::cout << "[" << drone_name << "] Reached target altitude. Press ENTER to begin waypoint navigation..." << std::endl;
-        // std::cin.get();
-
         std::vector<Vector3r> waypoints = loadWaypoints(waypoint_file, fly_altitude);
         if (waypoints.empty())
         {
@@ -103,30 +104,50 @@ int main(int argc, char *argv[])
         std::cout << "[" << drone_name << "] Flying through " << waypoints.size()
                   << " waypoints at velocity " << waypoint_flight_velocity << " m/s..." << std::endl;
 
-        client.moveOnPathAsync(waypoints, waypoint_flight_velocity, 120.0f,
+        client.moveOnPathAsync(waypoints, waypoint_flight_velocity, 100000.0f,
                                DrivetrainType::ForwardOnly,
-                               YawMode(false, 0), 20.0f, 1.0f,
+                               YawMode(false, 0), 4.0f, 1.0f,
                                drone_name)
             ->waitOnLastTask();
 
         sleep_for_seconds(2);
 
-        std::cout << "[" << drone_name << "] Returning to origin and landing..." << std::endl;
-        client.moveToPositionAsync(0, 0, fly_altitude, return_home_velocity, 30.0f,
-                                   DrivetrainType::ForwardOnly,
-                                   YawMode(false, 0), -1.0f, 1.0f,
-                                   drone_name)
-            ->waitOnLastTask();
+        if (enable_return_home)
+        {
+            Vector3r home_position = waypoints.front();
 
-        std::cout << "[" << drone_name << "] Hovering before landing..." << std::endl;
-        client.hoverAsync(drone_name)->waitOnLastTask();
-        sleep_for_seconds(5);
+            std::cout << "[" << drone_name << "] Returning to home waypoint ("
+                      << home_position.x() << ", " << home_position.y() << ", " << home_position.z() << ")..." << std::endl;
 
-        client.moveToZAsync(-2.0f, 5.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
-        sleep_for_seconds(2);
+            client.moveToPositionAsync(home_position.x(), home_position.y(), home_position.z(),
+                                       return_home_velocity, 10000.0f,
+                                       DrivetrainType::ForwardOnly,
+                                       YawMode(false, 0), -1.0f, 1.0f,
+                                       drone_name)
+                ->waitOnLastTask();
 
-        std::cout << "[" << drone_name << "] Initiating landing..." << std::endl;
-        client.landAsync(60.0f, drone_name)->waitOnLastTask();
+            std::cout << "[" << drone_name << "] Hovering before landing..." << std::endl;
+            client.hoverAsync(drone_name)->waitOnLastTask();
+            sleep_for_seconds(5);
+
+            client.moveToZAsync(-2.0f, 5.0f, 1000.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
+            sleep_for_seconds(2);
+
+            std::cout << "[" << drone_name << "] Initiating landing..." << std::endl;
+            client.landAsync(60.0f, drone_name)->waitOnLastTask();
+        }
+        else
+        {
+            std::cout << "[" << drone_name << "] Hovering in place after completing waypoints (return-home disabled)..." << std::endl;
+            client.hoverAsync(drone_name)->waitOnLastTask();
+            sleep_for_seconds(5);
+
+            std::cout << "[" << drone_name << "] Descending vertically and landing..." << std::endl;
+            client.moveToZAsync(-2.0f, 5.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
+            sleep_for_seconds(2);
+
+            client.landAsync(60.0f, drone_name)->waitOnLastTask();
+        }
 
         client.armDisarm(false, drone_name);
         client.enableApiControl(false, drone_name);

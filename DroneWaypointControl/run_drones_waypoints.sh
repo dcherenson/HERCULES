@@ -2,29 +2,34 @@
 
 # Absolute path to your executable
 # EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_debug/output/bin/DroneWaypointControl
-EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
+# EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
+EXECUTABLE_PATH=/home/dellg16ssg/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
 
 # Base path for waypoint files
 # BEVP random explore motion
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_random_explore"
+# WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_random_explore"
 
 # BEVP convoy motion
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy"
+# WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_convoy"
 
 # CSLAM random explore motion
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
-
-# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
+WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
 
 # Default number of drones if none specified
 DEFAULT_NUM_DRONES=1
 
 # Default velocity
-VELOCITY=1.5
+VELOCITY=1.4
 
 # Default fly altitude
 FLY_ALTITUDE=-10.0
 # FLY_ALTITUDE=-35.0
+
+# Manually set return-home behavior (set to true or false)
+DISABLE_RETURN_HOME=true
 
 # Check if a velocity argument was provided via environment variable
 if [[ -n "$WAYPOINT_VELOCITY" ]]; then
@@ -36,6 +41,12 @@ if [[ -n "$FLY_ALTITUDE" ]]; then
     ALTITUDE=$FLY_ALTITUDE
 else
     ALTITUDE=$FLY_ALTITUDE
+fi
+
+# Return home behavior flag
+RETURN_HOME=true
+if [[ "$DISABLE_RETURN_HOME" == "true" ]]; then
+    RETURN_HOME=false
 fi
 
 # Store PIDs to wait on
@@ -52,38 +63,39 @@ usage() {
     echo "  WAYPOINT_VELOCITY=3.5 $0 Drone1"
     echo "To also set flight altitude, use:"
     echo "  WAYPOINT_VELOCITY=3.5 FLY_ALTITUDE=-50.0 $0 Drone1"
+    echo "To disable return-to-home:"
+    echo "  DISABLE_RETURN_HOME=true $0 Drone1"
     exit 1
+}
+
+# Launch function
+launch_drone() {
+    DRONE_NAME=$1
+    WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
+
+    echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s and altitude ${ALTITUDE} m"
+    if [[ "$RETURN_HOME" == "true" ]]; then
+        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" &
+    else
+        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" --no-return-home &
+    fi
+    PIDS+=($!)
 }
 
 # Determine what mode we're running
 if [[ $# -eq 0 ]]; then
     # Default: run from 1 to DEFAULT_NUM_DRONES
     for i in $(seq 1 $DEFAULT_NUM_DRONES); do
-        DRONE_NAME="Drone$i"
-        WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
-
-        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s and altitude ${ALTITUDE} m"
-        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" &
-        PIDS+=($!)
+        launch_drone "Drone$i"
     done
 elif [[ $# -eq 1 ]]; then
     if [[ $1 =~ ^Drone[0-9]+$ ]]; then
         # Run only a specific drone like Drone3
-        DRONE_NAME="$1"
-        WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
-
-        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s and altitude ${ALTITUDE} m"
-        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" &
-        PIDS+=($!)
+        launch_drone "$1"
     elif [[ $1 =~ ^[0-9]+$ ]]; then
         # Run from Drone1 to DroneN
         for i in $(seq 1 $1); do
-            DRONE_NAME="Drone$i"
-            WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
-
-            echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s and altitude ${ALTITUDE} m"
-            $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" &
-            PIDS+=($!)
+            launch_drone "Drone$i"
         done
     else
         usage
@@ -112,3 +124,6 @@ echo "Completed all requested drone flights."
 
 # Run Drone3 with 4.0 m/s velocity and -50.0 m altitude
 # WAYPOINT_VELOCITY=4.0 FLY_ALTITUDE=-50.0 ./run_drones.sh Drone3
+
+# Run Drone1 without return to home
+# DISABLE_RETURN_HOME=true ./run_drones.sh Drone1
