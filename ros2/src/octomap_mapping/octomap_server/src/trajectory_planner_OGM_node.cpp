@@ -725,7 +725,8 @@ private:
         };
 
         // Lambda: plan a segment from current state to a given goal.
-        auto plan_segment = [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double goal_x, double goal_y, double goal_z) -> std::pair<TrajVec, TrajVec>
+        auto plan_segment =
+            [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double goal_x, double goal_y, double goal_z) -> std::pair<TrajVec, TrajVec>
         {
             if (!use_k_rrt_for_checkpoints_)
             {
@@ -733,6 +734,7 @@ private:
                 TrajVec seg_dense, seg_sparse;
                 seg_dense.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
                 seg_sparse.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
+
                 // Build a raw path using A*.
                 std::vector<std::pair<double, double>> raw_path;
                 raw_path.push_back({curr_x, curr_y});
@@ -760,6 +762,7 @@ private:
                     double wy = grid_origin_y_ + (cell_y + 0.5) * grid_resolution_;
                     raw_path.push_back({wx, wy});
                 }
+
                 // Smooth the raw path.
                 auto smooth_path_result = smoothPath(raw_path, 50, 0.1);
                 double turn_threshold = 1.0;
@@ -768,12 +771,53 @@ private:
                 {
                     refined_path = refineSharpTurns(refined_path, turn_threshold);
                 }
-                // Build dense segment.
+
+                // ───────────────────────────────────────────────────────────────────
+                // Inserted block: clamp the very first turn so it never exceeds max_turn_angle_rad_.
+                if (refined_path.size() > 1)
+                {
+                    // Current robot position:
+                    double x0 = curr_x;
+                    double y0 = curr_y;
+                    // First waypoint from the refined path:
+                    double x1 = refined_path[1].first;
+                    double y1 = refined_path[1].second;
+
+                    // Angle from (x0,y0) → (x1,y1):
+                    double phi = std::atan2(y1 - y0, x1 - x0);
+
+                    // Compute Δθ = phi − curr_theta, wrapped into [−π, +π]:
+                    double dtheta = phi - curr_theta;
+                    while (dtheta > M_PI)
+                        dtheta -= 2.0 * M_PI;
+                    while (dtheta < -M_PI)
+                        dtheta += 2.0 * M_PI;
+
+                    // If the initial turn exceeds max_turn_angle_rad_, clamp it:
+                    if (std::fabs(dtheta) > max_turn_angle_rad_)
+                    {
+                        // Allow only ±max_turn_angle_rad_ at t = 0
+                        double clamped_theta = curr_theta + ((dtheta > 0) ? max_turn_angle_rad_ : -max_turn_angle_rad_);
+
+                        // Keep the same straight‐line distance but rotated to clamped_theta:
+                        double dist01 = std::hypot(x1 - x0, y1 - y0);
+                        double new_x1 = x0 + dist01 * std::cos(clamped_theta);
+                        double new_y1 = y0 + dist01 * std::sin(clamped_theta);
+
+                        // Overwrite the first waypoint in refined_path:
+                        refined_path[1].first = new_x1;
+                        refined_path[1].second = new_y1;
+                    }
+                }
+                // ───────────────────────────────────────────────────────────────────
+
+                // Build dense segment using (possibly) “clamped” refined_path:
                 {
                     double prev_x = refined_path.front().first;
                     double prev_y = refined_path.front().second;
                     double time_acc = curr_time;
                     double local_theta = curr_theta;
+
                     for (size_t i = 1; i < refined_path.size(); ++i)
                     {
                         double wx = refined_path[i].first;
@@ -786,13 +830,15 @@ private:
                         prev_y = wy;
                     }
                 }
-                // Build sparse segment by sparsification.
+
+                // Build sparse segment by sparsification (unchanged):
                 {
                     auto sparsified_path = sparsifyPath(refined_path, 0.05);
                     double prev_x = sparsified_path.front().first;
                     double prev_y = sparsified_path.front().second;
                     double time_acc = curr_time;
                     double local_theta = curr_theta;
+
                     for (size_t i = 1; i < sparsified_path.size(); ++i)
                     {
                         double wx = sparsified_path[i].first;
@@ -805,11 +851,12 @@ private:
                         prev_y = wy;
                     }
                 }
+
                 return std::make_pair(seg_dense, seg_sparse);
             }
             else
             {
-                // Kinodynamic-RRT based planning segment (without angular limits).
+                // Kinodynamic-RRT based planning segment (unchanged).
                 using TrajVec = std::vector<std::tuple<double, double, double, double>>;
                 struct Node
                 {
@@ -822,15 +869,15 @@ private:
                 int max_iterations = 100000;
                 bool reached = false;
                 int goal_index = -1;
-                double dt_val = 2.0; // Time increment per step.
+                double dt_val = 2.0;
                 double v = max_linear_velocity_;
-                double goal_threshold = 1.0; // Distance threshold.
+                double goal_threshold = 1.0;
 
                 for (int iter = 0; iter < max_iterations; iter++)
                 {
                     double sample_choice = std::uniform_real_distribution<double>(0.0, 1.0)(rng_);
                     double x_rand, y_rand;
-                    double bias_probability = 0.2; // 20% chance to sample the goal directly.
+                    double bias_probability = 0.2;
                     if (sample_choice < bias_probability)
                     {
                         x_rand = goal_x;
@@ -841,14 +888,14 @@ private:
                         x_rand = x_dist_(rng_);
                         y_rand = y_dist_(rng_);
                     }
-                    // Find the nearest node.
+                    // Find nearest node…
                     int nearest_index = 0;
                     double min_dist = std::numeric_limits<double>::max();
                     for (int i = 0; i < tree.size(); i++)
                     {
                         double dx = tree[i].x - x_rand;
                         double dy = tree[i].y - y_rand;
-                        double dist = std::sqrt(dx * dx + dy * dy);
+                        double dist = std::hypot(dx, dy);
                         if (dist < min_dist)
                         {
                             min_dist = dist;
@@ -859,10 +906,9 @@ private:
                     double theta_des = std::atan2(y_rand - nearest.y, x_rand - nearest.x);
                     double dtheta = theta_des - nearest.theta;
                     while (dtheta > M_PI)
-                        dtheta -= 2 * M_PI;
+                        dtheta -= 2.0 * M_PI;
                     while (dtheta < -M_PI)
-                        dtheta += 2 * M_PI;
-                    // No angular limits imposed.
+                        dtheta += 2.0 * M_PI;
                     double new_theta = nearest.theta + dtheta;
                     double step = v * dt_val;
                     double new_x = nearest.x + step * std::cos(new_theta);
@@ -870,24 +916,24 @@ private:
                     double new_time = nearest.time + dt_val;
                     double distance_cost = nearest.cost + step;
 
-                    // Check bounds.
                     if (new_x < grid_origin_x_ || new_x > grid_origin_x_ + square_size_ ||
                         new_y < grid_origin_y_ || new_y > grid_origin_y_ + square_size_)
                     {
                         continue;
                     }
-                    // Check collision along the new step.
-                    if (!check_line_free_bresenham(std::make_tuple(nearest.x, nearest.y, start_z_, 0.0),
-                                                   std::make_tuple(new_x, new_y, start_z_, 0.0), inflation_radius_))
+                    if (!check_line_free_bresenham(
+                            std::make_tuple(nearest.x, nearest.y, start_z_, 0.0),
+                            std::make_tuple(new_x, new_y, start_z_, 0.0),
+                            inflation_radius_))
                     {
                         continue;
                     }
                     Node new_node = {new_x, new_y, new_theta, new_time, distance_cost, nearest_index};
                     tree.push_back(new_node);
-                    // Check if goal reached.
+
                     double dx_goal = new_x - goal_x;
                     double dy_goal = new_y - goal_y;
-                    if (std::sqrt(dx_goal * dx_goal + dy_goal * dy_goal) < goal_threshold)
+                    if (std::hypot(dx_goal, dy_goal) < goal_threshold)
                     {
                         reached = true;
                         goal_index = tree.size() - 1;
@@ -898,13 +944,14 @@ private:
                 TrajVec seg_dense_rrt, seg_sparse_rrt;
                 if (!reached)
                 {
-                    RCLCPP_ERROR(this->get_logger(), "Kinodynamic RRT for checkpoint failed after %d iterations", max_iterations);
+                    RCLCPP_ERROR(this->get_logger(),
+                                 "Kinodynamic RRT for checkpoint failed after %d iterations", max_iterations);
                     seg_dense_rrt.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
                     seg_sparse_rrt.push_back(std::make_tuple(curr_x, curr_y, start_z_, curr_time));
                     return std::make_pair(seg_dense_rrt, seg_sparse_rrt);
                 }
 
-                // Reconstruct path.
+                // Reconstruct path…
                 std::vector<Node> path;
                 int idx = goal_index;
                 while (idx != -1)
@@ -917,7 +964,7 @@ private:
                 {
                     seg_dense_rrt.push_back(std::make_tuple(node.x, node.y, start_z_, node.time));
                 }
-                // Create sparse version by sparsification.
+                // Create sparse version by sparsification…
                 std::vector<std::pair<double, double>> densePoints;
                 for (const auto &pt : seg_dense_rrt)
                 {
@@ -942,7 +989,7 @@ private:
                 }
                 return std::make_pair(seg_dense_rrt, seg_sparse_rrt);
             }
-        };
+        }; // end of plan_segment lambda
 
         // Lambda: plan a random segment for additional trajectory if needed.
         auto plan_random_segment = [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double remaining_length) -> std::pair<TrajVec, TrajVec>
@@ -1465,8 +1512,8 @@ private:
     // given the current heading (current_theta). It uses the member variables
     // max_linear_velocity_ and max_turn_angle_rad_.
     double compute_dt_segment(double x0, double y0,
-                                                 double x1, double y1,
-                                                 double current_theta)
+                              double x1, double y1,
+                              double current_theta)
     {
         double dx = x1 - x0;
         double dy = y1 - y0;

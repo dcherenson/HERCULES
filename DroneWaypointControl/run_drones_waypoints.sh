@@ -2,8 +2,8 @@
 
 # Absolute path to your executable
 # EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_debug/output/bin/DroneWaypointControl
-# EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
-EXECUTABLE_PATH=/home/dellg16ssg/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
+EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
+# EXECUTABLE_PATH=/home/dellg16ssg/multi-robot-coordination/Cosys-AirSim/build_release/output/bin/DroneWaypointControl
 
 # Base path for waypoint files
 # BEVP random explore motion
@@ -15,8 +15,8 @@ EXECUTABLE_PATH=/home/dellg16ssg/multi-robot-coordination/Cosys-AirSim/build_rel
 # WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_convoy"
 
 # CSLAM random explore motion
-# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
-WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
+WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
+# WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
 
 # Default number of drones if none specified
 DEFAULT_NUM_DRONES=1
