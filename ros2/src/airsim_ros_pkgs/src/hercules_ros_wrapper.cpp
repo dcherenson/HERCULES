@@ -983,7 +983,7 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_lidar_msg_from_airsim(const 
     sensor_msgs::msg::PointCloud2 lidar_msg;
     // before (shows static or zero nanoseconds stamp)
     // lidar_msg.header.stamp = rclcpp::Time(lidar_data.time_stamp);
-    
+
     // after (correct sim‐time stamp from /clock)
     lidar_msg.header.stamp = nh_->get_clock()->now();
 
@@ -1626,6 +1626,56 @@ rclcpp::Time AirsimROSWrapper::update_state()
         vehicle_ros->curr_odom_.header.frame_id = vehicle_ros->vehicle_name_;
         vehicle_ros->curr_odom_.child_frame_id = vehicle_ros->odom_frame_id_;
         vehicle_ros->curr_odom_.header.stamp = vehicle_time;
+
+        // ───> NEW:  store initial‐odom and zero‐it out, otherwise subtract it:
+        if (!init_odom_received_)
+        {
+            // 1) If this is the very first “tick,” remember it:
+            init_odom_msg_ = vehicle_ros->curr_odom_;
+            init_odom_received_ = true;
+
+            // 2) Overwrite curr_odom_ to be “zero” so that
+            //    ground_truth/odom_local = identity relative to <robot_name>:
+            vehicle_ros->curr_odom_.pose.pose.position.x = 0.0;
+            vehicle_ros->curr_odom_.pose.pose.position.y = 0.0;
+            vehicle_ros->curr_odom_.pose.pose.position.z = 0.0;
+            vehicle_ros->curr_odom_.pose.pose.orientation.x = 0.0;
+            vehicle_ros->curr_odom_.pose.pose.orientation.y = 0.0;
+            vehicle_ros->curr_odom_.pose.pose.orientation.z = 0.0;
+            vehicle_ros->curr_odom_.pose.pose.orientation.w = 1.0;
+        }
+        else
+        {
+            // 3) On subsequent ticks, subtract out the “initial” Odometry:
+            double px = vehicle_ros->curr_odom_.pose.pose.position.x - init_odom_msg_.pose.pose.position.x;
+            double py = vehicle_ros->curr_odom_.pose.pose.position.y - init_odom_msg_.pose.pose.position.y;
+            double pz = vehicle_ros->curr_odom_.pose.pose.position.z - init_odom_msg_.pose.pose.position.z;
+
+            // Build tf2 quaternions from init and current:
+            tf2::Quaternion q_init(
+                init_odom_msg_.pose.pose.orientation.x,
+                init_odom_msg_.pose.pose.orientation.y,
+                init_odom_msg_.pose.pose.orientation.z,
+                init_odom_msg_.pose.pose.orientation.w);
+            tf2::Quaternion q_cur(
+                vehicle_ros->curr_odom_.pose.pose.orientation.x,
+                vehicle_ros->curr_odom_.pose.pose.orientation.y,
+                vehicle_ros->curr_odom_.pose.pose.orientation.z,
+                vehicle_ros->curr_odom_.pose.pose.orientation.w);
+
+            // “Relative rotation” = inverse(init) * current
+            tf2::Quaternion q_rel = q_init.inverse() * q_cur;
+            q_rel.normalize();
+
+            vehicle_ros->curr_odom_.pose.pose.position.x = px;
+            vehicle_ros->curr_odom_.pose.pose.position.y = py;
+            vehicle_ros->curr_odom_.pose.pose.position.z = pz;
+            vehicle_ros->curr_odom_.pose.pose.orientation.x = q_rel.x();
+            vehicle_ros->curr_odom_.pose.pose.orientation.y = q_rel.y();
+            vehicle_ros->curr_odom_.pose.pose.orientation.z = q_rel.z();
+            vehicle_ros->curr_odom_.pose.pose.orientation.w = q_rel.w();
+        }
+        // ─────────────────────────────────────────────────────────────────
     }
 
     return curr_ros_time;
@@ -1899,39 +1949,86 @@ void AirsimROSWrapper::append_static_echo_tf(VehicleROS *vehicle_ros, const std:
     vehicle_ros->static_tf_msg_vec_.emplace_back(echo_tf_msg);
 }
 
-void AirsimROSWrapper::append_static_camera_tf(VehicleROS *vehicle_ros, const std::string &camera_name, const CameraSetting &camera_setting)
+void AirsimROSWrapper::append_static_camera_tf(VehicleROS *vehicle_ros,
+                                               const std::string &camera_name,
+                                               const CameraSetting &camera_setting)
 {
+    //
+    // 1) Build "<robot_name>/ground_truth/odom_local" -> "<robot_name>/<camera_name>_body"
+    //
     geometry_msgs::msg::TransformStamped static_cam_tf_body_msg;
+
+    // If the camera is marked "external" in settings.json, hang off world
     if (camera_setting.external)
     {
         static_cam_tf_body_msg.header.frame_id = world_frame_id_;
     }
     else
     {
-        // static_cam_tf_body_msg.header.frame_id = vehicle_ros->vehicle_name_ + "/" + odom_frame_id_;
-        static_cam_tf_body_msg.header.frame_id = vehicle_ros->vehicle_name_ + "/ground_truth/" + odom_frame_id_;
+        // Otherwise, hang off "<robot_name>/ground_truth/odom_local"
+        static_cam_tf_body_msg.header.frame_id =
+            vehicle_ros->vehicle_name_ + "/ground_truth/" + odom_frame_id_;
     }
-    static_cam_tf_body_msg.child_frame_id = vehicle_ros->vehicle_name_ + "/" + camera_name + "_body";
 
-    auto camera_info_data = airsim_client_images_.simGetCameraInfo(camera_name, vehicle_ros->vehicle_name_);
-    static_cam_tf_body_msg.transform = get_transform_msg_from_airsim(camera_info_data.pose.position, camera_info_data.pose.orientation);
+    // Child frame = "<robot_name>/<camera_name>_body"
+    static_cam_tf_body_msg.child_frame_id =
+        vehicle_ros->vehicle_name_ + "/" + camera_name + "_body";
 
+    // --- POSITION (use camera_setting.position exactly as written in your JSON) ---
+    // In your JSON you said "Z": -0.35   which (after convert_tf_msg_to_ros) becomes +0.35 in ROS.
+    static_cam_tf_body_msg.transform.translation.x = camera_setting.position.x();
+    static_cam_tf_body_msg.transform.translation.y = camera_setting.position.y();
+    static_cam_tf_body_msg.transform.translation.z = camera_setting.position.z(); // e.g. –0.35
+
+    // --- ROTATION (roll, pitch, yaw are in degrees in your JSON) ---
+    tf2::Quaternion q_body;
+    q_body.setRPY(
+        camera_setting.rotation.roll * (M_PI / 180.0),
+        camera_setting.rotation.pitch * (M_PI / 180.0),
+        camera_setting.rotation.yaw * (M_PI / 180.0));
+    q_body.normalize();
+
+    static_cam_tf_body_msg.transform.rotation.x = q_body.x();
+    static_cam_tf_body_msg.transform.rotation.y = q_body.y();
+    static_cam_tf_body_msg.transform.rotation.z = q_body.z();
+    static_cam_tf_body_msg.transform.rotation.w = q_body.w();
+
+    // Convert from AirSim/Unreal’s NED->ROS’s ENU convention:
     convert_tf_msg_to_ros(static_cam_tf_body_msg);
 
-    geometry_msgs::msg::TransformStamped static_cam_tf_optical_msg = static_cam_tf_body_msg;
-    if (camera_setting.external)
-    {
-        static_cam_tf_body_msg.header.frame_id = world_frame_id_;
-    }
-    else
-    {
-        // static_cam_tf_body_msg.header.frame_id = vehicle_ros->vehicle_name_ + "/" + odom_frame_id_;
-        static_cam_tf_body_msg.header.frame_id = vehicle_ros->vehicle_name_ + "/ground_truth/" + odom_frame_id_;
-    }
-    static_cam_tf_optical_msg.child_frame_id = vehicle_ros->vehicle_name_ + "/" + camera_name + "_optical";
-    static_cam_tf_optical_msg.transform = get_camera_optical_tf_from_body_tf(static_cam_tf_body_msg.transform);
-
     vehicle_ros->static_tf_msg_vec_.emplace_back(static_cam_tf_body_msg);
+
+    //
+    // 2) Build "<robot_name>/<camera_name>_body" -> "<robot_name>/<camera_name>_optical"
+    //    by post-multiplying the "body" quaternion by (0.5, –0.5, 0.5, –0.5).
+    //
+    geometry_msgs::msg::TransformStamped static_cam_tf_optical_msg = static_cam_tf_body_msg;
+
+    // Change only the child_frame_id:
+    static_cam_tf_optical_msg.child_frame_id =
+        vehicle_ros->vehicle_name_ + "/" + camera_name + "_optical";
+
+    // Body->optical quaternion (exactly as before):
+    tf2::Quaternion q_body_to_optical(0.5, -0.5, 0.5, -0.5);
+    q_body_to_optical.normalize();
+
+    // Current "body" quaternion in ROS after convert_tf_msg_to_ros:
+    tf2::Quaternion q_body_actual(
+        static_cam_tf_body_msg.transform.rotation.x,
+        static_cam_tf_body_msg.transform.rotation.y,
+        static_cam_tf_body_msg.transform.rotation.z,
+        static_cam_tf_body_msg.transform.rotation.w);
+
+    // optical_q = body_actual × (0.5, –0.5, 0.5, –0.5)
+    tf2::Quaternion q_optical = q_body_actual * q_body_to_optical;
+    q_optical.normalize();
+
+    static_cam_tf_optical_msg.transform.rotation.x = q_optical.x();
+    static_cam_tf_optical_msg.transform.rotation.y = q_optical.y();
+    static_cam_tf_optical_msg.transform.rotation.z = q_optical.z();
+    static_cam_tf_optical_msg.transform.rotation.w = q_optical.w();
+
+    // (translation stays exactly the same as "body" -> optical)
     vehicle_ros->static_tf_msg_vec_.emplace_back(static_cam_tf_optical_msg);
 }
 

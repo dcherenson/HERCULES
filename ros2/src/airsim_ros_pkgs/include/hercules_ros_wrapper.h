@@ -425,6 +425,9 @@ private:
 
     std::mutex control_mutex_;
 
+    bool init_odom_received_ = false;          // becomes true after first odom‐tick
+    nav_msgs::msg::Odometry init_odom_msg_;   // stores that very‐first Odometry
+
     // gimbal control
     bool has_gimbal_cmd_;
     GimbalCmd gimbal_cmd_;
