@@ -3,5 +3,29 @@
         pkg="octomap_server"
         exec="trajectory_planner_OGM_node"
         name="trajectory_planner_OGM"
-        output="screen" />
+        output="screen">
+
+        <param name="settings_file" value="/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json"/>
+        <param name="output_folder" value="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy/"/>
+        <param name="ground_map_topic" value="Ausenv_0mAlt_OGM_0p5m"/>
+        <param name="drone_map_topic" value="Ausenv_35mAlt_OGM_0p5m"/>
+
+    </node>
+
+    <!-- 
+        // for CSLAM, random explore motion
+        output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/";
+        output_folder_string_ = "/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore/";
+
+        // for BEVP, random explore motion
+        output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_random_explore/";
+        output_folder_string_ = "/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_random_explore/";
+
+        // for BEVP, convoy motion
+        output_folder_string_ = "/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy/";
+        output_folder_string_ = "/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_convoy/";
+
+        <param name="drone_map_topic" value="Ausenv_10mAlt_OGM_0p5m"/>
+    -->
+
 </launch>
