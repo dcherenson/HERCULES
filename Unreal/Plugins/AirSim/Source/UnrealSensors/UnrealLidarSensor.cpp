@@ -11,12 +11,12 @@
 #include <random>
 
 // ctor
-UnrealLidarSensor::UnrealLidarSensor(const AirSimSettings::LidarSetting& setting,
-	AActor* actor, const NedTransform* ned_transform)
+UnrealLidarSensor::UnrealLidarSensor(const AirSimSettings::LidarSetting &setting,
+									 AActor *actor, const NedTransform *ned_transform)
 	: LidarSimple(setting), actor_(actor), ned_transform_(ned_transform),
-	sensor_params_(getParams()),
-	draw_time_(1.05f / sensor_params_.horizontal_rotation_frequency),
-	external_(getParams().external)
+	  sensor_params_(getParams()),
+	  draw_time_(1.05f / sensor_params_.horizontal_rotation_frequency),
+	  external_(getParams().external)
 {
 	// Seed and initiate noise
 	std::random_device rd;
@@ -30,13 +30,13 @@ UnrealLidarSensor::UnrealLidarSensor(const AirSimSettings::LidarSetting& setting
 void UnrealLidarSensor::createLasers()
 {
 
-
 	msr::airlib::LidarSimpleParams params = getParams();
 
 	const auto number_of_lasers = params.number_of_channels;
 
 	float horizontal_delta = (params.horizontal_FOV_end - params.horizontal_FOV_start) / float(params.measurement_per_cycle - 1);
-	for (uint32 i = 0; i < params.measurement_per_cycle; i++) {
+	for (uint32 i = 0; i < params.measurement_per_cycle; i++)
+	{
 		horizontal_angles_.Add(params.horizontal_FOV_start + i * horizontal_delta);
 	}
 
@@ -47,7 +47,7 @@ void UnrealLidarSensor::createLasers()
 	float delta_angle = 0;
 	if (number_of_lasers > 1)
 		delta_angle = (params.vertical_FOV_upper - (params.vertical_FOV_lower)) /
-		static_cast<float>(number_of_lasers - 1);
+					  static_cast<float>(number_of_lasers - 1);
 
 	// store vertical angles for each laser
 	laser_angles_.clear();
@@ -57,20 +57,23 @@ void UnrealLidarSensor::createLasers()
 		laser_angles_.emplace_back(vertical_angle);
 	}
 
-	current_horizontal_angle_index_ = horizontal_angles_.Num()-1;
+	current_horizontal_angle_index_ = horizontal_angles_.Num() - 1;
 }
 
 // Set echo object in correct pose in physical world
-void UnrealLidarSensor::updatePose(const msr::airlib::Pose& sensor_pose, const msr::airlib::Pose& vehicle_pose)
+void UnrealLidarSensor::updatePose(const msr::airlib::Pose &sensor_pose, const msr::airlib::Pose &vehicle_pose)
 {
 	sensor_reference_frame_ = VectorMath::add(sensor_pose, vehicle_pose);
 	// DRAW DEBUG
-	if (sensor_params_.draw_sensor) {
+	if (sensor_params_.draw_sensor)
+	{
 		FVector sensor_position;
-		if (external_) {
+		if (external_)
+		{
 			sensor_position = ned_transform_->toFVector(sensor_reference_frame_.position, 100, true);
 		}
-		else {
+		else
+		{
 			sensor_position = ned_transform_->fromLocalNed(sensor_reference_frame_.position);
 		}
 		UAirBlueprintLib::DrawPoint(actor_->GetWorld(), sensor_position, 5, FColor::Black, false, draw_time_);
@@ -80,26 +83,30 @@ void UnrealLidarSensor::updatePose(const msr::airlib::Pose& sensor_pose, const m
 }
 
 // Get echo pose in Local NED
-void UnrealLidarSensor::getLocalPose(msr::airlib::Pose& sensor_pose)
+void UnrealLidarSensor::getLocalPose(msr::airlib::Pose &sensor_pose)
 {
-	FVector sensor_direction = Vector3rToFVector(VectorMath::rotateVector(VectorMath::front(), sensor_reference_frame_.orientation, 1)); ;
+	FVector sensor_direction = Vector3rToFVector(VectorMath::rotateVector(VectorMath::front(), sensor_reference_frame_.orientation, 1));
+	;
 	sensor_pose = ned_transform_->toLocalNed(FTransform(sensor_direction.Rotation(), ned_transform_->toFVector(sensor_reference_frame_.position, 100, true), FVector(1, 1, 1)));
 }
 
 // Pause Unreal simulation
-void UnrealLidarSensor::pause(const bool is_paused) {
-	if (is_paused) {
+void UnrealLidarSensor::pause(const bool is_paused)
+{
+	if (is_paused)
+	{
 		saved_clockspeed_ = UAirBlueprintLib::getUnrealClockSpeed(actor_);
 		UAirBlueprintLib::setUnrealClockSpeed(actor_, 0);
 	}
-	else {
+	else
+	{
 		UAirBlueprintLib::setUnrealClockSpeed(actor_, saved_clockspeed_);
 	}
 }
 
 // returns a point-cloud for the tick
-bool UnrealLidarSensor::getPointCloud(const msr::airlib::Pose& lidar_pose, const msr::airlib::Pose& vehicle_pose,
-	const msr::airlib::TTimeDelta delta_time, msr::airlib::vector<msr::airlib::real_T>& point_cloud, msr::airlib::vector<std::string>& groundtruth, msr::airlib::vector<msr::airlib::real_T>& point_cloud_final, msr::airlib::vector<std::string>& groundtruth_final)
+bool UnrealLidarSensor::getPointCloud(const msr::airlib::Pose &lidar_pose, const msr::airlib::Pose &vehicle_pose,
+									  const msr::airlib::TTimeDelta delta_time, msr::airlib::vector<msr::airlib::real_T> &point_cloud, msr::airlib::vector<std::string> &groundtruth, msr::airlib::vector<msr::airlib::real_T> &point_cloud_final, msr::airlib::vector<std::string> &groundtruth_final)
 {
 
 	updatePose(lidar_pose, vehicle_pose);
@@ -123,13 +130,13 @@ bool UnrealLidarSensor::getPointCloud(const msr::airlib::Pose& lidar_pose, const
 	uint32 points_to_scan_with_one_laser_temp = FMath::RoundHalfFromZero(angle_distance_of_tick / angle_distance_of_laser_measure);
 	if (points_to_scan_with_one_laser_temp <= 0)
 	{
-		//UAirBlueprintLib::LogMessageString("Lidar: ", "No points requested this frame", LogDebugLevel::Failure);
+		// UAirBlueprintLib::LogMessageString("Lidar: ", "No points requested this frame", LogDebugLevel::Failure);
 		return refresh;
 	}
 	constexpr float MAX_POINTS_IN_SCAN = 5000;
 	if (params.limit_points && points_to_scan_with_one_laser_temp * number_of_lasers > MAX_POINTS_IN_SCAN)
 	{
-		//UAirBlueprintLib::LogMessageString("Lidar Error: ", "Capping number of points to scan " + std::to_string(points_to_scan_with_one_laser_temp * number_of_lasers), LogDebugLevel::Failure);
+		// UAirBlueprintLib::LogMessageString("Lidar Error: ", "Capping number of points to scan " + std::to_string(points_to_scan_with_one_laser_temp * number_of_lasers), LogDebugLevel::Failure);
 		points_to_scan_with_one_laser_temp = MAX_POINTS_IN_SCAN / number_of_lasers;
 	}
 	const uint32 points_to_scan_with_one_laser = points_to_scan_with_one_laser_temp;
@@ -140,7 +147,8 @@ bool UnrealLidarSensor::getPointCloud(const msr::airlib::Pose& lidar_pose, const
 
 	float previous_horizontal_angle = horizontal_angles_[current_horizontal_angle_index_];
 
-	if (sensor_params_.draw_debug_points) {
+	if (sensor_params_.draw_debug_points)
+	{
 		point_cloud_draw_.clear();
 		point_cloud_draw_.assign(points_to_scan_with_one_laser * number_of_lasers, FVector());
 	}
@@ -148,23 +156,25 @@ bool UnrealLidarSensor::getPointCloud(const msr::airlib::Pose& lidar_pose, const
 	// shoot lasers
 	for (uint32 i = 1; i <= points_to_scan_with_one_laser; ++i)
 	{
-		if (current_horizontal_angle_index_ == horizontal_angles_.Num() - 1) {
+		if (current_horizontal_angle_index_ == horizontal_angles_.Num() - 1)
+		{
 			current_horizontal_angle_index_ = 0;
 		}
-		else {
+		else
+		{
 			current_horizontal_angle_index_ += 1;
 		}
 
 		float horizontal_angle = horizontal_angles_[current_horizontal_angle_index_];
-		//UE_LOG(LogTemp, Display, TEXT("horizontal_angle: %f "), horizontal_angle);
+		// UE_LOG(LogTemp, Display, TEXT("horizontal_angle: %f "), horizontal_angle);
 
-
-		if ((previous_horizontal_angle > horizontal_angle) && (point_cloud.size() != 0)) {
+		if ((previous_horizontal_angle > horizontal_angle) && (point_cloud.size() != 0))
+		{
 			if ((((int)point_cloud.size() / 3) != params.measurement_per_cycle * number_of_lasers) || (groundtruth.size() != params.measurement_per_cycle * number_of_lasers))
 			{
 				UE_LOG(LogTemp, Warning, TEXT("Pointcloud or labels incorrect size! points:%i labels:%i"), (int)(point_cloud.size() / 3), groundtruth.size());
 			}
-			//UE_LOG(LogTemp, Display, TEXT("Pointcloud completed! points:%i labels:%i"), (int)(point_cloud.size() / 3), groundtruth.size());
+			// UE_LOG(LogTemp, Display, TEXT("Pointcloud completed! points:%i labels:%i"), (int)(point_cloud.size() / 3), groundtruth.size());
 			point_cloud_final = point_cloud;
 			groundtruth_final = groundtruth;
 			point_cloud.clear();
@@ -175,18 +185,21 @@ bool UnrealLidarSensor::getPointCloud(const msr::airlib::Pose& lidar_pose, const
 		}
 
 		// check if horizontal angle is a duplicate
-		if ((horizontal_angle - previous_horizontal_angle) <= 0.00005f && (horizontal_angle - 0) >= 0.00005f) {
+		if ((horizontal_angle - previous_horizontal_angle) <= 0.00005f && (horizontal_angle - 0) >= 0.00005f)
+		{
 			UE_LOG(LogTemp, Display, TEXT("duplicate horizontal angle! angle! previous:%f current:%f"), previous_horizontal_angle, horizontal_angle);
 			continue;
 		}
 
 		// check if the laser is outside the requested horizontal FOV
-		if (!VectorMath::isAngleBetweenAngles(horizontal_angle, laser_start, laser_end)) {
+		if (!VectorMath::isAngleBetweenAngles(horizontal_angle, laser_start, laser_end))
+		{
 			UE_LOG(LogTemp, Display, TEXT("outside of FOV: %f "), horizontal_angle);
 			continue;
 		}
 
-		ParallelFor(number_of_lasers, [&](uint32 laser) {
+		ParallelFor(number_of_lasers, [&](uint32 laser)
+					{
 			float vertical_angle = laser_angles_[laser];
 			uint32 current_point_index = number_of_lasers * current_horizontal_angle_index_ + laser;
 			uint32 draw_index = number_of_lasers * i + laser;
@@ -203,38 +216,37 @@ bool UnrealLidarSensor::getPointCloud(const msr::airlib::Pose& lidar_pose, const
 				groundtruth[current_point_index] = label;
 				if (sensor_params_.draw_debug_points)
 					point_cloud_draw_[draw_index] = draw_point;
-			}
-			});
+			} });
 
-
-		
 		previous_horizontal_angle = horizontal_angles_[current_horizontal_angle_index_];
 	}
 
-	if (sensor_params_.draw_debug_points) {
+	if (sensor_params_.draw_debug_points)
+	{
 		for (uint32 j = 0; j < point_cloud_draw_.size(); j++)
 		{
 			UAirBlueprintLib::DrawPoint(
 				actor_->GetWorld(),
 				point_cloud_draw_[j],
-				5,                       //size
+				5, // size
 				FColor::Green,
-				false,                    //persistent (never goes away)
-				(1 / (sensor_params_.horizontal_rotation_frequency * 2))                //point leaves a trail on moving object
+				false,													 // persistent (never goes away)
+				(1 / (sensor_params_.horizontal_rotation_frequency * 2)) // point leaves a trail on moving object
 			);
 		}
 	}
 	return refresh;
 }
 
-FVector UnrealLidarSensor::Vector3rToFVector(const Vector3r& input_vector) {
+FVector UnrealLidarSensor::Vector3rToFVector(const Vector3r &input_vector)
+{
 	return FVector(input_vector.x(), input_vector.y(), -input_vector.z());
 }
 
 // simulate shooting a laser via Unreal ray-tracing.
-bool UnrealLidarSensor::shootLaser(const msr::airlib::Pose& lidar_pose, const msr::airlib::Pose& vehicle_pose,
-	const uint32 laser, const float horizontal_angle, const float vertical_angle,
-	const msr::airlib::LidarSimpleParams params, Vector3r &point, std::string &label, FVector& raw_point)
+bool UnrealLidarSensor::shootLaser(const msr::airlib::Pose &lidar_pose, const msr::airlib::Pose &vehicle_pose,
+								   const uint32 laser, const float horizontal_angle, const float vertical_angle,
+								   const msr::airlib::LidarSimpleParams params, Vector3r &point, std::string &label, FVector &raw_point)
 {
 	// start position
 	Vector3r start = VectorMath::add(lidar_pose, vehicle_pose).position;
@@ -244,9 +256,9 @@ bool UnrealLidarSensor::shootLaser(const msr::airlib::Pose& lidar_pose, const ms
 
 	// get ray quaternion in lidar frame (angles must be in radians)
 	msr::airlib::Quaternionr ray_q_l = msr::airlib::VectorMath::toQuaternion(
-		msr::airlib::Utils::degreesToRadians(vertical_angle),   //pitch - rotation around Y axis
-		0,                                                      //roll  - rotation around X axis
-		msr::airlib::Utils::degreesToRadians(horizontal_angle));//yaw   - rotation around Z axis
+		msr::airlib::Utils::degreesToRadians(vertical_angle),	 // pitch - rotation around Y axis
+		0,														 // roll  - rotation around X axis
+		msr::airlib::Utils::degreesToRadians(horizontal_angle)); // yaw   - rotation around Z axis
 
 	// get ray quaternion in body frame
 	msr::airlib::Quaternionr ray_q_b = VectorMath::coordOrientationAdd(ray_q_l, lidar_pose.orientation);
@@ -258,17 +270,47 @@ bool UnrealLidarSensor::shootLaser(const msr::airlib::Pose& lidar_pose, const ms
 	Vector3r end = VectorMath::rotateVector(VectorMath::front(), ray_q_w, true) * params.range + start;
 
 	FHitResult hit_result = FHitResult(ForceInit);
-	TArray<AActor*> actorArray;
-	//actorArray.Add(actor_);
-	bool is_hit;
-	if (params.external) {
-		is_hit = UAirBlueprintLib::GetObstacleAdv(actor_, ned_transform_->toFVector(start, 100, true), ned_transform_->toFVector(end, 100, true), hit_result, actorArray, ECC_Visibility, true, true);
-	}
-	else {
-		is_hit = UAirBlueprintLib::GetObstacleAdv(actor_, ned_transform_->fromLocalNed(start), ned_transform_->fromLocalNed(end), hit_result, actorArray, ECC_Visibility, true, true);
-	}
+	TArray<AActor *> actorArray;
+	// actorArray.Add(actor_);
+
+	// ___________
+	// bool is_hit;
+	// if (params.external)
+	// {
+	// 	is_hit = UAirBlueprintLib::GetObstacleAdv(actor_, ned_transform_->toFVector(start, 100, true), ned_transform_->toFVector(end, 100, true), hit_result, actorArray, ECC_Visibility, true, true);
+	// }
+	// else
+	// {
+	// 	is_hit = UAirBlueprintLib::GetObstacleAdv(actor_, ned_transform_->fromLocalNed(start), ned_transform_->fromLocalNed(end), hit_result, actorArray, ECC_Visibility, true, true);
+	// }
+	// _________________
+
+	// --- begin replacement ---
+	bool is_hit = false;
+	UAirBlueprintLib::RunCommandOnGameThread([&]()
+											 {
+		if (params.external) {
+			is_hit = UAirBlueprintLib::GetObstacleAdv(
+				actor_,
+				ned_transform_->toFVector(start, 100, true),
+				ned_transform_->toFVector(end,   100, true),
+				hit_result, actorArray,
+				ECC_Visibility, true, true
+			);
+		} else {
+			is_hit = UAirBlueprintLib::GetObstacleAdv(
+				actor_,
+				ned_transform_->fromLocalNed(start),
+				ned_transform_->fromLocalNed(end),
+				hit_result, actorArray,
+				ECC_Visibility, true, true
+			);
+		} }, /* wait = */ true);
+	// --- end replacement ---
+
 	bool ignoreMaterial = false;
-	if (hit_result.PhysMaterial != nullptr) {
+	if (hit_result.PhysMaterial != nullptr)
+	{
 		if (hit_result.PhysMaterial.Get()->GetFName().ToString().Contains("Lidar_Ignore_PhysicalMaterial"))
 			ignoreMaterial = true;
 	}
@@ -277,7 +319,7 @@ bool UnrealLidarSensor::shootLaser(const msr::airlib::Pose& lidar_pose, const ms
 
 		FVector impact_point = hit_result.ImpactPoint;
 
-		//Store the name the hit object.
+		// Store the name the hit object.
 		auto hitActor = hit_result.GetActor();
 		if (hitActor != nullptr)
 		{
@@ -286,30 +328,36 @@ bool UnrealLidarSensor::shootLaser(const msr::airlib::Pose& lidar_pose, const ms
 
 		raw_point = impact_point;
 
-		//if (label.empty())
+		// if (label.empty())
 		//{
 		//	UE_LOG(LogTemp, Warning, TEXT("Empty label!"));
-		//}
-		// If enabled add range noise
-		if (params.generate_noise) {
+		// }
+		//  If enabled add range noise
+		if (params.generate_noise)
+		{
 			// Add noise based on normal distribution taking into account scaling of noise with distance
 			float distance_noise = dist_(gen_) * (1 + ((hit_result.Distance / 100) / params.range) * (params.noise_distance_scale - 1));
 
 			Vector3r impact_point_local = VectorMath::rotateVector(VectorMath::front(), ray_q_w, true) * ((hit_result.Distance / 100) + distance_noise) + start;
-			if (params.external) {
+			if (params.external)
+			{
 				impact_point = ned_transform_->fromRelativeNed(impact_point_local);
-			} else {
+			}
+			else
+			{
 				impact_point = ned_transform_->fromLocalNed(impact_point_local);
-			}			
+			}
 		}
 
 		raw_point = impact_point;
 
 		Vector3r point_v_i;
-		if (params.external) {
+		if (params.external)
+		{
 			point_v_i = ned_transform_->toVector3r(impact_point, 0.01, true);
 		}
-		else {
+		else
+		{
 			point_v_i = ned_transform_->toLocalNed(impact_point);
 		}
 
