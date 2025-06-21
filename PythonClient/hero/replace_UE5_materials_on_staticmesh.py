@@ -1,8 +1,11 @@
 import unreal
 
 # ——— UPDATE THESE TO YOUR UE VIRTUAL PATHS ———
-mesh_path = "/Game/CitySampleBuildings/MergedMesh/CHI_1.CHI_1"
-mat_path  = "/Game/CitySampleBuildings/Material/CustomGlassMaterial/CustomGlassRed.CustomGlassRed"
+# mesh_path = "/Game/CitySampleBuildings/MergedMesh/CHI_1.CHI_1"
+# mat_path  = "/Game/CitySampleBuildings/Material/CustomGlassMaterial/CustomGlassRed.CustomGlassRed"
+
+mesh_path = "/Game/CitySampleBuildings/MergedMesh/SFA_2.SFA_2"
+mat_path  = "/Game/CitySampleBuildings/Material/CustomGlassMaterial/CustomGlassBlue.CustomGlassBlue"
 # ==============================================
 
 # 1. Load the StaticMesh asset
@@ -31,7 +34,7 @@ for idx, slot in enumerate(slot_names):
             continue
         if 12 <= num <= 63:
             static_mesh.set_material(idx, glass_mat)
-            unreal.log(f"[{idx}] {slot} → CustomGlassRed")
+            unreal.log(f"[{idx}] {slot} -> CustomGlass")
 
 # 5. Save your edits back into the asset
 unreal.EditorAssetLibrary.save_asset(mesh_path)
