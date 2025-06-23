@@ -18,30 +18,33 @@ CAR_ASSETS = [
     "/Game/CitySampleVehicles/MergedVehicleMeshes/Van1.Van1",
 ]
 
-NUM_TO_SPAWN = 13        # or len(CAR_ASSETS), or however many you want
-SPACING      = 300.0     # world units between each car on the X-axis
-Z_HEIGHT     = 100.0     # above ground
+NUM_TO_SPAWN = 25       # total actors you want
+SPACING      = 900.0    # world units between each car on the X-axis
+Z_HEIGHT     = 0.0    # above ground
 
-# Shortcuts
-lvl_lib = unreal.EditorLevelLibrary
+lvl_lib     = unreal.EditorLevelLibrary
+name_counts = {}  # track how many times each mesh has been placed
 
 for idx in range(NUM_TO_SPAWN):
     # 1) Pick & load a random mesh
     asset_path = random.choice(CAR_ASSETS)
     mesh       = unreal.load_asset(asset_path)  # UStaticMesh
+    mesh_name  = mesh.get_name()                # e.g. "Bus", "Sedan1", etc.
 
-    # 2) Compute line positions
-    x   = idx * SPACING
-    y   = 0.0
-    loc = unreal.Vector(x, y, Z_HEIGHT)
-    rot = unreal.Rotator(0, 0, 0)  # fixed orientation
+    # 2) Increment count & build unique label
+    count = name_counts.get(mesh_name, 0) + 1
+    name_counts[mesh_name] = count
+    label = f"{mesh_name}_{count}"
 
-    # 3) Spawn & assign
+    # 3) Compute line positions (orientation stays zeroed)
+    loc = unreal.Vector(idx * SPACING, 0.0, Z_HEIGHT)
+    rot = unreal.Rotator(0, 0, 0)
+
+    # 4) Spawn & assign
     actor = lvl_lib.spawn_actor_from_class(
         unreal.StaticMeshActor.static_class(), loc, rot
     )
     actor.static_mesh_component.set_static_mesh(mesh)
 
-    # 4) Rename the actor to match the mesh
-    mesh_name = mesh.get_name()            # e.g. "Bus", "Sedan1", etc.
-    actor.set_actor_label(mesh_name)
+    # 5) Rename actor in Outliner
+    actor.set_actor_label(label)
