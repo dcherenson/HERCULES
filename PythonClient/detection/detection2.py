@@ -1,45 +1,57 @@
-import setup_path 
+import setup_path
 import cosysairsim as airsim
 import cv2
-import numpy as np 
-import pprint
+import numpy as np
 
-# connect to the AirSim simulator
-client = airsim.VehicleClient()
+# 1) Connect with the multicopter client
+client = airsim.MultirotorClient()
 client.confirmConnection()
 
-# set camera name and image type to request images and detections
 camera_name = "front_center"
-image_type = airsim.ImageType.Scene
+image_type  = airsim.ImageType.Scene
 
-# set detection radius in [cm]
-client.simSetDetectionFilterRadius(camera_name, image_type, 200 * 100) 
-
+# 2) Configure detection filters
+client.simSetDetectionFilterRadius(camera_name, image_type, 200 * 100)  # 200 m
 client.simClearDetectionMeshNames(camera_name, image_type)
+client.simAddDetectionFilterMeshName( camera_name, image_type, "BP_CrowdCharacter*" )
 
-# add desired object name to detect in wild card/regex format
-client.simAddDetectionFilterMeshName(camera_name, image_type, "BP_CrowdCharacter*")
+# 3) Create and name your window once
+window_name = "Detection"
+cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
 while True:
-    rawImage = client.simGetImage(camera_name, image_type)
-    if not rawImage:
+    raw = client.simGetImage(camera_name, image_type)
+    if not raw:
+        # no image yet, just retry
         continue
-    png = cv2.imdecode(airsim.string_to_uint8_array(rawImage), cv2.IMREAD_UNCHANGED)
-    detectedObjects = client.simGetDetections(camera_name, image_type)
-    if detectedObjects:
-        for detectedObject in detectedObjects:
-            s = pprint.pformat(detectedObject)
-            print("Cylinder: %s" % s)
 
-            cv2.rectangle(png, (int(detectedObject.box2D.min.x_val), int(detectedObject.box2D.min.y_val)), (int(detectedObject.box2D.max.x_val), int(detectedObject.box2D.max.y_val)), (0, 0, 255), 5)
-            cv2.putText(png, detectedObject.name, (int(detectedObject.box2D.min.x_val), int(detectedObject.box2D.min.y_val - 10)), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+    # 4) Decode as BGR
+    arr = airsim.string_to_uint8_array(raw)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        continue
 
-    image_resized = cv2.resize(png, (0, 0), fx=0.25, fy=0.25)
-    cv2.imshow('Image Redimensionnée', image_resized)
+    # 5) Get detections and draw boxes
+    detections = client.simGetDetections(camera_name, image_type)
+    if detections:
+        for d in detections:
+            x1 = int(d.box2D.min.x_val)
+            y1 = int(d.box2D.min.y_val)
+            x2 = int(d.box2D.max.x_val)
+            y2 = int(d.box2D.max.y_val)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0,0,255), 2)
+            cv2.putText(
+                img, d.name, (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                (0,0,255), 1, cv2.LINE_AA
+            )
+
+    # 6) Resize for display and show it once
+    small = cv2.resize(img, (0,0), fx=0.25, fy=0.25)
+    cv2.imshow(window_name, small)
+
+    # 7) Handle keypress
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
-    # elif cv2.waitKey(1) & 0xFF == ord('c'):
-    #     client.simClearDetectionMeshNames(camera_name, image_type)
-    # elif cv2.waitKey(1) & 0xFF == ord('a'):
-    #     client.simAddDetectionFilterMeshName(camera_name, image_type,  "StaticMeshActor_.*_.*_.*$")
+
 cv2.destroyAllWindows()
