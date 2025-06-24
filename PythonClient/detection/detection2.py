@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import setup_path
 import cosysairsim as airsim
 import cv2
@@ -47,8 +49,11 @@ while True:
             )
 
     # 6) Resize for display and show it once
-    small = cv2.resize(img, (0,0), fx=0.25, fy=0.25)
-    cv2.imshow(window_name, small)
+    # small = cv2.resize(img, (0,0), fx=0.25, fy=0.25)
+    # cv2.imshow(window_name, small)
+    
+    display = cv2.resize(img, (1280, 720))
+    cv2.imshow(window_name, display)
 
     # 7) Handle keypress
     if cv2.waitKey(1) & 0xFF == ord('q'):
