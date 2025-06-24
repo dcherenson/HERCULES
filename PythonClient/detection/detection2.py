@@ -18,8 +18,7 @@ client.simSetDetectionFilterRadius(camera_name, image_type, 200 * 100)
 client.simClearDetectionMeshNames(camera_name, image_type)
 
 # add desired object name to detect in wild card/regex format
-client.simAddDetectionFilterMeshName(camera_name, image_type, "StaticMeshActor_UAID_*")
-
+client.simAddDetectionFilterMeshName(camera_name, image_type, "BP_CrowdCharacter*")
 
 while True:
     rawImage = client.simGetImage(camera_name, image_type)
