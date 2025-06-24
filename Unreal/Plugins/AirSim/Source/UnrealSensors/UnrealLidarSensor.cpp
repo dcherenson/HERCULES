@@ -272,42 +272,15 @@ bool UnrealLidarSensor::shootLaser(const msr::airlib::Pose &lidar_pose, const ms
 	FHitResult hit_result = FHitResult(ForceInit);
 	TArray<AActor *> actorArray;
 	// actorArray.Add(actor_);
-
-	// ___________
-	// bool is_hit;
-	// if (params.external)
-	// {
-	// 	is_hit = UAirBlueprintLib::GetObstacleAdv(actor_, ned_transform_->toFVector(start, 100, true), ned_transform_->toFVector(end, 100, true), hit_result, actorArray, ECC_Visibility, true, true);
-	// }
-	// else
-	// {
-	// 	is_hit = UAirBlueprintLib::GetObstacleAdv(actor_, ned_transform_->fromLocalNed(start), ned_transform_->fromLocalNed(end), hit_result, actorArray, ECC_Visibility, true, true);
-	// }
-	// _________________
-
-	// --- begin replacement ---
-	bool is_hit = false;
-	UAirBlueprintLib::RunCommandOnGameThread([&]()
-											 {
-		if (params.external) {
-			is_hit = UAirBlueprintLib::GetObstacleAdv(
-				actor_,
-				ned_transform_->toFVector(start, 100, true),
-				ned_transform_->toFVector(end,   100, true),
-				hit_result, actorArray,
-				ECC_Visibility, true, true
-			);
-		} else {
-			is_hit = UAirBlueprintLib::GetObstacleAdv(
-				actor_,
-				ned_transform_->fromLocalNed(start),
-				ned_transform_->fromLocalNed(end),
-				hit_result, actorArray,
-				ECC_Visibility, true, true
-			);
-		} }, /* wait = */ true);
-	// --- end replacement ---
-
+	bool is_hit;
+	if (params.external)
+	{
+		is_hit = UAirBlueprintLib::GetObstacleAdv(actor_, ned_transform_->toFVector(start, 100, true), ned_transform_->toFVector(end, 100, true), hit_result, actorArray, ECC_Visibility, true, true);
+	}
+	else
+	{
+		is_hit = UAirBlueprintLib::GetObstacleAdv(actor_, ned_transform_->fromLocalNed(start), ned_transform_->fromLocalNed(end), hit_result, actorArray, ECC_Visibility, true, true);
+	}
 	bool ignoreMaterial = false;
 	if (hit_result.PhysMaterial != nullptr)
 	{

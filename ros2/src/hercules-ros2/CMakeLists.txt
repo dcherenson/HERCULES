@@ -156,6 +156,7 @@ install(PROGRAMS
   scripts/test_depthperspective.py 
   scripts/depthvis.py 
   scripts/multi_robot_topic_monitor.py 
+  scripts/full_topic_echo.py 
   DESTINATION lib/${PROJECT_NAME}
 )
 
