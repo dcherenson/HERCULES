@@ -235,6 +235,11 @@ __pragma(warning(disable : 4239))
             return pimpl_->client.call("simGetSegmentationObjectID", mesh_name).as<int>();
         }
 
+        bool RpcLibClientBase::simAddSegmentationActor(const std::string& actor_name)
+        {
+            return pimpl_->client.call("simAddSegmentationActor", actor_name).as<bool>();
+        }
+
         vector<string> RpcLibClientBase::simListAnnotationObjects(const std::string& annotation_name) const
         {
             return pimpl_->client.call("simListAnnotationObjects", annotation_name).as<vector<string>>();

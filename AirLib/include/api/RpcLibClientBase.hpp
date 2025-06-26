@@ -78,6 +78,9 @@ namespace airlib
 
         bool simSetSegmentationObjectID(const std::string& mesh_name, int object_id, bool is_name_regex = false);
         int simGetSegmentationObjectID(const std::string& mesh_name) const;
+
+        bool simAddSegmentationActor(const std::string& actor_name);
+        
         void simPrintLogMessage(const std::string& message, std::string message_param = "", unsigned char severity = 0);
 
         vector<string> simListAnnotationObjects(const std::string& annotation_name) const;

@@ -312,6 +312,25 @@ int WorldSimApi::getSegmentationObjectID(const std::string& mesh_name) const
 	return simmode_->GetMeshInstanceSegmentationID(mesh_name);
 }
 
+bool WorldSimApi::addSegmentationActor(const std::string& actor_name)
+{
+    bool success = false;
+    UAirBlueprintLib::RunCommandOnGameThread([&]() {
+        AActor* actor = UAirBlueprintLib::FindActor<AActor>(simmode_, FString(actor_name.c_str()));
+        if (actor) {
+            success = simmode_->AddNewActorToInstanceSegmentation(actor);
+            if (success) {
+                // keep scene_object_map in sync so other APIs can find this actor
+                simmode_->scene_object_map.Add(FString(actor_name.c_str()), actor);
+            }
+        }
+        else {
+            success = false;
+        }
+    }, true);
+    return success;
+}
+
 bool WorldSimApi::setAnnotationObjectID(const std::string& annotation_name, const std::string& mesh_name, int object_id, bool is_name_regex)
 {
     return simmode_->SetMeshRGBAnnotationID(annotation_name, mesh_name, object_id, is_name_regex);

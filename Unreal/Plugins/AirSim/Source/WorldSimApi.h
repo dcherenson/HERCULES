@@ -46,6 +46,7 @@ public:
 
     virtual bool setSegmentationObjectID(const std::string& mesh_name, int object_id, bool is_name_regex = false) override;
     virtual int getSegmentationObjectID(const std::string& mesh_name) const override;
+    bool addSegmentationActor(const std::string& actor_name);
 
     virtual std::vector<std::string> listAnnotationObjects(const std::string& annotation_name) const override;
     virtual std::vector<Pose> listAnnotationPoses(const std::string& annotation_name, bool ned = true, bool only_visible = false) const override;

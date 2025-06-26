@@ -266,6 +266,10 @@ namespace airlib
             return getWorldSimApi()->getSegmentationObjectID(mesh_name);
         });
 
+        pimpl_->server.bind("simAddSegmentationActor", [&](const std::string& actor_name) {
+            return getWorldSimApi()->addSegmentationActor(actor_name);
+        });
+
         pimpl_->server.bind("simListAnnotationObjects", [&](const std::string& annotation_name) -> std::vector<string> {
             return getWorldSimApi()->listAnnotationObjects(annotation_name);
         });

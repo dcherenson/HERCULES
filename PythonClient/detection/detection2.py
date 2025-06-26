@@ -6,7 +6,8 @@ import cv2
 import numpy as np
 
 # 1) Connect with the multicopter client
-client = airsim.MultirotorClient()
+# client = airsim.MultirotorClient()
+client = airsim.CarClient(ip="127.0.0.1", port=41452)
 client.confirmConnection()
 
 camera_name = "front_center"
@@ -16,6 +17,9 @@ image_type  = airsim.ImageType.Scene
 client.simSetDetectionFilterRadius(camera_name, image_type, 200 * 100)  # 200 m
 client.simClearDetectionMeshNames(camera_name, image_type)
 client.simAddDetectionFilterMeshName( camera_name, image_type, "BP_CrowdCharacter*" )
+
+client.simAddDetectionFilterMeshName( camera_name, image_type, "Car*" )
+
 
 # 3) Create and name your window once
 window_name = "Detection"

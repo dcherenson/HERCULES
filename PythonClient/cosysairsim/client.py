@@ -822,6 +822,19 @@ class VehicleClient:
         """
         return self.client.call('simGetSegmentationObjectID', mesh_name)
 
+    def simAddSegmentationActor(self, actor_name):
+        """
+        Registers a dynamically spawned actor with the instance segmentation system.
+
+        Args:
+            actor_name (str): Name of the actor to register.
+
+        Returns:
+            bool: True if the actor was successfully registered.
+        """
+        return self.client.call('simAddSegmentationActor', actor_name)
+
+
     def simListAnnotationObjects(self, annotation_name):
         """
         Lists all annotation objects with the specified name of the layer.
