@@ -18,12 +18,15 @@ CAR_ASSETS = [
     "/Game/CitySampleVehicles/MergedVehicleMeshes/Van1.Van1",
 ]
 
-NUM_TO_SPAWN = 25       # total actors you want
+NUM_TO_SPAWN = 50       # total actors you want
 SPACING      = 900.0    # world units between each car on the X-axis
-Z_HEIGHT     = 0.0    # above ground
+Z_HEIGHT     = 10.0     # above ground
+
+# --- Add your custom suffix here ---
+SUFFIX = "_VEHTAG2"       # e.g. "_AI", "_TEST", whatever you need
 
 lvl_lib     = unreal.EditorLevelLibrary
-name_counts = {}  # track how many times each mesh has been placed
+name_counts = {}        # track how many times each mesh has been placed
 
 for idx in range(NUM_TO_SPAWN):
     # 1) Pick & load a random mesh
@@ -31,10 +34,10 @@ for idx in range(NUM_TO_SPAWN):
     mesh       = unreal.load_asset(asset_path)  # UStaticMesh
     mesh_name  = mesh.get_name()                # e.g. "Bus", "Sedan1", etc.
 
-    # 2) Increment count & build unique label
+    # 2) Increment count & build unique label with suffix
     count = name_counts.get(mesh_name, 0) + 1
     name_counts[mesh_name] = count
-    label = f"{mesh_name}_{count}"
+    label = f"{mesh_name}_{count}{SUFFIX}"
 
     # 3) Compute line positions (orientation stays zeroed)
     loc = unreal.Vector(idx * SPACING, 0.0, Z_HEIGHT)
