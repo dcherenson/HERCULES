@@ -18,12 +18,12 @@ CAR_ASSETS = [
     "/Game/CitySampleVehicles/MergedVehicleMeshes/Van1.Van1",
 ]
 
-NUM_TO_SPAWN = 50       # total actors you want
+NUM_TO_SPAWN = 15       # total actors you want
 SPACING      = 900.0    # world units between each car on the X-axis
 Z_HEIGHT     = 10.0     # above ground
 
 # --- Add your custom suffix here ---
-SUFFIX = "_VEHTAG2"       # e.g. "_AI", "_TEST", whatever you need
+SUFFIX = "_VEHTAG3"       # e.g. "_AI", "_TEST", whatever you need
 
 lvl_lib     = unreal.EditorLevelLibrary
 name_counts = {}        # track how many times each mesh has been placed
