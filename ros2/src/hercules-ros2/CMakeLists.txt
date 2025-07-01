@@ -179,6 +179,35 @@ bag_timestamp_checker_node
   DESTINATION lib/${PROJECT_NAME}
 )
 # ________________________________
+# topic time sync checker node__________________
+add_executable(topic_time_sync_checker_node
+ src/topic_time_sync_checker.cpp)
+ ament_target_dependencies(topic_time_sync_checker_node
+ rclcpp
+ std_msgs
+ sensor_msgs
+ geometry_msgs
+ nav_msgs
+ tf2
+ tf2_ros
+ tf2_sensor_msgs
+ cv_bridge
+ airsim_interfaces
+)
+
+
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+
+install(TARGETS
+topic_time_sync_checker_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+#_______________________________________________
+
+
 
 # Install Python scripts
 install(PROGRAMS
