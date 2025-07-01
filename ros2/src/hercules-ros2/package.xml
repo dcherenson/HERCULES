@@ -28,6 +28,7 @@
   <depend>rosidl_default_runtime</depend>
   <depend>octomap_msgs</depend>
   <depend>octomap</depend>
+  <depend>airsim_interfaces</depend>
   <!-- <depend>cv_bridge</depend> -->
 
   <test_depend>ament_lint_auto</test_depend>

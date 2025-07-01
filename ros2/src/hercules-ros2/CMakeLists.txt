@@ -28,7 +28,9 @@ find_package(octomap_msgs REQUIRED)
 find_package(octomap REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(cv_bridge REQUIRED)
+find_package(airsim_interfaces REQUIRED)
 
+# find_package(airsim_ros_pkgs REQUIRED)
 
 # TO BUILD WITH CUSTOM MESSAGES
 # find_package(rosidl_default_generators REQUIRED)
@@ -150,6 +152,33 @@ thermal_image_node
   DESTINATION lib/${PROJECT_NAME}
 )
 # ____________________________
+# bag timestamp checker node______
+add_executable(bag_timestamp_checker_node
+ src/bag_timestamp_checker.cpp)
+ ament_target_dependencies(bag_timestamp_checker_node
+ rclcpp
+ std_msgs
+ sensor_msgs
+ geometry_msgs
+ nav_msgs
+ tf2
+ tf2_ros
+ tf2_sensor_msgs
+ cv_bridge
+ airsim_interfaces
+)
+
+
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+
+install(TARGETS
+bag_timestamp_checker_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+# ________________________________
 
 # Install Python scripts
 install(PROGRAMS

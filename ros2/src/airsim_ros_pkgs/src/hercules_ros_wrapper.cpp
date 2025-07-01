@@ -985,6 +985,10 @@ sensor_msgs::msg::PointCloud2 AirsimROSWrapper::get_lidar_msg_from_airsim(const 
     // lidar_msg.header.stamp = rclcpp::Time(lidar_data.time_stamp);
 
     // after (correct sim‐time stamp from /clock)
+    // NOTE by SSG!!! Upstream bug with getLidarData. Enable the wrapper to publish the simulation clock (/clock) 
+    // by setting the publish_clock parameter 
+    // to true and running your node with use_sim_time=true. Once /clock is active, 
+    // stamping messages with get_clock()->now() will correctly reflect sim time
     lidar_msg.header.stamp = nh_->get_clock()->now();
 
     lidar_msg.header.frame_id = vehicle_name + "/" + sensor_name;
