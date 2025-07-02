@@ -16,20 +16,31 @@ def generate_launch_description():
     #     description='Name of the IMU topic (sensor_msgs/msg/Imu)'
     # )
 
+    # camera_arg = DeclareLaunchArgument(
+    #     'camera_topic',
+    #     default_value='/VINS/Husky1/front_center_Scene/image_greyscale',
+    #     description='Name of the camera topic (sensor_msgs/msg/Image)'
+    # )
+    # imu_arg = DeclareLaunchArgument(
+    #     'imu_topic',
+    #     default_value='/VINS/Husky1/imu',
+    #     description='Name of the IMU topic (sensor_msgs/msg/Imu)'
+    # )
+
     camera_arg = DeclareLaunchArgument(
         'camera_topic',
-        default_value='/VINS/Husky1/front_center_Scene/image_greyscale',
+        default_value='/cam0/image_raw',
         description='Name of the camera topic (sensor_msgs/msg/Image)'
     )
     imu_arg = DeclareLaunchArgument(
         'imu_topic',
-        default_value='/VINS/Husky1/imu',
+        default_value='/imu0',
         description='Name of the IMU topic (sensor_msgs/msg/Imu)'
     )
 
     tol_arg = DeclareLaunchArgument(
         'sync_tolerance',
-        default_value='0.002',
+        default_value='0.0002',
         description='Max allowed time difference (seconds) between camera & IMU'
     )
     buf_arg = DeclareLaunchArgument(
