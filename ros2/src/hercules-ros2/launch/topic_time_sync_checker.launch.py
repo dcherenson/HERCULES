@@ -5,16 +5,28 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     # Launch arguments
+    # camera_arg = DeclareLaunchArgument(
+    #     'camera_topic',
+    #     default_value='/hercules_node/Husky1/front_center_Scene/image',
+    #     description='Name of the camera topic (sensor_msgs/msg/Image)'
+    # )
+    # imu_arg = DeclareLaunchArgument(
+    #     'imu_topic',
+    #     default_value='/hercules_node/Husky1/imu/imu',
+    #     description='Name of the IMU topic (sensor_msgs/msg/Imu)'
+    # )
+
     camera_arg = DeclareLaunchArgument(
         'camera_topic',
-        default_value='/hercules_node/Husky1/front_center_Scene/image',
+        default_value='/VINS/Husky1/front_center_Scene/image_greyscale',
         description='Name of the camera topic (sensor_msgs/msg/Image)'
     )
     imu_arg = DeclareLaunchArgument(
         'imu_topic',
-        default_value='/hercules_node/Husky1/imu/imu',
+        default_value='/VINS/Husky1/imu',
         description='Name of the IMU topic (sensor_msgs/msg/Imu)'
     )
+
     tol_arg = DeclareLaunchArgument(
         'sync_tolerance',
         default_value='0.002',

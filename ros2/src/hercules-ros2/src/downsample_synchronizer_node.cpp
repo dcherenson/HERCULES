@@ -4,6 +4,8 @@
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/image_encodings.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+#include <vector>
+#include <sstream>
 
 class DownSyncNode : public rclcpp::Node
 {
@@ -14,12 +16,12 @@ public:
           cam_period_(0, 0)
     {
         // Declare parameters
-        declare_parameter<std::string>("imu_input_topic", "/imu/data_raw");
-        declare_parameter<std::string>("imu_output_topic", "/imu/downsampled");
-        declare_parameter<double>("imu_rate_hz", 2000.0);
+        declare_parameter<std::string>("imu_input_topic", "/hercules_node/Husky1/imu/imu");
+        declare_parameter<std::string>("imu_output_topic", "/VINS/Husky1/imu");
+        declare_parameter<double>("imu_rate_hz", 150.0);
 
-        declare_parameter<std::string>("cam_input_topic", "/camera/image_raw");
-        declare_parameter<std::string>("cam_output_topic", "/camera/image_gray");
+        declare_parameter<std::string>("cam_input_topic", "/hercules_node/Husky1/front_center_Scene/image");
+        declare_parameter<std::string>("cam_output_topic", "/VINS/Husky1/front_center_Scene/image_greyscale");
         declare_parameter<double>("cam_rate_hz", 20.0);
 
         // Read parameters
@@ -30,6 +32,29 @@ public:
         cam_in_topic_ = get_parameter("cam_input_topic").as_string();
         cam_out_topic_ = get_parameter("cam_output_topic").as_string();
         double cam_hz = get_parameter("cam_rate_hz").as_double();
+
+        // Deduce robot name from the IMU topic: "/hercules_node/<robot>/..."
+        {
+            std::vector<std::string> tokens;
+            std::stringstream ss(imu_in_topic_);
+            std::string item;
+            while (std::getline(ss, item, '/'))
+            {
+                if (!item.empty())
+                {
+                    tokens.push_back(item);
+                }
+            }
+            if (tokens.size() >= 2)
+            {
+                robot_name_ = tokens[1];
+            }
+            else
+            {
+                RCLCPP_WARN(get_logger(), "Could not parse robot name from '%s'", imu_in_topic_.c_str());
+                robot_name_ = "unknown";
+            }
+        }
 
         // Compute periods
         imu_period_ = rclcpp::Duration::from_seconds(1.0 / imu_hz);
@@ -52,7 +77,8 @@ public:
             std::bind(&DownSyncNode::cam_callback, this, std::placeholders::_1));
 
         RCLCPP_INFO(get_logger(),
-                    "DownSyncNode: IMU %s→%s @ %.1f Hz, Camera %s→%s @ %.1f Hz",
+                    "DownSyncNode initialized for robot '%s': IMU %s→%s @ %.1f Hz, Camera %s→%s @ %.1f Hz",
+                    robot_name_.c_str(),
                     imu_in_topic_.c_str(), imu_out_topic_.c_str(), imu_hz,
                     cam_in_topic_.c_str(), cam_out_topic_.c_str(), cam_hz);
     }
@@ -65,7 +91,10 @@ private:
         // Downsample: publish only if enough time has elapsed
         if ((now - last_imu_stamp_) >= imu_period_)
         {
-            imu_pub_->publish(*msg);
+            // Prepare output message
+            auto out = *msg;
+            out.header.frame_id = robot_name_ + "/ground_truth/odom_local";
+            imu_pub_->publish(out);
             last_imu_stamp_ = now;
         }
     }
@@ -95,17 +124,17 @@ private:
         cv::Mat gray;
         cv::cvtColor(cv_ptr->image, gray, cv::COLOR_BGR2GRAY);
 
-        // Publish grayscale image, preserving header
-        auto out_msg = cv_bridge::CvImage(
-                           msg->header,
-                           sensor_msgs::image_encodings::MONO8,
-                           gray)
-                           .toImageMsg();
-
-        cam_pub_->publish(*out_msg);
+        // Prepare and publish grayscale image
+        cv_bridge::CvImage gray_msg;
+        gray_msg.header = msg->header;
+        gray_msg.header.frame_id = robot_name_ + "/front_center_optical";
+        gray_msg.encoding = sensor_msgs::image_encodings::MONO8;
+        gray_msg.image = gray;
+        cam_pub_->publish(*gray_msg.toImageMsg());
     }
 
     // Parameters
+    std::string robot_name_;
     std::string imu_in_topic_, imu_out_topic_;
     std::string cam_in_topic_, cam_out_topic_;
     rclcpp::Duration imu_period_, cam_period_;
