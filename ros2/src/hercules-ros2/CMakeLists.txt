@@ -29,6 +29,7 @@ find_package(octomap REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(airsim_interfaces REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # find_package(airsim_ros_pkgs REQUIRED)
 
@@ -232,7 +233,35 @@ imu_republisher_node
   DESTINATION lib/${PROJECT_NAME}
 )
 # _____________________________________________
+# downsample and synchronize topics node_______
+add_executable(downsample_synchronizer_node
+ src/downsample_synchronizer_node.cpp)
+ ament_target_dependencies(downsample_synchronizer_node
+ rclcpp
+ std_msgs
+ sensor_msgs
+ geometry_msgs
+ nav_msgs
+ tf2
+ tf2_ros
+ tf2_sensor_msgs
+ cv_bridge
+ airsim_interfaces
+ cv_bridge 
+ OpenCV 
+)
 
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+
+install(TARGETS
+downsample_synchronizer_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# _____________________________________________
 
 # Install Python scripts
 install(PROGRAMS
