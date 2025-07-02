@@ -591,6 +591,10 @@ void AirsimROSWrapper::imu_timer_cb()
         {
             auto imu_data = airsim_client_->getImuData(imu_pub.sensor_name, vehicle_name);
             auto imu_msg = get_imu_msg_from_airsim(imu_data);
+
+            // add header frame id here 
+            imu_msg.header.frame_id = vehicle_name + "/ground_truth/odom_local";
+
             imu_pub.publisher->publish(imu_msg);
         }
     }
