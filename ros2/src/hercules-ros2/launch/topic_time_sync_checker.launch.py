@@ -27,14 +27,25 @@ def generate_launch_description():
     #     description='Name of the IMU topic (sensor_msgs/msg/Imu)'
     # )
 
+    # camera_arg = DeclareLaunchArgument(
+    #     'camera_topic',
+    #     default_value='/cam0/image_raw',
+    #     description='Name of the camera topic (sensor_msgs/msg/Image)'
+    # )
+    # imu_arg = DeclareLaunchArgument(
+    #     'imu_topic',
+    #     default_value='/imu0',
+    #     description='Name of the IMU topic (sensor_msgs/msg/Imu)'
+    # )
+
     camera_arg = DeclareLaunchArgument(
         'camera_topic',
-        default_value='/cam0/image_raw',
+        default_value='/camera/color/image_raw',
         description='Name of the camera topic (sensor_msgs/msg/Image)'
     )
     imu_arg = DeclareLaunchArgument(
         'imu_topic',
-        default_value='/imu0',
+        default_value='/imu',
         description='Name of the IMU topic (sensor_msgs/msg/Imu)'
     )
 
