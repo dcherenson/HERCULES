@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 """
+NOTE!!! Run inside herculesvenv python3 venv with numpy<2.0
 pack_to_ros2bag.py
 
-Reads raw_data_dir/{imu.txt, odom.txt, <rgb-folder>/,depth/,seg/,lidar/}
+Reads raw_data_dir/{<imu-file>, odom.txt, <rgb-folder>/, depth/, seg/, lidar/}
 and writes a ROS2 Humble bag at bag_out, deleting any existing bag_out first.
 
 You can filter which streams go into the bag via:
   --include-topics imu,odom,rgb,depth,seg,lidar,tf   (default: all)
   --exclude-topics imu,tf                           (default: none)
+
 You can override which subfolder holds RGB images:
   --rgb-folder <folder_name>                        (default: rgb)
+
+You can override which IMU txt file to load:
+  --imu-file <file_name>                            (default: imu.txt)
+
+EXAMPLE USAGE
+python3 pack_data_to_ros2bag.py   /media/sgarimella34/hercules-collect/raw_data_hercules/test1_1husky \
+/media/sgarimella34/hercules-collect/converted_ros2bags/test3_1husky \
+--exclude-topics depth,seg,lidar   --rgb-folder rgb_lowres   --imu-file synthetic_imu.txt
+
 """
 
 import os
@@ -58,12 +69,14 @@ def make_pointcloud2(points, stamp, frame_id="base_link"):
     msg.data = points.astype(np.float32).tobytes()
     return msg
 
-def main(raw_data_dir, bag_out, include, exclude, rgb_folder):
+def main(raw_data_dir, bag_out, include, exclude, rgb_folder, imu_file):
     bridge = CvBridge()
 
     # Load IMU and odometry data
-    imu_data  = parse_txt(os.path.join(raw_data_dir, "imu.txt"))
-    odom_data = parse_txt(os.path.join(raw_data_dir, "odom.txt"))
+    imu_path  = os.path.join(raw_data_dir, imu_file)
+    odom_path = os.path.join(raw_data_dir, "odom.txt")
+    imu_data  = parse_txt(imu_path)
+    odom_data = parse_txt(odom_path)
 
     # Define image topic mapping
     img_topics = {
@@ -229,6 +242,8 @@ if __name__=="__main__":
                         help="Comma-separated list of streams to skip")
     parser.add_argument("--rgb-folder", default="rgb",
                         help="Subfolder under raw_data_dir to load RGB images from")
+    parser.add_argument("--imu-file", default="imu.txt",
+                        help="Name of the IMU text file under raw_data_dir")
     args = parser.parse_args()
 
     include = set(args.include_topics.split(",")) if args.include_topics else {"all"}
@@ -238,4 +253,5 @@ if __name__=="__main__":
          args.bag_out,
          include,
          exclude,
-         args.rgb_folder)
+         args.rgb_folder,
+         args.imu_file)
