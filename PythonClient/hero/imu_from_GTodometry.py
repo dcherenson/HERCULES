@@ -6,8 +6,8 @@ imu_from_GTodometry.py
 Given an odometry file (t px py pz qw qx qy qz), fit splines to
 position and orientation, compute:
 
-  • linear acceleration = second derivative of position
-  • angular velocity   = first derivative of orientation
+  • linear acceleration = second derivative of position  
+  • angular velocity   = first derivative of orientation  
 
 Optionally add white noise (Kalibr-style), and write:
 
@@ -52,38 +52,38 @@ def compute_synthetic_imu(ts_odom, pos, ori, ts_out,
                           accel_noise_density,
                           gyro_noise_density):
     """
-    1) Fit CubicSpline on ts_odom→pos → world-frame accel
-    2) Subtract gravity vector [0,0,-9.81] m/s² → specific force
+    1) Fit CubicSpline on ts_odom→pos → world-frame accel (natural BC)
+    2) Subtract gravity vector [0,0,-9.80665] m/s² → specific force
     3) Rotate into body frame using orientation spline
-    4) Fit RotationSpline on ts_odom→ori → body-frame ω
+    4) Compute angular velocity via quaternion spline derivative
     5) Optionally add white noise
     """
-    # a) world-frame acceleration
-    pos_spline = CubicSpline(ts_odom, pos, axis=0)
-    acc_world = pos_spline(ts_out, 2)  # d²pos/dt²
+    # a) world-frame acceleration with ‘natural’ boundary conditions
+    pos_spline = CubicSpline(ts_odom, pos, axis=0, bc_type='natural')
+    acc_world = pos_spline(ts_out, 2)  # second derivative
 
-    # b) gravity compensation (ENU: Z up, so g = [0,0,-9.81]) proper acceleration
+    # b) gravity compensation (ENU convention: z up)
     g = np.array([0.0, 0.0, -9.80665])
-    spec_force_world = acc_world - g               # f = a - g
+    spec_force_world = acc_world - g
 
-    # c) orientation spline and rotate into body frame
-    rots_odom = Rotation.from_quat(ori)
-    rot_spline = RotationSpline(ts_odom, rots_odom)
-    rots_out = rot_spline(ts_out)                  # orientation at output times
-    acc_body = rots_out.inv().apply(spec_force_world)  # world→body frame 
+    # c) orientation spline → rotate specific force into body frame
+    rots = Rotation.from_quat(ori)
+    rot_spline = RotationSpline(ts_odom, rots)
+    rots_out = rot_spline(ts_out)  # rotation body→world at ts_out
+    acc_body = rots_out.inv().apply(spec_force_world)
 
     # d) angular velocity (body frame)
-    omega = rot_spline(ts_out, 1)                  # derivative=1 → ω 
+    omega_body = rot_spline(ts_out, 1)
 
-    # e) optional noise
+    # e) optional Kalibr-style white noise
     if add_noise:
         dt = np.mean(np.diff(ts_out))
         sigma_a = accel_noise_density * np.sqrt(1.0 / dt)
         sigma_g = gyro_noise_density * np.sqrt(1.0 / dt)
-        acc_body += np.random.normal(scale=sigma_a, size=acc_body.shape)
-        omega    += np.random.normal(scale=sigma_g, size=omega.shape)
+        acc_body  += np.random.normal(scale=sigma_a, size=acc_body.shape)
+        omega_body += np.random.normal(scale=sigma_g, size=omega_body.shape)
 
-    return acc_body, omega
+    return acc_body, omega_body
 
 def save_imu(ts, acc, omega, out_file):
     """Write lines: t ax ay az gx gy gz"""
@@ -120,7 +120,7 @@ def main():
     else:
         t0, t1 = ts_odom[0], ts_odom[-1]
         dt = 1.0 / args.imu_rate
-        ts_out = np.arange(t0, t1 + 1e-9, dt)
+        ts_out = np.arange(t0, t1 + dt*0.5, dt)
 
     # compute synthetic IMU
     acc, omega = compute_synthetic_imu(
@@ -133,7 +133,7 @@ def main():
     # ensure output directory exists
     out_dir = os.path.dirname(args.imu_out)
     if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir)
+        os.makedirs(out_dir, exist_ok=True)
 
     # save file
     save_imu(ts_out, acc, omega, args.imu_out)
