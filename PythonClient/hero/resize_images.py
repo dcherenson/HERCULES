@@ -33,16 +33,19 @@ def process_images(input_dir, width, height, grayscale=False, output_dir=None):
         original_atime = stat.st_atime
         original_mtime = stat.st_mtime
 
-        # Open, convert, resize, and save
+        # Open, convert, (conditionally) resize, and save
         with Image.open(src_path) as img:
             # Convert to desired mode
             if grayscale:
                 img = img.convert('L')  # 8-bit pixels, black and white
             else:
                 img = img.convert('RGB')
-            # Resize using high-quality downsampling filter
-            img_resized = img.resize((width, height), Image.LANCZOS)
-            img_resized.save(dst_path)
+
+            # Only resize if dimensions differ from target
+            if img.size != (width, height):
+                img = img.resize((width, height), Image.LANCZOS)
+
+            img.save(dst_path)
 
         # Restore timestamps on saved file
         os.utime(dst_path, (original_atime, original_mtime))

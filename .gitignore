@@ -402,3 +402,4 @@ PythonClient/docs/_build
 /Unreal/Environments/BlocksComp/
 docker/LinuxBlocks/*
 open_terminals.sh
+ros2/src/VINS-MONO-ROS2
