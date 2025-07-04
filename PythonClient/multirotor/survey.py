@@ -11,7 +11,7 @@ class SurveyNavigator:
         self.stripewidth = args.stripewidth
         self.altitude = args.altitude
         self.velocity = args.speed
-        self.client = airsim.MultirotorClient()
+        self.client = airsim.MultirotorClient(port=41451)
         self.client.confirmConnection()
         self.client.enableApiControl(True)
 

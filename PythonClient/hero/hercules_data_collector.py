@@ -36,20 +36,26 @@ def save_image(resp, out_dir, t, ext):
 
 def main():
     parser = argparse.ArgumentParser("Collect synchronized AirSim data")
-    parser.add_argument("--duration", type=float, default=60.0,
+    parser.add_argument("--duration",   type=float, default=60.0,
                         help="Total simulation time in seconds")
-    parser.add_argument("--outdir",  type=str,   default="dataset",
+    parser.add_argument("--outdir",     type=str,   default="dataset",
                         help="Root output directory")
-    parser.add_argument("--vehicle", type=str,   default="Husky1",
+    parser.add_argument("--vehicle",    type=str,   default="Husky1",
                         help="Vehicle name in settings.json")
-    parser.add_argument("--camera",  type=str,   default="front_center",
+    parser.add_argument("--camera",     type=str,   default="front_center",
                         help="Camera name in settings.json")
-    parser.add_argument("--port",    type=int,   default=41452,
+    parser.add_argument("--port",       type=int,   default=41452,
                         help="API server port for this vehicle")
+    parser.add_argument("--client-type", choices=["car","multirotor"], default="car",
+                        help="Which AirSim client to use (CarClient vs MultirotorClient)")
     args = parser.parse_args()
 
-    # connect & pause sim
-    client = airsim.CarClient(port=args.port)
+    # instantiate the correct AirSim client
+    if args.client_type == "car":
+        client = airsim.CarClient(port=args.port)
+    else:
+        client = airsim.MultirotorClient(port=args.port)
+
     client.confirmConnection()
     client.enableApiControl(True, vehicle_name=args.vehicle)
     client.simPause(True)
@@ -67,7 +73,7 @@ def main():
 
     # prepare output directories and files
     os.makedirs(args.outdir, exist_ok=True)
-    imu_f  = open(os.path.join(args.outdir, "imu.txt"),  'w')
+    imu_f  = open(os.path.join(args.outdir, "imu.txt"), 'w')
     odom_f = open(os.path.join(args.outdir, "odom.txt"), 'w')
     for sub in ("rgb","depth","seg","lidar"):
         os.makedirs(os.path.join(args.outdir, sub), exist_ok=True)
@@ -88,9 +94,13 @@ def main():
                     f"{la.x_val:.6f} {la.y_val:.6f} {la.z_val:.6f} "
                     f"{av.x_val:.6f} {av.y_val:.6f} {av.z_val:.6f}\n")
 
-        # 4) Odometry @ odom_hz
+        # 4) Odometry @ 20 Hz
         if step % odom_step == 0:
-            st = client.getCarState(vehicle_name=args.vehicle)
+            # choose the right state call
+            if args.client_type == "car":
+                st = client.getCarState(vehicle_name=args.vehicle)
+            else:
+                st = client.getMultirotorState(vehicle_name=args.vehicle)
             pos = st.kinematics_estimated.position
             ori = st.kinematics_estimated.orientation
             odom_f.write(f"{t:.6f} "
