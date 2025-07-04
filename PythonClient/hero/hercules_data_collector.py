@@ -36,7 +36,7 @@ def save_image(resp, out_dir, t, ext):
 
 def main():
     parser = argparse.ArgumentParser("Collect synchronized AirSim data")
-    parser.add_argument("--duration", type=float, default=30.0,
+    parser.add_argument("--duration", type=float, default=60.0,
                         help="Total simulation time in seconds")
     parser.add_argument("--outdir",  type=str,   default="dataset",
                         help="Root output directory")
