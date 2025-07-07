@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-hercules_data_collector.py
+hercules_data_collector_single_agent.py
+NOTE!!! This script is for a single agent type only -- either UGV or UAV running in sim, 
+not both simultaenously.
 
 Pauses the Cosys-AirSim sim, collects perfectly synchronized sensor data
 at specified rates (IMU & odom at 200 Hz, cameras at 20 Hz, LiDAR at 10 Hz),
