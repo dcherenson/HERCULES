@@ -25,6 +25,7 @@ OUTDIR        = "/media/sgarimella34/hercules-collect/raw_data_hercules/test2_2u
 # Define vehicle names
 DRONE_NAMES   = ["Drone1", "Drone2", "Drone3"]
 HUSKY_NAMES   = ["Husky1", "Husky2", "Husky3"]
+
 CAMERA_NAME   = "front_center"
 LIDAR_NAME    = "LidarSensor1"
 

@@ -25,7 +25,7 @@ DEFAULT_NUM_UGVS=2
 DEFAULT_SPEED=1.5
 
 # Default control-loop frequency (in Hz)
-DEFAULT_CTRL_HZ=2
+DEFAULT_CTRL_HZ=10
 
 # Prefix for UGV names (adjust to match your naming convention)
 PREFIX="Husky"
