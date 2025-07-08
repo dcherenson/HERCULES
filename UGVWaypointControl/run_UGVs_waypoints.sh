@@ -22,7 +22,7 @@ WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_
 DEFAULT_NUM_UGVS=2
 
 # Default linear speed (in m/s) when no individual speed is provided
-DEFAULT_SPEED=1.5
+DEFAULT_SPEED=1.4
 
 # Default control-loop frequency (in Hz)
 DEFAULT_CTRL_HZ=10

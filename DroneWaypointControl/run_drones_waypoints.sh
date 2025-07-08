@@ -19,7 +19,7 @@ WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_
 # WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
 
 # Default number of drones if none specified
-DEFAULT_NUM_DRONES=1
+DEFAULT_NUM_DRONES=2
 
 # Default velocity
 VELOCITY=1.4
