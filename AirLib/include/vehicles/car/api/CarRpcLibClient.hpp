@@ -35,6 +35,14 @@ namespace msr
             // 'vehicle_name' identifies the car.
             bool moveOnPath(const std::vector<Vector3r> &path, float desired_velocity, float timeout_sec,
                             float lookahead, const std::string &vehicle_name, float control_hz);
+
+            bool moveOnPathNumericalVelocity(
+                const vector<Vector3r> &path,
+                float desired_velocity,
+                float timeout_sec,
+                float lookahead,
+                const std::string &vehicle_name,
+                float control_hz);
         };
     }
 } // namespace

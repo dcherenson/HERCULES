@@ -12,4 +12,5 @@ add_subdirectory("DroneShell")
 add_subdirectory("DroneServer")
 add_subdirectory("DroneWaypointControl")
 add_subdirectory("UGVWaypointControl")
+add_subdirectory("UGVWaypointControlNumericalVelocity")
 

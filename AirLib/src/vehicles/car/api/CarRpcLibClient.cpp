@@ -231,6 +231,135 @@ __pragma(warning(disable : 4239))
             return true;
         }
 
+        bool CarRpcLibClient::moveOnPathNumericalVelocity(
+            const vector<Vector3r> &path,
+            float desired_velocity,
+            float timeout_sec,
+            float lookahead,
+            const std::string &vehicle_name,
+            float control_hz)
+        {
+            if (path.empty())
+            {
+                std::cerr << "Error: Provided path is empty." << std::endl;
+                return false;
+            }
+
+            const float control_period = 1.0f / control_hz;
+            const float Kp_steering = 1.0f;
+            const float max_steer = 0.5f;
+            const float throttle_gain = 0.5f;
+            const float threshold = 1.0f;
+
+            // 1) get initial state
+            auto state = getCarState(vehicle_name);
+            Vector3r last_pos = state.kinematics_estimated.pose.position;
+            uint64_t last_ts_ns = state.timestamp;
+
+            auto start_time = std::chrono::steady_clock::now();
+            bool closed_loop = (distance2D(path.front(), path.back()) < 1e-3);
+            bool passed_start = false;
+            size_t current_index = 0;
+
+            while (true)
+            {
+                // a) check timeout on real time
+                auto now = std::chrono::steady_clock::now();
+                float elapsed = std::chrono::duration<float>(now - start_time).count();
+                if (elapsed > timeout_sec)
+                {
+                    std::cerr << "Timeout reached while following the path." << std::endl;
+                    break;
+                }
+
+                // b) query new sim state
+                state = getCarState(vehicle_name);
+                Vector3r pos = state.kinematics_estimated.pose.position;
+                uint64_t ts_ns = state.timestamp;
+
+                // c) compute sim‐dt
+                float dt_sim = (ts_ns - last_ts_ns) * 1e-9f; // ns → s
+                if (dt_sim <= 0)
+                    dt_sim = control_period; // fallback
+
+                // d) numerically differentiate
+                float speed_est = distance2D(pos, last_pos) / dt_sim;
+
+                // e) update for next iteration
+                last_pos = pos;
+                last_ts_ns = ts_ns;
+
+                // f) terminal checks (same as before) …
+                if (!closed_loop && distance2D(pos, path.back()) < threshold)
+                {
+                    std::cout << "Destination reached." << std::endl;
+                    break;
+                }
+                if (closed_loop)
+                {
+                    if (!passed_start && distance2D(pos, path.front()) > threshold * 2)
+                        passed_start = true;
+                    if (passed_start && distance2D(pos, path.front()) < threshold)
+                    {
+                        std::cout << "Closed-loop: Returned to start." << std::endl;
+                        break;
+                    }
+                }
+
+                // g) waypoint‐index update (same as before) …
+                while (current_index + 1 < path.size())
+                {
+                    if (distance2D(pos, path[current_index + 1]) < distance2D(pos, path[current_index]))
+                        ++current_index;
+                    else
+                        break;
+                }
+
+                // h) lookahead target (same as before) …
+                size_t target_index = path.size() - 1;
+                for (size_t i = current_index + 1; i < path.size(); ++i)
+                {
+                    if (distance2D(pos, path[i]) >= lookahead)
+                    {
+                        target_index = i;
+                        break;
+                    }
+                }
+                Vector3r target = path[target_index];
+
+                // i) pure pursuit steering (same as before) …
+                float desired_heading = std::atan2(target.y() - pos.y(), target.x() - pos.x());
+                float current_heading = getYawFromQuaternion(state.kinematics_estimated.pose.orientation);
+                float steer = std::clamp(Kp_steering * normalizeAngle(desired_heading - current_heading),
+                                         -max_steer, max_steer);
+
+                // j) throttle from estimated speed
+                float thr = (speed_est < desired_velocity)
+                                ? std::min(throttle_gain * (desired_velocity - speed_est), 1.0f)
+                                : 0.0f;
+
+                // k) send controls
+                CarApiBase::CarControls ctrl;
+                ctrl.steering = steer;
+                ctrl.throttle = thr;
+                ctrl.handbrake = false;
+                ctrl.is_manual_gear = false;
+                setCarControls(ctrl, vehicle_name);
+
+                // l) sleep the real-time control loop
+                std::this_thread::sleep_for(std::chrono::milliseconds(int(control_period * 1000)));
+            }
+
+            // finally, stop the car
+            CarApiBase::CarControls stop;
+            stop.throttle = 0;
+            stop.steering = 0;
+            stop.handbrake = true;
+            setCarControls(stop, vehicle_name);
+
+            return true;
+        }
+
     } // namespace airlib
 } // namespace msr
 
