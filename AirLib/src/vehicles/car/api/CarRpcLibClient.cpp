@@ -245,11 +245,11 @@ __pragma(warning(disable : 4239))
                 return false;
             }
 
-            // --- controller & sim timings ---
+            // timings
             const float control_period = 1.0f / control_hz;
             const float threshold = 1.0f;
 
-            // pure‐pursuit params
+            // pure-pursuit gains
             const float Kp_steer = 1.0f;
             const float max_steer = 0.5f;
 
@@ -257,20 +257,21 @@ __pragma(warning(disable : 4239))
             const float Kp_thr = 0.5f, Ki_thr = 0.2f, Kd_thr = 0.05f;
             float integral = 0.0f, prev_error = 0.0f;
 
-            // throttle‐rate limiter (upward only)
-            const float max_dthr_up = 0.02f;
+            // rate limiter: cap +Δthrottle, allow full -Δthrottle in one tick
+            const float max_dthr_up = 0.02f;   // your chosen rise limiter
+            const float max_dthr_down = 1.00f; // drop limiter ≥1.0 → instant drop
             float throttle_prev = 0.0f;
 
-            // speed filter
+            // speed filter (one-pole)
             const float alpha_speed = 0.6f;
             float speed_filtered = desired_velocity;
 
-            // setup pure‐pursuit indices
+            // pure-pursuit indexing
             bool closed_loop = (distance2D(path.front(), path.back()) < 1e-3f);
             bool passed_start = false;
             size_t current_index = 0;
 
-            // get initial sim state
+            // initial sim state
             auto state = getCarState(vehicle_name);
             Vector3r last_pos = state.kinematics_estimated.pose.position;
             uint64_t last_ts = state.timestamp; // nanoseconds
@@ -280,10 +281,9 @@ __pragma(warning(disable : 4239))
 
             while (true)
             {
-                // 1) timeout on real time
+                // 1) real-time timeout
                 auto t_now = std::chrono::steady_clock::now();
-                float elapsed = std::chrono::duration<float>(t_now - t_start).count();
-                if (elapsed > timeout_sec)
+                if (std::chrono::duration<float>(t_now - t_start).count() > timeout_sec)
                 {
                     std::cerr << "Timeout reached while following the path." << std::endl;
                     break;
@@ -294,12 +294,12 @@ __pragma(warning(disable : 4239))
                 Vector3r pos = state.kinematics_estimated.pose.position;
                 uint64_t ts = state.timestamp;
 
-                // 3) compute sim‐dt
+                // 3) sim-dt
                 float dt_sim = float(ts - last_ts) * 1e-9f;
                 if (dt_sim <= 0)
                     dt_sim = control_period;
 
-                // 4) numerical speed + smoothing
+                // 4) numeric speed + smoothing
                 float speed_est = distance2D(pos, last_pos) / dt_sim;
                 last_pos = pos;
                 last_ts = ts;
@@ -334,16 +334,14 @@ __pragma(warning(disable : 4239))
                 // 7) lookahead target
                 size_t target_index = path.size() - 1;
                 for (size_t i = current_index + 1; i < path.size(); ++i)
-                {
                     if (distance2D(pos, path[i]) >= lookahead)
                     {
                         target_index = i;
                         break;
                     }
-                }
                 Vector3r target = path[target_index];
 
-                // 8) pure‐pursuit steering
+                // 8) pure-pursuit steering
                 float desired_heading = std::atan2(target.y() - pos.y(), target.x() - pos.x());
                 float current_heading = getYawFromQuaternion(state.kinematics_estimated.pose.orientation);
                 float steer = std::clamp(
@@ -355,14 +353,16 @@ __pragma(warning(disable : 4239))
                 integral = std::clamp(integral + error * dt_sim, -1.0f, 1.0f);
                 float derivative = (error - prev_error) / dt_sim;
                 prev_error = error;
-                float raw_thr = std::clamp(Kp_thr * error + Ki_thr * integral + Kd_thr * derivative, 0.0f, 1.0f);
+                float raw_thr = std::clamp(
+                    Kp_thr * error + Ki_thr * integral + Kd_thr * derivative,
+                    0.0f, 1.0f);
 
-                // 10) **asymmetric throttle‐rate limiter**:
-                //     allow instant drop, but cap rise to +max_dthr_up
+                // 10) **asymmetric rate limiter**
                 float delta = raw_thr - throttle_prev;
                 if (delta > max_dthr_up)
                     delta = max_dthr_up;
-                // if delta ≤ 0, we let it through so throttle can fall immediately
+                else if (delta < -max_dthr_down)
+                    delta = -max_dthr_down;
                 float thr = throttle_prev + delta;
                 throttle_prev = thr;
 
@@ -375,7 +375,8 @@ __pragma(warning(disable : 4239))
                 setCarControls(ctrl, vehicle_name);
 
                 // 12) sleep real-time
-                std::this_thread::sleep_for(std::chrono::duration<float>(control_period));
+                std::this_thread::sleep_for(
+                    std::chrono::duration<float>(control_period));
             }
 
             // stop at the end
