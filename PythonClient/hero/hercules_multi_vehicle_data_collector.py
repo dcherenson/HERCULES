@@ -20,7 +20,7 @@ import cosysairsim as airsim
 DURATION      = 660.0        # seconds
 dt_rate       = 200.0       # IMU rate (Hz)
 DT            = 1.0 / dt_rate
-OUTDIR        = "/media/sgarimella34/hercules-collect/raw_data_hercules/test1_2uav2ugv"
+OUTDIR        = "/media/sgarimella34/hercules-collect/raw_data_hercules/test2_2uav2ugv"
 
 # Define vehicle names
 # DRONE_NAMES   = ["Drone1", "Drone2", "Drone3"]
