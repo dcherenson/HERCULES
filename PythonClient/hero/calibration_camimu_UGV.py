@@ -9,7 +9,7 @@ from multiprocessing import Process
 # List your UGV names from settings.json
 UGV_NAMES = ["Husky1", "Husky2"]  # add more as needed
 
-def drive_distance(client, vehicle_name, distance, throttle=0.3, steering=0.0):
+def drive_distance(client, vehicle_name, distance, throttle=0.05, steering=0.0):
     """
     Drives one UGV forward/backward by 'distance' meters.
     """
@@ -59,21 +59,21 @@ def run_ugv_calibration_motion(vehicle_name,
     time.sleep(1.0)
 
     # 1) Straight forward
-    drive_distance(client, vehicle_name,  total_dist, throttle=0.3, steering=0.0)
+    drive_distance(client, vehicle_name,  total_dist, throttle=0.05, steering=0.0)
 
     # 2) Straight backward
-    drive_distance(client, vehicle_name, -total_dist, throttle=0.3, steering=0.0)
+    drive_distance(client, vehicle_name, -total_dist, throttle=0.05, steering=0.0)
 
     # 3) Forward oscillating
     seg_len = total_dist / segment_count
     for i in range(segment_count):
         angle = steer_amp if (i % 2 == 0) else -steer_amp
-        drive_distance(client, vehicle_name, seg_len, throttle=0.3, steering=angle)
+        drive_distance(client, vehicle_name, seg_len, throttle=0.05, steering=angle)
 
     # 4) Backward oscillating
     for i in range(segment_count):
         angle = steer_amp if (i % 2 == 1) else -steer_amp
-        drive_distance(client, vehicle_name, -seg_len, throttle=0.3, steering=angle)
+        drive_distance(client, vehicle_name, -seg_len, throttle=0.05, steering=angle)
 
     print(f"[{vehicle_name}] calibration complete.")
 
