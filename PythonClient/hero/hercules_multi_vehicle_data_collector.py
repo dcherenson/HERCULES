@@ -14,10 +14,11 @@ import cv2
 import cosysairsim as airsim
 
 # Configuration
-DURATION      = 840.0        # seconds
-DT_RATE       = 200.0        # IMU rate (Hz)
-DT            = 1.0 / DT_RATE
-OUTDIR        = "/media/sgarimella34/hercules-collect/raw_data_hercules/test2_2uav2ugv_calib_752x480"
+DURATION        = 840.0        # seconds
+DT_RATE         = 200.0        # IMU rate (Hz)
+DT              = 1.0 / DT_RATE
+OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/test2_2uav2ugv_calib_752x480"
+SAVE_DEPTH_PNG  = False         # if True, also write a visual 8‐bit PNG
 
 DRONE_NAMES   = ["Drone1", "Drone2"]
 HUSKY_NAMES   = ["Husky1", "Husky2"]
@@ -30,7 +31,7 @@ HUSKY_PORT    = 41452
 
 # --- Setup clients ---
 drone_client = airsim.MultirotorClient(port=DRONE_PORT)
-husky_client = airsim.CarClient      (port=HUSKY_PORT)
+husky_client = airsim.CarClient     (port=HUSKY_PORT)
 drone_client.confirmConnection()
 husky_client.confirmConnection()
 
@@ -50,12 +51,12 @@ for v in all_vehicles:
     base = os.path.join(OUTDIR, v)
     os.makedirs(base, exist_ok=True)
     files[v] = {
-        'imu':  open(os.path.join(base, 'imu.txt'),  'w'),
-        'odom': open(os.path.join(base, 'odom.txt'), 'w'),
-        'rgb':   os.path.join(base, 'rgb'),
-        'depth': os.path.join(base, 'depth'),
-        'seg':   os.path.join(base, 'seg'),
-        'lidar': os.path.join(base, 'lidar'),
+        'imu':   open(os.path.join(base, 'imu.txt'),  'w'),
+        'odom':  open(os.path.join(base, 'odom.txt'), 'w'),
+        'rgb':    os.path.join(base, 'rgb'),
+        'depth':  os.path.join(base, 'depth'),
+        'seg':    os.path.join(base, 'seg'),
+        'lidar':  os.path.join(base, 'lidar'),
     }
     for sub in ('rgb','depth','seg','lidar'):
         os.makedirs(files[v][sub], exist_ok=True)
@@ -69,7 +70,7 @@ total_steps = int(round(DURATION / DT))
 print(f"Collecting {total_steps} steps @ {DT_RATE:.0f} Hz…")
 
 def get_nonempty_images(client, vehicle_name, camera_name):
-    """Keeps calling simGetImages until we get nonempty Scene, Depth, Segmentation."""
+    """Retry simGetImages until we get valid Scene, DepthPlanar, Segmentation."""
     reqs = [
         airsim.ImageRequest(camera_name, airsim.ImageType.Scene,       False, False),
         airsim.ImageRequest(camera_name, airsim.ImageType.DepthPlanar, True,  False),
@@ -77,26 +78,19 @@ def get_nonempty_images(client, vehicle_name, camera_name):
     ]
     while True:
         imgs = client.simGetImages(reqs, vehicle_name=vehicle_name)
-        # check we got valid data in each
-        ok = True
-        for img in imgs:
-            if img.width == 0 or img.height == 0 or \
-               (not img.pixels_as_float and len(img.image_data_uint8)==0):
-                ok = False
-                break
-        if ok:
+        if all(img.width>0 and img.height>0 and
+               (img.pixels_as_float or len(img.image_data_uint8)>0)
+               for img in imgs):
             return imgs
-        # otherwise loop again (still paused)
 
 def get_nonempty_lidar(client, vehicle_name, lidar_name):
-    """Keeps calling getLidarData until we get nonempty point_cloud."""
+    """Retry getLidarData until we get nonempty point_cloud."""
     while True:
         ld = client.getLidarData(lidar_name=lidar_name, vehicle_name=vehicle_name)
         if ld.point_cloud:
             pts = np.array(ld.point_cloud, dtype=np.float32).reshape(-1,3)
             if pts.size:
                 return pts
-        # else loop again
 
 # Main loop
 for step in range(1, total_steps+1):
@@ -104,37 +98,56 @@ for step in range(1, total_steps+1):
     drone_client.simContinueForTime(DT)
     t = step * DT
 
-    # 2) drones
+    # 2) multirotors
     for name in DRONE_NAMES:
         c = drone_client
-        # imu
+        # IMU
         imu = c.getImuData(vehicle_name=name)
-        la,av = imu.linear_acceleration, imu.angular_velocity
+        la, av = imu.linear_acceleration, imu.angular_velocity
         files[name]['imu'].write(
             f"{t:.6f} {la.x_val:.6f} {la.y_val:.6f} {la.z_val:.6f} "
-              f"{av.x_val:.6f} {av.y_val:.6f} {av.z_val:.6f}\n"
+            f"{av.x_val:.6f} {av.y_val:.6f} {av.z_val:.6f}\n"
         )
-        # odom @20Hz
+
+        # Odometry @ 20 Hz
         if step % odom_step == 0:
             st = c.getMultirotorState(vehicle_name=name)
-            p,o = st.kinematics_estimated.position, st.kinematics_estimated.orientation
+            p, o = st.kinematics_estimated.position, st.kinematics_estimated.orientation
             files[name]['odom'].write(
                 f"{t:.6f} {p.x_val:.6f} {p.y_val:.6f} {p.z_val:.6f} "
-                  f"{o.w_val:.6f} {o.x_val:.6f} {o.y_val:.6f} {o.z_val:.6f}\n"
+                f"{o.w_val:.6f} {o.x_val:.6f} {o.y_val:.6f} {o.z_val:.6f}\n"
             )
-        # cams @20Hz
+
+        # Cameras @ 20 Hz
         if step % cam_step == 0:
             imgs = get_nonempty_images(c, name, CAMERA_NAME)
-            for img, key in zip(imgs, ('rgb','depth','seg')):
-                fn = os.path.join(files[name][key], f"{t:.6f}.png")
-                if img.pixels_as_float:
-                    arr = np.array(img.image_data_float, dtype=np.float32).reshape(img.height, img.width)
-                    norm = ((arr-arr.min())/(arr.max()-arr.min())*255).astype(np.uint8)
-                    cv2.imwrite(fn, norm)
-                else:
-                    arr = np.frombuffer(img.image_data_uint8, dtype=np.uint8).reshape(img.height, img.width,3)
-                    cv2.imwrite(fn, cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
-        # lidar @10Hz
+            scene, depth, seg = imgs
+
+            # --- RGB ---
+            rgb = np.frombuffer(scene.image_data_uint8, dtype=np.uint8)\
+                    .reshape(scene.height, scene.width, 3)
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(os.path.join(files[name]['rgb'], f"{t:.6f}.png"), rgb)
+
+            # --- DepthPlanar: raw & optional PNG ---
+            depth_arr = np.array(depth.image_data_float, dtype=np.float32)\
+                        .reshape(depth.height, depth.width)
+            # save exact meter depths
+            np.save(os.path.join(files[name]['depth'], f"{t:.6f}.npy"), depth_arr)
+
+            if SAVE_DEPTH_PNG:
+                # scale into [0,255] for visualization, using a fixed global clip (e.g. 0–100m)
+                depth_vis = np.clip(depth_arr, 0.0, 100.0) / 100.0
+                depth_vis = (depth_vis * 255).astype(np.uint8)
+                cv2.imwrite(os.path.join(files[name]['depth'], f"{t:.6f}.png"), depth_vis)
+
+            # --- Segmentation ---
+            seg_img = np.frombuffer(seg.image_data_uint8, dtype=np.uint8)\
+                        .reshape(seg.height, seg.width, 3)
+            seg_img = cv2.cvtColor(seg_img, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(os.path.join(files[name]['seg'], f"{t:.6f}.png"), seg_img)
+
+        # LiDAR @ 10 Hz
         if step % lidar_step == 0:
             pts = get_nonempty_lidar(c, name, LIDAR_NAME)
             np.save(os.path.join(files[name]['lidar'], f"{t:.6f}.npy"), pts)
@@ -142,34 +155,50 @@ for step in range(1, total_steps+1):
     # 3) huskies
     for name in HUSKY_NAMES:
         c = husky_client
-        # imu
+        # IMU
         imu = c.getImuData(vehicle_name=name)
-        la,av = imu.linear_acceleration, imu.angular_velocity
+        la, av = imu.linear_acceleration, imu.angular_velocity
         files[name]['imu'].write(
             f"{t:.6f} {la.x_val:.6f} {la.y_val:.6f} {la.z_val:.6f} "
-              f"{av.x_val:.6f} {av.y_val:.6f} {av.z_val:.6f}\n"
+            f"{av.x_val:.6f} {av.y_val:.6f} {av.z_val:.6f}\n"
         )
-        # odom @20Hz
+
+        # Odometry @ 20 Hz
         if step % odom_step == 0:
             st = c.getCarState(vehicle_name=name)
-            p,o = st.kinematics_estimated.position, st.kinematics_estimated.orientation
+            p, o = st.kinematics_estimated.position, st.kinematics_estimated.orientation
             files[name]['odom'].write(
                 f"{t:.6f} {p.x_val:.6f} {p.y_val:.6f} {p.z_val:.6f} "
-                  f"{o.w_val:.6f} {o.x_val:.6f} {o.y_val:.6f} {o.z_val:.6f}\n"
+                f"{o.w_val:.6f} {o.x_val:.6f} {o.y_val:.6f} {o.z_val:.6f}\n"
             )
-        # cams @20Hz
+
+        # Cameras @ 20 Hz
         if step % cam_step == 0:
             imgs = get_nonempty_images(c, name, CAMERA_NAME)
-            for img, key in zip(imgs, ('rgb','depth','seg')):
-                fn = os.path.join(files[name][key], f"{t:.6f}.png")
-                if img.pixels_as_float:
-                    arr = np.array(img.image_data_float, dtype=np.float32).reshape(img.height, img.width)
-                    norm = ((arr-arr.min())/(arr.max()-arr.min())*255).astype(np.uint8)
-                    cv2.imwrite(fn, norm)
-                else:
-                    arr = np.frombuffer(img.image_data_uint8, dtype=np.uint8).reshape(img.height, img.width,3)
-                    cv2.imwrite(fn, cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
-        # lidar @10Hz
+            scene, depth, seg = imgs
+
+            # RGB
+            rgb = np.frombuffer(scene.image_data_uint8, dtype=np.uint8)\
+                    .reshape(scene.height, scene.width, 3)
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(os.path.join(files[name]['rgb'], f"{t:.6f}.png"), rgb)
+
+            # DepthPlanar → raw & optional PNG
+            depth_arr = np.array(depth.image_data_float, dtype=np.float32)\
+                        .reshape(depth.height, depth.width)
+            np.save(os.path.join(files[name]['depth'], f"{t:.6f}.npy"), depth_arr)
+            if SAVE_DEPTH_PNG:
+                depth_vis = np.clip(depth_arr, 0.0, 100.0) / 100.0
+                depth_vis = (depth_vis * 255).astype(np.uint8)
+                cv2.imwrite(os.path.join(files[name]['depth'], f"{t:.6f}.png"), depth_vis)
+
+            # Segmentation
+            seg_img = np.frombuffer(seg.image_data_uint8, dtype=np.uint8)\
+                        .reshape(seg.height, seg.width, 3)
+            seg_img = cv2.cvtColor(seg_img, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(os.path.join(files[name]['seg'], f"{t:.6f}.png"), seg_img)
+
+        # LiDAR @ 10 Hz
         if step % lidar_step == 0:
             pts = get_nonempty_lidar(c, name, LIDAR_NAME)
             np.save(os.path.join(files[name]['lidar'], f"{t:.6f}.npy"), pts)
