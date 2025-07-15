@@ -258,8 +258,8 @@ __pragma(warning(disable : 4239))
             float integral = 0.0f, prev_error = 0.0f;
 
             // rate limiter: cap +Δthrottle, allow full -Δthrottle in one tick
-            const float max_dthr_up = 0.04f;   // your chosen rise limiter
-            const float max_dthr_down = 0.40f; // drop limiter ≥1.0 → instant drop
+            const float max_dthr_up = 0.048f;   // your chosen rise limiter
+            const float max_dthr_down = 0.50f; // drop limiter ≥1.0 → instant drop
             float throttle_prev = 0.0f;
 
             // speed filter (one-pole)
