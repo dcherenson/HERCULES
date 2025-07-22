@@ -39,7 +39,7 @@
 # for custom city world 0p5m cubed
 BINVOX_DIR="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customcity_0p5mcubed" # Set the directory containing your binvox files
 BINVOX2BT="/home/sgarimella34/octomap/bin/binvox2bt_unique_offsets" # Set the path to your modified binvox2bt executable DO NOT CHANGE
-OUTPUT_FILE="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customcity_0p5mcubed/test1_0p1mcubed_customcity.bt" # Define the output file for the combined octree
+OUTPUT_FILE="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customcity_0p5mcubed/customcity_0p5mcubed.bt" # Define the output file for the combined octree
 
 
 # Initialize command with any global options (e.g., --mark-free)

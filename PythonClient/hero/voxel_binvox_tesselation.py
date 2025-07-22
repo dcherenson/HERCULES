@@ -10,7 +10,7 @@ def generate_voxel_patch(client, center, patch_size, resolution, output_file):
 
 def main():
     # Parameters
-    world_size = 100       # Total extent in meters for X and Y (world assumed to be square)
+    world_size = 700       # Total extent in meters for X and Y (world assumed to be square)
     patch_size = 100        # Each patch covers 100m x 100m x 100m
     resolution = 0.5       # Voxel resolution in meters
     

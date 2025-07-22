@@ -9,7 +9,6 @@ import msgpackrpc.error
 def generate_voxel_patch(client, center, patch_size, resolution, output_file):
     """
     Create a 100*100*100 m cube centered at `center`.
-    Tries both common RPC signatures to avoid std::bad_cast.
     """
     px = int(patch_size)
     res = float(resolution)
@@ -30,9 +29,9 @@ def generate_voxel_patch(client, center, patch_size, resolution, output_file):
 
 def main():
     # ─── User parameters ─────────────────────────────────────────────────
-    world_size   = 100.0               # X/Y world span in meters
+    world_size   = 700.0               # X/Y world span in meters
     patch_size   = 100.0               # each cube is 100 m on a side
-    stack_height = 300.0               # total vertical height to cover in meters
+    stack_height = 600.0               # total vertical height to cover in meters
     resolution   = 0.5                 # voxel size in meters
     world_center = (0.0, 0.0, 0.0)     # ground-level origin (X, Y, Z)
     output_dir   = "/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customcity_0p5mcubed"
