@@ -37,9 +37,9 @@ def generate_voxel_patch(client, center, patch_size, resolution, output_file):
 # ---------- main ----------
 def main():
     # ---- User params ----
-    world_size   = 300        # X/Y span (m), same as your working script
+    world_size   = 700        # X/Y span (m), same as your working script
     patch_size   = 100        # cube side (m)
-    stack_height = 300        # total height to cover (m)
+    stack_height = 600        # total height to cover (m)
     resolution   = 0.5        # voxel size (m)
     world_center = (0.0, 0.0, 0.0)    # ground (NED Z = 0)
     output_dir   = "/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customcity_0p5mcubed"
