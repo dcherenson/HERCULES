@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<launch>
+
+  <!-- ====== Args you may want to tweak ====== -->
+  <arg name="octomap_path" default="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customcity_0p5mcubed/combined.bt"/>
+  <arg name="slice_altitude" default="-0.25"/>
+  <arg name="inflation_radius" default="2.0"/>
+  <arg name="unknown_flag" default="true"/>
+  <arg name="map_file" default="customcity_0mAlt_OGM_0p5m"/>
+  <arg name="map_topic" default="sliced_projected_map"/>
+
+  <!-- 1) Load the .bt file -->
+  <node pkg="octomap_server"
+        exec="octomap_server_node"
+        name="octomap_server"
+        output="screen">
+    <param name="octomap_path" value="$(var octomap_path)"/>
+  </node>
+
+  <!-- 2) Slice/project the octomap -->
+  <node pkg="octomap_server"
+        exec="octomap_slicer_gridmap"
+        name="octomap_slicer"
+        output="screen">
+    <param name="slice_altitude"   type="float" value="$(var slice_altitude)"/>
+    <param name="inflation_radius" type="float" value="$(var inflation_radius)"/>
+    <param name="unknown_flag"     type="bool"  value="$(var unknown_flag)"/>
+  </node>
+
+  <!-- 3) Save the sliced map -->
+  <node pkg="nav2_map_server"
+        exec="map_saver_cli"
+        name="map_saver_cli"
+        output="screen"
+        args="-f $(var map_file)">
+    <remap from="map" to="$(var map_topic)"/>
+  </node>
+
+</launch>
