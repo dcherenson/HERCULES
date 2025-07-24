@@ -16,9 +16,11 @@ image_type  = airsim.ImageType.Scene
 # 2) Configure detection filters
 client.simSetDetectionFilterRadius(camera_name, image_type, 200 * 100)  # 200 m
 client.simClearDetectionMeshNames(camera_name, image_type)
-client.simAddDetectionFilterMeshName( camera_name, image_type, "BP_CrowdCharacter*" )
+# client.simAddDetectionFilterMeshName( camera_name, image_type, "BP_CrowdCharacter*" )
+client.simAddDetectionFilterMeshName( camera_name, image_type, "BP_SplineHuman*" )
 
 client.simAddDetectionFilterMeshName( camera_name, image_type, "Car*" )
+client.simAddDetectionFilterMeshName( camera_name, image_type, "Sportscar*" )
 
 
 # 3) Create and name your window once
