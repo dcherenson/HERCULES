@@ -15,17 +15,18 @@ EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_r
 # WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_convoy"
 
 # CSLAM random explore motion
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
+WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test_thruroad_dump"
 # WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
 
 # Default number of drones if none specified
 DEFAULT_NUM_DRONES=2
 
 # Default velocity
-VELOCITY=1.4
+VELOCITY=3.0
 
-# Default fly altitude
-FLY_ALTITUDE=-10.0
+# Default fly altitude. NOTE!!! This altitude is relative to the PlayerStart object's height in UE5
+FLY_ALTITUDE=-2.5
 # FLY_ALTITUDE=-35.0
 
 # Manually set return-home behavior (set to true or false)

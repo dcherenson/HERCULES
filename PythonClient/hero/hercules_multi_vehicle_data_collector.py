@@ -17,7 +17,7 @@ import cosysairsim as airsim
 DURATION        = 840.0        # seconds
 DT_RATE         = 200.0        # IMU rate (Hz)
 DT              = 1.0 / DT_RATE
-OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/test2_2uav2ugv_calib_752x480"
+OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/test3_2uav2ugv_calib_752x480"
 SAVE_DEPTH_PNG  = False         # if True, also write a visual 8‐bit PNG
 
 DRONE_NAMES   = ["Drone1", "Drone2"]
