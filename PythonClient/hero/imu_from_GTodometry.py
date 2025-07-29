@@ -15,6 +15,7 @@ Optionally add white noise (Kalibr-style), and write:
 
 to a text file with the same convention as the real IMU.
 """
+
 import argparse
 import os
 
