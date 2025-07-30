@@ -14,7 +14,7 @@ import cv2
 import cosysairsim as airsim
 
 # Configuration
-DURATION        = 840.0        # seconds
+DURATION        = 1020.0        # seconds
 DT_RATE         = 200.0        # IMU rate (Hz)
 DT              = 1.0 / DT_RATE
 OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/test3_2uav2ugv_calib_752x480"

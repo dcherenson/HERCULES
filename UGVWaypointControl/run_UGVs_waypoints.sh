@@ -24,10 +24,10 @@ WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_
 DEFAULT_NUM_UGVS=2
 
 # Default linear speed (in m/s) when no individual speed is provided
-DEFAULT_SPEED=1.4
+DEFAULT_SPEED=0.35
 
 # Default control-loop frequency (in Hz)
-DEFAULT_CTRL_HZ=10
+DEFAULT_CTRL_HZ=20
 
 # Prefix for UGV names (adjust to match your naming convention)
 PREFIX="Husky"
