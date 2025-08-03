@@ -25,8 +25,14 @@ DEFAULT_NUM_DRONES=2
 # Default velocity
 VELOCITY=1.4
 
-# Default fly altitude. NOTE!!! This altitude is relative to the PlayerStart object's height in UE5
-FLY_ALTITUDE=-2.5
+# Default fly altitude. NOTE!!! This altitude is relative to the PlayerStart object's height in UE5, which is 1.5m above ground
+# for DAIR-V2X-style inf camera flying in city env
+FLY_ALTITUDE=-5.5 
+
+# for under the canopy flying in AUsEnv
+# FLY_ALTITUDE=-2.5  
+
+# for BEVP in all envs
 # FLY_ALTITUDE=-35.0
 
 # Manually set return-home behavior (set to true or false)

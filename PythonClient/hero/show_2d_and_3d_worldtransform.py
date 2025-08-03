@@ -35,7 +35,13 @@ def main():
 
     # keep Cylinder* filter
     client.simClearDetectionMeshNames(CAMERA_NAME, IMAGE_TYPE)
-    client.simAddDetectionFilterMeshName(CAMERA_NAME, IMAGE_TYPE, "Cylinder*")
+    # client.simAddDetectionFilterMeshName(CAMERA_NAME, IMAGE_TYPE, "Cylinder*")
+    # client.simAddDetectionFilterMeshName(CAMERA_NAME, IMAGE_TYPE, "Sportscar*")  #works
+    # client.simAddDetectionFilterMeshName(CAMERA_NAME, IMAGE_TYPE, "SK_Survival_Character*")  #doesnt work
+    # client.simAddDetectionFilterMeshName(CAMERA_NAME, IMAGE_TYPE, "SM_vehTruck_vehicle04_No_Wheel*")  #doesnt work
+    client.simAddDetectionFilterMeshName(CAMERA_NAME, IMAGE_TYPE, "BP_SplineHuman_*") #doesnt work
+
+
     client.simSetDetectionFilterRadius(CAMERA_NAME, IMAGE_TYPE, 200*100)
 
     cv2.namedWindow("2D Detections", cv2.WINDOW_NORMAL)
