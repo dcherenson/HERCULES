@@ -17,6 +17,8 @@ client.simSetDetectionFilterRadius(camera_name, image_type, 200 * 100)
 # add desired object name to detect in wild card/regex format NOTE THIS WORKS FOR STATIC MESH NAMES ONLY NOT THE NAME
 # OF THE ACTOR IN THE UE5 WORLD OUTLINER
 client.simAddDetectionFilterMeshName(camera_name, image_type, "Cylinder*") 
+# client.simAddDetectionFilterMeshName(camera_name, image_type, "BP_SplineHuman_Type10*") 
+
 
 while True:
     rawImage = client.simGetImage(camera_name, image_type)
