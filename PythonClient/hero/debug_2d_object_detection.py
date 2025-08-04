@@ -8,119 +8,139 @@ import cv2
 PORT = 41451
 CAMERA_NAME = "front_center"
 VEHICLE_NAME = ""  # empty for default / single-vehicle setups
-CSV_FILENAME = "/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/csv_data/instance_segmentation_colormap.csv"
-# If the image is upside down, set to True; otherwise leave False.
+
+# where to dump / load the mesh-color CSV
+CSV_FILENAME = "/home/sgarimella34/multi-robot-coordination/" \
+               "Cosys-AirSim/csv_data/instance_segmentation_colormap.csv"
+
+# where your UE label vs. mesh-name CSV lives
+UE_LABEL_CSV_PATH = "/home/sgarimella34/multi-robot-coordination/" \
+                    "Cosys-AirSim/csv_data/ue_label_vs_name.csv"
+
+# if your raw segmentation image appears upside-down, set to True
 FLIP_VERTICAL = False
 
-# target mesh to highlight
-TARGET_MESH = "BP_SplineHuman_Type10_C_UAID_E08F4CF5208A437A02_1596611129"
+# keywords to look for in the human-readable labels
+KEYWORDS = ("human", "car", "truck", "sedan", "suv", "vehicle")
 # ---------------------
 
 # 1. connect
 client = airsim.MultirotorClient(port=PORT)
 client.confirmConnection()
 
-# 2. get the current object list and segmentation colormap, then dump to CSV
-objects = client.simListInstanceSegmentationObjects()  # mesh names
-color_map = client.simGetSegmentationColorMap()        # Nx3 array of RGB colors
+# 2. dump the ID-name ↔ RGB colormap to CSV
+objects   = client.simListInstanceSegmentationObjects()  # list of mesh ID names
+color_map = client.simGetSegmentationColorMap()         # Nx3 array of RGB
 
 with open(CSV_FILENAME, "w", newline="") as f:
     writer = csv.writer(f)
     writer.writerow(["ObjectName", "R", "G", "B"])
     for idx, name in enumerate(objects):
-        col = color_map[idx]
-        r, g, b = int(col[0]), int(col[1]), int(col[2])
+        r, g, b = map(int, color_map[idx])
         writer.writerow([name, r, g, b])
 
-# 3. reload CSV to build both name->color and color->name maps
+# 3. reload that CSV into dictionaries
 name_to_color = {}
 color_to_name = {}
 with open(CSV_FILENAME, newline="") as f:
     reader = csv.DictReader(f)
     for row in reader:
-        name = row["ObjectName"]
-        r, g, b = int(row["R"]), int(row["G"]), int(row["B"])
-        name_to_color[name] = (r, g, b)
-        color_to_name[(r, g, b)] = name
+        mesh = row["ObjectName"]
+        rgb  = (int(row["R"]), int(row["G"]), int(row["B"]))
+        name_to_color[mesh] = rgb
+        color_to_name[rgb] = mesh
 
-# 4. get the uncompressed instance segmentation image
+# 4. load UE label ↔ ID-name mapping
+id_to_actor_label = {}
+with open(UE_LABEL_CSV_PATH, newline="") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        actor_label = row["actor_label"]
+        mesh_name   = row["get_name"]
+        id_to_actor_label[mesh_name] = actor_label
+
+# 5. grab the segmentation image
 resp = client.simGetImages(
     [airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Segmentation, False, False)],
-    vehicle_name=VEHICLE_NAME,
+    vehicle_name=VEHICLE_NAME
 )[0]
 
 if resp.width == 0 or resp.height == 0:
     print("Empty segmentation image.")
     exit(1)
 
-# 5. convert to numpy RGB (AirSim returns RGB order)
-img1d = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
+img1d   = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
 img_rgb = img1d.reshape(resp.height, resp.width, 3)
 
-# apply vertical flip only if needed
 if FLIP_VERTICAL:
     img_rgb = np.flipud(img_rgb)
 
-# 6. build mask for target mesh and get its bounding box
-target_color = name_to_color.get(TARGET_MESH)
-if target_color is None:
-    print(f"Target mesh '{TARGET_MESH}' not found in CSV.")
-else:
-    # create binary mask where pixels equal the target RGB color (exact match)
-    color_arr = np.array(target_color, dtype=np.uint8)
-    mask = np.all(img_rgb == color_arr, axis=2).astype(np.uint8) * 255  # single-channel 0/255 mask
+# prepare a BGR copy for drawing
+display = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-    # find contours on the mask
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        print(f"Target mesh '{TARGET_MESH}' has no visible pixels in the segmentation image.")
-    else:
-        # combine all contour points to get overall bounding box
-        all_pts = np.vstack([c.reshape(-1, 2) for c in contours])
-        x_min = int(all_pts[:, 0].min())
-        y_min = int(all_pts[:, 1].min())
-        x_max = int(all_pts[:, 0].max())
-        y_max = int(all_pts[:, 1].max())
-
-        print(f"Target mesh '{TARGET_MESH}' bounding box (x_min, y_min, x_max, y_max):",
-              (x_min, y_min, x_max, y_max))
-
-        # prepare display image (BGR for OpenCV)
-        display = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-
-        # draw bounding box (white, thickness 2)
-        cv2.rectangle(display, (x_min, y_min), (x_max, y_max), (255, 255, 255), 2)
-
-        # draw mesh name (truncated if too long)
-        max_len = 30
-        disp_name = TARGET_MESH if len(TARGET_MESH) <= max_len else TARGET_MESH[:27] + "..."
-        cv2.putText(display, disp_name, (x_min, max(0, y_min - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, lineType=cv2.LINE_AA)
-
-        # 7. show segmentation image with bounding box
-        window_name = "Segmentation with Target Mesh Box"
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(window_name, resp.width, resp.height)
-        cv2.imshow(window_name, display)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-
-# 8. fallback: list all meshes seen by unique colors (optional)
+# 6. find which ID-names appear (by unique colors)
 unique_colors = np.unique(img_rgb.reshape(-1, 3), axis=0)
-found_meshes = set()
-for c in unique_colors:
-    color_tuple = (int(c[0]), int(c[1]), int(c[2]))
-    if color_tuple == (0, 0, 0):
-        continue
-    name = color_to_name.get(color_tuple)
-    if name:
-        found_meshes.add(name)
-    else:
-        print(f"Found unknown segmentation color in image: {color_tuple}")
+visible_meshes = {
+    color_to_name[tuple(c)]
+    for c in unique_colors
+    if tuple(c) in color_to_name and tuple(c) != (0, 0, 0)
+}
 
-if found_meshes:
-    print("Meshes present in current camera segmentation view:")
-    for nm in sorted(found_meshes):
-        print("  ", nm)
+# 7. filter for actor_labels matching keywords
+interest = []
+for mesh in visible_meshes:
+    label = id_to_actor_label.get(mesh)
+    if label and any(kw in label.lower() for kw in KEYWORDS):
+        interest.append((mesh, label))
+
+# 8. for each interesting mesh, mask+bbox+draw
+for mesh, label in interest:
+    rgb = name_to_color[mesh]
+    mask = (img_rgb[:, :, 0] == rgb[0]) & \
+           (img_rgb[:, :, 1] == rgb[1]) & \
+           (img_rgb[:, :, 2] == rgb[2])
+    mask_uint8 = (mask.astype(np.uint8) * 255)
+    contours, _ = cv2.findContours(mask_uint8,
+                                   cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        continue
+
+    # combine points to a single bounding box
+    all_pts = np.vstack([cnt.reshape(-1, 2) for cnt in contours])
+    x_min, y_min = all_pts.min(axis=0)
+    x_max, y_max = all_pts.max(axis=0)
+
+    # draw on `display`
+    # white box, 2px thick
+    cv2.rectangle(display,
+                  (x_min, y_min),
+                  (x_max, y_max),
+                  (255, 255, 255),
+                  2)
+    # label text just above box
+    short = label if len(label) < 30 else label[:27] + "..."
+    cv2.putText(display,
+                short,
+                (x_min, max(0, y_min - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA)
+
+# 9. show final result
+win = "Filtered Instance Segmentation"
+cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(win, resp.width, resp.height)
+cv2.imshow(win, display)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
+
+# 10. (optional) print what we found
+if interest:
+    print("Detected objects matching keywords in view:")
+    for _, label in interest:
+        print(" -", label)
 else:
-    print("No known meshes found in segmentation image (only background or unmatched colors).")
+    print("No matching objects found in current FOV.")
