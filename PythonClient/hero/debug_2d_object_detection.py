@@ -22,6 +22,8 @@ FLIP_VERTICAL = False
 
 # keywords to look for in the human-readable labels
 KEYWORDS = ("human", "car", "truck", "sedan", "suv", "vehicle")
+# KEYWORDS = ("human")
+
 # ---------------------
 
 # 1. connect
