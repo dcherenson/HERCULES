@@ -4,6 +4,8 @@ import cv2
 import numpy as np 
 import pprint
 
+"""Works only for cylinders in static mesh form in block world, not dynamic Blueprint objects"""
+
 # connect to the AirSim simulator
 client = airsim.VehicleClient(port=41451)
 client.confirmConnection()
@@ -16,9 +18,9 @@ image_type = airsim.ImageType.Scene
 client.simSetDetectionFilterRadius(camera_name, image_type, 200 * 100) 
 # add desired object name to detect in wild card/regex format NOTE THIS WORKS FOR STATIC MESH NAMES ONLY NOT THE NAME
 # OF THE ACTOR IN THE UE5 WORLD OUTLINER
-# client.simAddDetectionFilterMeshName(camera_name, image_type, "Cylinder*") 
+client.simAddDetectionFilterMeshName(camera_name, image_type, "Cylinder*") 
 # client.simAddDetectionFilterMeshName(camera_name, image_type, "BP_SplineHuman_Type10*") 
-client.simAddDetectionFilterMeshName(camera_name, image_type, "BP_SplineHuman_Type10_C_UAID_E08F4CF5208A437A02_1596611129") 
+# client.simAddDetectionFilterMeshName(camera_name, image_type, "BP_SplineHuman_Type10_C_UAID_E08F4CF5208A437A02_1596611129") 
 
 
 while True:
@@ -42,7 +44,7 @@ while True:
     elif cv2.waitKey(1) & 0xFF == ord('c'):
         client.simClearDetectionMeshNames(camera_name, image_type)
     elif cv2.waitKey(1) & 0xFF == ord('a'):
-        # client.simAddDetectionFilterMeshName(camera_name, image_type, "Cylinder*")
-        client.simAddDetectionFilterMeshName(camera_name, image_type, "BP_SplineHuman_Type10_C_UAID_E08F4CF5208A437A02_1596611129") 
+        client.simAddDetectionFilterMeshName(camera_name, image_type, "Cylinder*")
+        # client.simAddDetectionFilterMeshName(camera_name, image_type, "BP_SplineHuman_Type10_C_UAID_E08F4CF5208A437A02_1596611129") 
 
 cv2.destroyAllWindows() 

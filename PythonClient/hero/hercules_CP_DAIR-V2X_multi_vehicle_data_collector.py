@@ -6,6 +6,9 @@ Robust data collection + labeling pipeline for Hercules (Cosys-AirSim) simulator
 to produce DAIR-V2X / KITTI-compatible data.
 
 Labels are generated in the same tick as the sensor data capture to preserve sync.
+
+This modified version also saves depth frames in .npy format (meters) and instance
+segmentation images (.png) for each robot.
 """
 
 import os
@@ -58,6 +61,7 @@ OBJECTS = [
 DAIR_CLASSES = {"Car": "Car", "SK_Survival_Character": "Pedestrian"}
 
 # ------------------ MESH NAME FILTERS (edit these) ------------------
+
 # Wildcard patterns passed to AirSim's simAddDetectionFilterMeshName.
 # If empty or None, falls back to detecting everything ("*").
 MESH_FILTERS = {
@@ -70,17 +74,21 @@ MESH_FILTERS = {
 def dair_paths(root: str):
     return {
         "inf": {
-            "img":   f"{root}/cooperative/infrastructure-side/image",
-            "lidar": f"{root}/cooperative/infrastructure-side/lidar",
-            "calib": f"{root}/cooperative/infrastructure-side/calib",
-            "ts":    f"{root}/cooperative/infrastructure-side/timestamp",
+            "img":         f"{root}/cooperative/infrastructure-side/image",
+            "depth":       f"{root}/cooperative/infrastructure-side/depth",
+            "seg":         f"{root}/cooperative/infrastructure-side/seg",
+            "lidar":       f"{root}/cooperative/infrastructure-side/lidar",
+            "calib":       f"{root}/cooperative/infrastructure-side/calib",
+            "ts":          f"{root}/cooperative/infrastructure-side/timestamp",
             "kitti_label": f"{root}/cooperative/infrastructure-side/kitti_label"
         },
         "veh": {
-            "img":   f"{root}/cooperative/vehicle-side/image",
-            "lidar": f"{root}/cooperative/vehicle-side/lidar",
-            "calib": f"{root}/cooperative/vehicle-side/calib",
-            "ts":    f"{root}/cooperative/vehicle-side/timestamp",
+            "img":         f"{root}/cooperative/vehicle-side/image",
+            "depth":       f"{root}/cooperative/vehicle-side/depth",
+            "seg":         f"{root}/cooperative/vehicle-side/seg",
+            "lidar":       f"{root}/cooperative/vehicle-side/lidar",
+            "calib":       f"{root}/cooperative/vehicle-side/calib",
+            "ts":          f"{root}/cooperative/vehicle-side/timestamp",
             "kitti_label": f"{root}/cooperative/vehicle-side/kitti_label"
         },
         "label": {
@@ -180,6 +188,89 @@ def extract_yaw_from_camera_rotation(R):
 # AirSim NED → DAIR-V2X Virtual LiDAR adjustment (z-up, leveled)
 F_VL = np.diag([1.0, -1.0, -1.0])
 
+# ------------------ DETECTION FILTERS ------------------
+
+def set_detection_filters(client, vehicle_name, radius_cm, mesh_names=None):
+    client.simClearDetectionMeshNames(CAM_NAME, airsim.ImageType.Scene, vehicle_name=vehicle_name)
+    client.simSetDetectionFilterRadius(CAM_NAME, airsim.ImageType.Scene, radius_cm, vehicle_name=vehicle_name)
+    if not mesh_names:
+        client.simAddDetectionFilterMeshName(CAM_NAME, airsim.ImageType.Scene, "*", vehicle_name=vehicle_name)
+    else:
+        for pattern in mesh_names:
+            client.simAddDetectionFilterMeshName(CAM_NAME, airsim.ImageType.Scene, pattern, vehicle_name=vehicle_name)
+
+def get_detections_api(client, vehicle_name):
+    dets = client.simGetDetections(CAM_NAME, airsim.ImageType.Scene, vehicle_name=vehicle_name)
+    out = []
+    if not dets:
+        return out
+    for d in dets:
+        cls = None
+        for key in DAIR_CLASSES:
+            if d.name.startswith(key):
+                cls = DAIR_CLASSES[key]
+                break
+        if cls is None:
+            cls = d.name
+        bbox2d = [
+            float(d.box2D.min.x_val),
+            float(d.box2D.min.y_val),
+            float(d.box2D.max.x_val),
+            float(d.box2D.max.y_val)
+        ]
+        out.append({
+            "name": d.name,
+            "type": cls,
+            "bbox2d": bbox2d,
+            "relative_pose": d.relative_pose
+        })
+    return out
+
+# ------------------ DEPTH & SEGMENTATION ------------------
+
+def get_images(client, vehicle_name):
+    """
+    Retrieve scene, depth (meters), and segmentation frames in one call.
+    Retries until non-empty.
+    """
+    reqs = [
+        airsim.ImageRequest(CAM_NAME, airsim.ImageType.Scene,       False, True),
+        airsim.ImageRequest(CAM_NAME, airsim.ImageType.DepthPlanar, True, False),
+        airsim.ImageRequest(CAM_NAME, airsim.ImageType.Segmentation,False, False),
+    ]
+    while True:
+        imgs = client.simGetImages(reqs, vehicle_name=vehicle_name)
+        scene, depth, seg = imgs
+        if scene.width > 0 and scene.height > 0 and \
+           (scene.compress and len(scene.image_data_uint8) > 0) and \
+           depth.pixels_as_float and depth.image_data_float and \
+           seg.width > 0 and seg.height > 0 and len(seg.image_data_uint8) > 0:
+            # decode scene
+            data = np.frombuffer(scene.image_data_uint8, dtype=np.uint8)
+            scene_img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            # depth array (meters)
+            depth_arr = np.array(depth.image_data_float, dtype=np.float32) \
+                        .reshape(depth.height, depth.width)
+            # segmentation image
+            seg_arr = np.frombuffer(seg.image_data_uint8, dtype=np.uint8) \
+                      .reshape(seg.height, seg.width, 3)
+            seg_bgr = cv2.cvtColor(seg_arr, cv2.COLOR_RGB2BGR)
+            return scene_img, depth_arr, seg_bgr
+
+def get_lidar_points_with_retry(client, vehicle_name, max_retries=3, backoff_s=0.001):
+    for attempt in range(max_retries):
+        ld = client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=vehicle_name)
+        if ld.point_cloud:
+            pts = np.array(ld.point_cloud, dtype=np.float32).reshape(-1, 3)
+            if pts.size:
+                return pts
+        time.sleep(backoff_s)
+    return None
+
+def save_lidar_bin(path, pts_xyz):
+    arr = np.concatenate([pts_xyz, np.ones((pts_xyz.shape[0], 1), np.float32)], axis=1).astype(np.float32)
+    arr.tofile(path)
+
 # ------------------ CALIBRATION ------------------
 
 def build_sensor_calibrations(settings, vehicle_name):
@@ -252,71 +343,6 @@ def get_object_world_pose(client, name):
     R = quat_to_rot_matrix(o.w_val, o.x_val, o.y_val, o.z_val)
     t = np.array([p.x_val, p.y_val, p.z_val], dtype=float)
     return R, t
-
-# ------------------ SENSOR ACCESS ------------------
-
-def set_detection_filters(client, vehicle_name, radius_cm, mesh_names=None):
-    client.simClearDetectionMeshNames(CAM_NAME, airsim.ImageType.Scene, vehicle_name=vehicle_name)
-    client.simSetDetectionFilterRadius(CAM_NAME, airsim.ImageType.Scene, radius_cm, vehicle_name=vehicle_name)
-    if not mesh_names:
-        client.simAddDetectionFilterMeshName(CAM_NAME, airsim.ImageType.Scene, "*", vehicle_name=vehicle_name)
-    else:
-        for pattern in mesh_names:
-            client.simAddDetectionFilterMeshName(CAM_NAME, airsim.ImageType.Scene, pattern, vehicle_name=vehicle_name)
-
-def get_detections_api(client, vehicle_name):
-    dets = client.simGetDetections(CAM_NAME, airsim.ImageType.Scene, vehicle_name=vehicle_name)
-    out = []
-    if not dets:
-        return out
-    for d in dets:
-        cls = None
-        for key in DAIR_CLASSES:
-            if d.name.startswith(key):
-                cls = DAIR_CLASSES[key]
-                break
-        if cls is None:
-            cls = d.name
-        bbox2d = [
-            float(d.box2D.min.x_val),
-            float(d.box2D.min.y_val),
-            float(d.box2D.max.x_val),
-            float(d.box2D.max.y_val)
-        ]
-        out.append({
-            "name": d.name,
-            "type": cls,
-            "bbox2d": bbox2d,
-            "relative_pose": d.relative_pose
-        })
-    return out
-
-def get_image(client, vehicle_name):
-    resp = client.simGetImages([airsim.ImageRequest(CAM_NAME, airsim.ImageType.Scene, False, True)],
-                               vehicle_name=vehicle_name)[0]
-    if resp.compress:
-        data = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
-        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        return img
-    else:
-        img1d = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
-        img_rgba = img1d.reshape(resp.height, resp.width, 4)
-        img_bgr = cv2.cvtColor(img_rgba, cv2.COLOR_RGBA2BGR)
-        return img_bgr
-
-def get_lidar_points_with_retry(client, vehicle_name, max_retries=3, backoff_s=0.001):
-    for attempt in range(max_retries):
-        ld = client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=vehicle_name)
-        if ld.point_cloud:
-            pts = np.array(ld.point_cloud, dtype=np.float32).reshape(-1, 3)
-            if pts.size:
-                return pts
-        time.sleep(backoff_s)
-    return None
-
-def save_lidar_bin(path, pts_xyz):
-    arr = np.concatenate([pts_xyz, np.ones((pts_xyz.shape[0], 1), np.float32)], axis=1).astype(np.float32)
-    arr.tofile(path)
 
 # ------------------ LABEL CONSTRUCTION ------------------
 
@@ -425,7 +451,7 @@ def main():
     R_level_inf = np.array([
         [math.cos(yaw_inf), -math.sin(yaw_inf), 0],
         [math.sin(yaw_inf),  math.cos(yaw_inf), 0],
-        [0,                 0,                1]
+        [0,                0,                 1]
     ], dtype=float)
     T_world_virtual_lidar_inf = build_homogeneous(R_level_inf, t_raw_inf)
     T_world_cam_inf = T_world_inf_init @ inf_calib["T_cam_to_vehicle"]
@@ -479,10 +505,13 @@ def main():
         # --- capture vehicle sensors ---
         veh_got_lidar = False
         for name in SIDE_VEH:
+            # RGB, depth, seg @ camera rate
             if tick % CAM_EVERY == 0:
-                img = get_image(car_client, name)
-                if img is not None:
-                    cv2.imwrite(os.path.join(PATHS["veh"]["img"], f"{t_ms}{IMG_EXT}"), img)
+                scene_img, depth_arr, seg_img = get_images(car_client, name)
+                cv2.imwrite(os.path.join(PATHS["veh"]["img"], f"{t_ms}{IMG_EXT}"), scene_img)
+                np.save(os.path.join(PATHS["veh"]["depth"], f"{t_ms}.npy"), depth_arr)
+                cv2.imwrite(os.path.join(PATHS["veh"]["seg"], f"{t_ms}{IMG_EXT}"), seg_img)
+            # LiDAR @ lidar rate
             if tick % LIDAR_EVERY == 0:
                 pts = get_lidar_points_with_retry(car_client, name)
                 if pts is not None and pts.size:
@@ -495,10 +524,13 @@ def main():
         # --- capture infrastructure sensors ---
         inf_got_lidar = False
         for name in SIDE_INF:
+            # RGB, depth, seg @ camera rate
             if tick % CAM_EVERY == 0:
-                img = get_image(drone_client, name)
-                if img is not None:
-                    cv2.imwrite(os.path.join(PATHS["inf"]["img"], f"{t_ms}{IMG_EXT}"), img)
+                scene_img, depth_arr, seg_img = get_images(drone_client, name)
+                cv2.imwrite(os.path.join(PATHS["inf"]["img"], f"{t_ms}{IMG_EXT}"), scene_img)
+                np.save(os.path.join(PATHS["inf"]["depth"], f"{t_ms}.npy"), depth_arr)
+                cv2.imwrite(os.path.join(PATHS["inf"]["seg"], f"{t_ms}{IMG_EXT}"), seg_img)
+            # LiDAR @ lidar rate
             if tick % LIDAR_EVERY == 0:
                 pts = get_lidar_points_with_retry(drone_client, name)
                 if pts is not None and pts.size:
@@ -695,6 +727,7 @@ def main():
     print("[DONE] Finished. Data stored under:", OUT_ROOT, flush=True)
     print(f"Total pairs: {len(frame_pairs)}", flush=True)
     print(f"Collected vehicle lidar timestamps: {len(veh_ts_list)}, infra: {len(inf_ts_list)}", flush=True)
+
 
 if __name__ == "__main__":
     main()
