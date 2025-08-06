@@ -17,12 +17,18 @@ CSV_FILENAME = "/home/sgarimella34/multi-robot-coordination/" \
 UE_LABEL_CSV_PATH = "/home/sgarimella34/multi-robot-coordination/" \
                     "Cosys-AirSim/csv_data/ue_label_vs_name.csv"
 
+# where to save the depth frame (NumPy .npy format)
+DEPTH_NPY_FILENAME = "/home/sgarimella34/multi-robot-coordination/" \
+                     "Cosys-AirSim/csv_data/depth_frame.npy"
+
 # if your raw segmentation image appears upside-down, set to True
 FLIP_VERTICAL = False
 
 # keywords to look for in the human-readable labels
 KEYWORDS = ("human", "car", "truck", "sedan", "suv", "vehicle")
-# KEYWORDS = ("human")
+
+# maximum distance cutoff in meters
+MAX_DISTANCE = 30.0
 
 # ---------------------
 
@@ -61,23 +67,34 @@ with open(UE_LABEL_CSV_PATH, newline="") as f:
         mesh_name   = row["get_name"]
         id_to_actor_label[mesh_name] = actor_label
 
-# 5. grab the segmentation image
-resp = client.simGetImages(
-    [airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Segmentation, False, False)],
-    vehicle_name=VEHICLE_NAME
-)[0]
+# 5. grab the segmentation and depth images at the same frozen timestamp
+client.simPause(True)
+responses = client.simGetImages([
+    airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Segmentation, False, False),
+    airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.DepthPlanar, True, False)
+], vehicle_name=VEHICLE_NAME)
+seg_resp, depth_resp = responses
+client.simPause(False)
 
-if resp.width == 0 or resp.height == 0:
+# check segmentation validity
+if seg_resp.width == 0 or seg_resp.height == 0:
     print("Empty segmentation image.")
     exit(1)
 
-img1d   = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
-img_rgb = img1d.reshape(resp.height, resp.width, 3)
-
+# process segmentation image
+img1d   = np.frombuffer(seg_resp.image_data_uint8, dtype=np.uint8)
+img_rgb = img1d.reshape(seg_resp.height, seg_resp.width, 3)
 if FLIP_VERTICAL:
     img_rgb = np.flipud(img_rgb)
 
-# prepare a BGR copy for drawing
+# process depth image and save to .npy
+depth1d = np.array(depth_resp.image_data_float, dtype=np.float32)
+depth_img = depth1d.reshape(depth_resp.height, depth_resp.width)
+if FLIP_VERTICAL:
+    depth_img = np.flipud(depth_img)
+np.save(DEPTH_NPY_FILENAME, depth_img)
+
+# prepare a BGR copy of segmentation for drawing
 display = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
 # 6. find which ID-names appear (by unique colors)
@@ -89,22 +106,28 @@ visible_meshes = {
 }
 
 # 7. filter for actor_labels matching keywords
-interest = []
+candidates = []
 for mesh in visible_meshes:
     label = id_to_actor_label.get(mesh)
     if label and any(kw in label.lower() for kw in KEYWORDS):
-        interest.append((mesh, label))
+        candidates.append((mesh, label))
 
-# 8. for each interesting mesh, mask+bbox+draw
-for mesh, label in interest:
+# 8. for each candidate, mask, apply depth cutoff, bbox, and draw
+drawn_labels = []
+for mesh, label in candidates:
     rgb = name_to_color[mesh]
-    mask = (img_rgb[:, :, 0] == rgb[0]) & \
-           (img_rgb[:, :, 1] == rgb[1]) & \
-           (img_rgb[:, :, 2] == rgb[2])
+    mask = ((img_rgb[:, :, 0] == rgb[0]) &
+            (img_rgb[:, :, 1] == rgb[1]) &
+            (img_rgb[:, :, 2] == rgb[2]))
+    # apply distance cutoff
+    mask &= (depth_img <= MAX_DISTANCE)
     mask_uint8 = (mask.astype(np.uint8) * 255)
-    contours, _ = cv2.findContours(mask_uint8,
-                                   cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
+
+    contours, _ = cv2.findContours(
+        mask_uint8,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
     if not contours:
         continue
 
@@ -114,7 +137,6 @@ for mesh, label in interest:
     x_max, y_max = all_pts.max(axis=0)
 
     # draw on `display`
-    # white box, 2px thick
     cv2.rectangle(display,
                   (x_min, y_min),
                   (x_max, y_max),
@@ -131,18 +153,20 @@ for mesh, label in interest:
                 1,
                 cv2.LINE_AA)
 
+    drawn_labels.append(label)
+
 # 9. show final result
-win = "Filtered Instance Segmentation"
+win = "Filtered Instance Segmentation (<= {} m)".format(MAX_DISTANCE)
 cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-cv2.resizeWindow(win, resp.width, resp.height)
+cv2.resizeWindow(win, seg_resp.width, seg_resp.height)
 cv2.imshow(win, display)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
 
-# 10. (optional) print what we found
-if interest:
-    print("Detected objects matching keywords in view:")
-    for _, label in interest:
-        print(" -", label)
+# 10. print what was found within cutoff
+if drawn_labels:
+    print("Detected objects within {} m:".format(MAX_DISTANCE))
+    for lbl in drawn_labels:
+        print(" -", lbl)
 else:
-    print("No matching objects found in current FOV.")
+    print("No matching objects within {} m found in current FOV.".format(MAX_DISTANCE))
