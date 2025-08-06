@@ -20,7 +20,7 @@ def main():
     P = np.array(proj_list, dtype=float).reshape((4, 4))
 
     # Print the projection matrix
-    print("Camera projection matrix (4×4):")
+    print("Camera projection matrix (4x4):")
     print(P)
 
 if __name__ == "__main__":
