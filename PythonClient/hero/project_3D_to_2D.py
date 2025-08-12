@@ -45,8 +45,8 @@ def main():
     print(P)
 
     # 4. object pose
-    # obj_pose = client.simGetObjectPose("StaticMeshActor_1")
-    obj_pose = client.simGetObjectPose("BP_SplineHuman_Type10_C_UAID_E08F4CF5208A437A02_1596611129")
+    obj_pose = client.simGetObjectPose("StaticMeshActor_1")
+    # obj_pose = client.simGetObjectPose("BP_SplineHuman_Type10_C_UAID_E08F4CF5208A437A02_1596611129")
     obj_p = to_numpy_vector(obj_pose.position)
     obj_q = np.array([obj_pose.orientation.w_val,
                       obj_pose.orientation.x_val,

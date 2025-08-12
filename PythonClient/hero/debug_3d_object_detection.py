@@ -7,10 +7,9 @@ Minimal script to:
      Vertical FOV is derived from the aspect ratio.
   4. Query and (optionally) disable any lens distortion parameters.
   5. Define a virtual 3D bounding box (L*W*H) in the actor's local frame, transform it into world
-     coordinates using its pose, print the 8 world-frame corners, and visualize.
-  6. Project those 3D corners into the image using a classic pinhole model and draw
-     the resulting 3D bounding box on the image — or, if toggled, draw the 2D axis-aligned box
-     around those projected corners.
+     coordinates using its pose (optionally with a Z-offset in NED), print the 8 world-frame corners, and visualize.
+  6. Project those 3D corners into the image using AirSim's built-in 4x4 projection matrix and draw
+     the resulting 3D bounding box on the image — or, if toggled, draw the 2D axis-aligned box.
 """
 
 import math
@@ -26,27 +25,29 @@ except ImportError:
     o3d = None
 
 # === CONFIGURATION ===
-# ACTOR_PATTERN      = "StaticMeshActor_UAID_6C6E07.*"   # regex to match actor name(s)
-ACTOR_PATTERN      = "BP_SplineHuman_Type10.*"   # regex to match actor name(s)
+# ACTOR_PATTERN      = "StaticMeshActor_UAID_6C6E07.*"
+# ACTOR_PATTERN      = "BP_SplineHuman_Type10.*"
+ACTOR_PATTERN      = "SkeletalMeshActor_UAID.*"
+# ACTOR_PATTERN      = "StaticMeshActor_1*"   # regex to match actor name(s)
 
 CAMERA_NAME        = "front_center"              # camera to query
 CLIENT_CLASS       = airsim.MultirotorClient     # or airsim.CarClient
 PORT               = 41451                       # adjust if your AirSim uses a different port
 
-# BOX_LENGTH         = 1.0   # meters (local forward)
-# BOX_WIDTH          = 1.0   # meters (local right)
-# BOX_HEIGHT         = 1.0  # meters (local up)
-
 BOX_LENGTH         = 0.5   # meters (local forward)
-BOX_WIDTH          = 0.5  # meters (local right)
-BOX_HEIGHT         = 1.6  # meters (local up)
+BOX_WIDTH          = 0.5   # meters (local right)
+BOX_HEIGHT         = 1.9   # meters (local up)
 
+PROJECTION_ENABLED = True   # toggle 3D→2D projection
 
-PROJECTION_ENABLED = True  # toggle 3D→2D projection
-
-# NEW TOGGLE: if True, draws a 2D axis-aligned bounding rectangle
-# around the projected 3D corners. If False, draws the full 3D wireframe.
+# If True, draws a 2D axis-aligned bounding rectangle around projected corners.
+# If False, draws the full 3D wireframe.
+# DRAW_2D_BBOX       = False
 DRAW_2D_BBOX       = True
+
+# --- NEW: Z offset in NED (meters). +Z is DOWN in NED. ---
+Z_OFFSET_NED       = -0.9
+
 # =====================
 
 
@@ -122,37 +123,38 @@ def compute_bounding_box_corners_world(pose, L, W, H):
     return (R @ corners_local.T).T + t
 
 
-def project_world_points_to_image(world_pts, cam_pose, K):
+# -------- projection using AirSim's 4x4 projection matrix P ----------
+def project_world_points_to_image(world_pts, cam_pose, P, width, height):
     """
-    Manual pinhole projection into pixel coords.
+    Project 3D world points using AirSim's 4x4 projection matrix (row-major).
     """
-    R_wc = quaternion_to_rotation_matrix(cam_pose.orientation)  # cam→world
-    R_cw = R_wc.T                                              # world→cam
-    C = np.array([cam_pose.position.x_val,
-                  cam_pose.position.y_val,
-                  cam_pose.position.z_val], dtype=float)
+    R_cam = quaternion_to_rotation_matrix(cam_pose.orientation)
+    cam_p = np.array([cam_pose.position.x_val,
+                      cam_pose.position.y_val,
+                      cam_pose.position.z_val], dtype=float)
 
-    Xc = (R_cw @ ((world_pts - C).T)).T
-    x_fwd, y_right, z_down = Xc[:,0], Xc[:,1], Xc[:,2]
+    cam_pts = (R_cam.T @ (world_pts - cam_p).T).T  # Nx3
 
-    fx, fy = K[0,0], K[1,1]
-    cx, cy = K[0,2], K[1,2]
+    pts_h = np.hstack([cam_pts, np.ones((cam_pts.shape[0], 1), dtype=float)])  # Nx4
+    clip = (P @ pts_h.T).T                                                    # Nx4
 
-    valid = x_fwd > 1e-6
-    u = np.zeros_like(x_fwd)
-    v = np.zeros_like(x_fwd)
-    u[valid] = (y_right[valid] / x_fwd[valid]) * fx + cx
-    v[valid] = (z_down[valid]  / x_fwd[valid]) * fy + cy
+    w_comp = clip[:, 3:4]
+    ndc = clip[:, :3] / w_comp
+
+    u = (1.0 - (ndc[:, 0] * 0.5 + 0.5)) * width
+    v = (ndc[:, 1] * 0.5 + 0.5) * height
 
     pts2d = np.stack([u, v], axis=1)
-    return pts2d, x_fwd, valid
+    depth = cam_pts[:, 0]                      # forward (X) in camera frame
+    valid = depth > 1e-6
+    return pts2d, depth, valid
+# ---------------------------------------------------------------------
 
 
 def draw_projected_box(img, pts2d, depth, valid):
     h, w = img.shape[:2]
 
     if DRAW_2D_BBOX:
-        # draw 2D axis-aligned bbox
         us = pts2d[valid, 0]
         vs = pts2d[valid, 1]
         if us.size and vs.size:
@@ -160,7 +162,6 @@ def draw_projected_box(img, pts2d, depth, valid):
             y0, y1 = int(vs.min()), int(vs.max())
             cv2.rectangle(img, (x0,y0), (x1,y1), (0,255,0), 2)
     else:
-        # draw full 3D wireframe
         edges = [
             [0,1],[1,3],[3,2],[2,0],
             [4,5],[5,7],[7,6],[6,4],
@@ -228,25 +229,42 @@ def main():
     print_pose(f"Actor ({actor})", actor_pose)
     print_pose(f"Camera ({CAMERA_NAME})", cam_pose)
 
-    # --- 5) intrinsics ---
-    h,w = img.shape[:2]
+    # --- 4a) apply Z-offset to actor centroid in NED ---
+    adjusted_actor_pose = airsim.Pose(
+        position_val=airsim.Vector3r(
+            actor_pose.position.x_val,
+            actor_pose.position.y_val,
+            actor_pose.position.z_val + Z_OFFSET_NED  # +Z is DOWN in NED
+        ),
+        orientation_val=actor_pose.orientation
+    )
+    print(f"Applied Z offset (NED): {Z_OFFSET_NED:+.4f} m")
+    print_pose(f"Actor+Zoffset ({actor})", adjusted_actor_pose)
+
+    # --- 5) intrinsics (kept for reference/logging) ---
+    h, w = img.shape[:2]
     K, vfov = compute_intrinsics_from_horizontal_fov(cam_info.fov, w, h)
     print(f"Resolution: {w}×{h}, HFOV: {cam_info.fov:.4f}°, VFOV: {vfov:.4f}°")
     print("K =\n", K, "\n")
 
+    # --- NEW: get AirSim projection matrix (4×4 row-major) ---
+    P = np.array(cam_info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
+    print("AirSim projection matrix P=\n", P, "\n")
+
     # --- 6) compute world-frame corners & print ---
     corners_w = compute_bounding_box_corners_world(
-        actor_pose, BOX_LENGTH, BOX_WIDTH, BOX_HEIGHT)
-    print(f"Box L×W×H = {BOX_LENGTH}×{BOX_WIDTH}×{BOX_HEIGHT} m")
+        adjusted_actor_pose, BOX_LENGTH, BOX_WIDTH, BOX_HEIGHT)
+    print(f"Box L×W×H = {BOX_LENGTH}×{BOX_WIDTH}×{BOX_HEIGHT} m (Z-offset applied)")
     for i, c in enumerate(corners_w):
         print(f" [{i}] x={c[0]:.4f}, y={c[1]:.4f}, z={c[2]:.4f}")
     print()
 
-    # --- 7) project & draw ---
+    # --- 7) project & draw (via P) ---
     disp = img.copy()
-    if PROJECTION_ENABLED and cam_pose:
-        pts2d, depth, valid = project_world_points_to_image(corners_w, cam_pose, K)
-        print("Using manual pinhole projection:")
+    if PROJECTION_ENABLED and cam_pose is not None:
+        pts2d, depth, valid = project_world_points_to_image(
+            corners_w, cam_pose, P, w, h)
+        print("Using AirSim P-based projection:")
         for i, ((u,v), d, ok) in enumerate(zip(pts2d, depth, valid)):
             status = "vis" if ok and d>0 else "out"
             print(f"[{i}] u={u:.1f}, v={v:.1f}, depth={d:.3f} ({status})")
@@ -256,7 +274,7 @@ def main():
         print("Skipping projection.\n")
 
     # --- 8) annotate & show ---
-    cv2.putText(disp, f"Actor: {actor}", (10,25),
+    cv2.putText(disp, f"Actor: {actor} | Zoff(NED): {Z_OFFSET_NED:+.2f}m", (10,25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
     cv2.namedWindow("Projected 3D Bounding Box", cv2.WINDOW_NORMAL)
     cv2.imshow("Projected 3D Bounding Box", disp)
@@ -268,6 +286,7 @@ def main():
     if o3d:
         try:
             frames = []
+            # original actor frame (no offset) for reference
             Ta = np.eye(4)
             Ta[:3,:3] = quaternion_to_rotation_matrix(actor_pose.orientation)
             Ta[:3,3] = [actor_pose.position.x_val,
@@ -277,6 +296,7 @@ def main():
             fa.transform(Ta)
             frames.append(fa)
 
+            # camera frame
             if cam_pose:
                 Tc = np.eye(4)
                 Tc[:3,:3] = quaternion_to_rotation_matrix(cam_pose.orientation)
@@ -287,6 +307,7 @@ def main():
                 fc.transform(Tc)
                 frames.append(fc)
 
+            # box at adjusted pose
             edges = [[0,1],[1,3],[3,2],[2,0],
                      [4,5],[5,7],[7,6],[6,4],
                      [0,4],[1,5],[2,6],[3,7]]
