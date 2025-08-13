@@ -7,8 +7,7 @@ Minimal script to:
   4) Project 3D corners using AirSim's 4x4 projection matrix; draw amodal 2D box.
   5) ALSO show Segmentation ROI + Depth ROI inside that 2D box in separate windows.
   6) (NEW) Optionally depth-clip the segmentation ROI to keep only pixels with depth ≤ threshold.
-
-Keeps car vs human profile selection.
+  7) (NEW) Back-project depth-clipped seg ROI to 3D and render those points in Open3D with seg colors.
 """
 
 import math
@@ -24,7 +23,6 @@ except ImportError:
     o3d = None
 
 # === CONFIGURATION ===
-# Set the actor search pattern for your scene
 # ACTOR_PATTERN      = "SkeletalMeshActor_UAID.*"
 ACTOR_PATTERN      = "StaticMeshActor_UAID_E08F4CF5208AA07502_2022041209.*"
 
@@ -46,19 +44,21 @@ PROFILES = {
 if OBJECT_TYPE not in PROFILES:
     raise ValueError(f"Unknown OBJECT_TYPE '{OBJECT_TYPE}'. Choose from {list(PROFILES.keys())}.")
 
-# derive active dims/offset from the selected profile
 BOX_LENGTH    = PROFILES[OBJECT_TYPE]["L"]
 BOX_WIDTH     = PROFILES[OBJECT_TYPE]["W"]
 BOX_HEIGHT    = PROFILES[OBJECT_TYPE]["H"]
 Z_OFFSET_NED  = PROFILES[OBJECT_TYPE]["Z"]
 
-# show cropped segmentation/depth views?
 SHOW_ROI_WINDOWS   = True
 
-# --- Depth-clip settings (NEW) ---
-DEPTH_CLIP_ENABLE   = True     # if True, mask seg ROI by depth threshold
-DEPTH_CLIP_MAX_M    = 35.0     # keep pixels with depth <= this (meters)
-SHOW_ORIGINAL_SEG_ROI = True   # also show the raw (unclipped) seg ROI for comparison
+# --- Depth-clip settings ---
+DEPTH_CLIP_ENABLE     = True     # if True, mask seg ROI by depth threshold
+DEPTH_CLIP_MAX_M      = 35.0     # keep pixels with depth <= this (meters)
+SHOW_ORIGINAL_SEG_ROI = True     # also show the raw (unclipped) seg ROI for comparison
+
+# --- (NEW) Point cloud export from clipped ROI ---
+ADD_ROI_POINTS_TO_OPEN3D = True  # toggle adding ROI points into Open3D scene
+ROI_POINT_STRIDE          = 1    # stride ≥1; increase to subsample points (2,3,...)
 
 # =====================
 
@@ -169,6 +169,76 @@ def depth_roi_to_vis(depth_roi):
         vis = np.zeros_like(d, dtype=np.uint8)
     return cv2.applyColorMap(vis, cv2.COLORMAP_JET)
 
+# ---------- (NEW) Back-project ROI pixels to 3D using AirSim P ----------
+def roi_points_to_world_pointcloud_P(seg_roi_clipped, depth_roi, x0, y0,
+                                     img_w, img_h, P, cam_pose, stride=1):
+    """
+    Use the same P-based mapping as your forward projection:
+      ndc_x = (P[0,1]*Y)/(-X),  ndc_y = (P[1,2]*Z)/(-X)
+    and the raster <-> ndc conversions from your code:
+      ndc_x = 1 - 2*u/W,  ndc_y = 2*v/H - 1
+
+    seg_roi_clipped: (Hroi,Wroi,3) BGR uint8, zeros = masked-out
+    depth_roi:       (Hroi,Wroi) float32 meters (Euclidean range)
+    (x0,y0):         ROI top-left in full image pixels
+    img_w,img_h:     full image size
+    P:               4x4 AirSim projection matrix
+    cam_pose:        AirSim camera pose
+    stride:          subsampling stride
+    Returns: (Nx3 world_pts, Nx3 rgb_colors_float)
+    """
+    H, W = depth_roi.shape
+    seg_nonzero   = np.any(seg_roi_clipped != 0, axis=2)
+    finite_depth  = np.isfinite(depth_roi) & (depth_roi > 0)
+    mask = seg_nonzero & finite_depth
+    if not np.any(mask):
+        return None, None
+
+    if stride > 1:
+        sampled = np.zeros_like(mask)
+        sampled[::stride, ::stride] = True
+        mask = mask & sampled
+        if not np.any(mask):
+            return None, None
+
+    ys, xs = np.where(mask)
+    u = (x0 + xs).astype(np.float64)  # full-image coords
+    v = (y0 + ys).astype(np.float64)
+
+    # pixel -> NDC, consistent with your forward code
+    ndc_x = 1.0 - 2.0 * (u / float(img_w))
+    ndc_y = 2.0 * (v / float(img_h)) - 1.0
+
+    p01 = float(P[0,1])
+    p12 = float(P[1,2])
+    if abs(p01) < 1e-9 or abs(p12) < 1e-9:
+        return None, None
+
+    # From P: Y/X = -ndc_x / p01,  Z/X = -ndc_y / p12
+    rat_y = -ndc_x / p01
+    rat_z = -ndc_y / p12
+
+    # Ray direction in AirSim cam coords (X-forward, Y-right, Z-down)
+    dirs = np.stack([np.ones_like(rat_y), rat_y, rat_z], axis=1)  # (N,3)
+    norms = np.linalg.norm(dirs, axis=1, keepdims=True)
+    dirs_unit = dirs / np.maximum(norms, 1e-12)
+
+    # DepthPerspective = Euclidean range along the viewing ray
+    r = depth_roi[ys, xs].astype(np.float64)[:, None]
+    p_cam = dirs_unit * r  # (N,3)
+
+    # Lift to world
+    R_cam = quaternion_to_rotation_matrix(cam_pose.orientation)
+    cam_p = np.array([cam_pose.position.x_val,
+                      cam_pose.position.y_val,
+                      cam_pose.position.z_val], dtype=float)
+    world_pts = (R_cam @ p_cam.T).T + cam_p
+
+    # Colors: BGR -> RGB in [0,1]
+    colors_bgr = seg_roi_clipped[ys, xs, :]
+    colors_rgb = colors_bgr[:, ::-1].astype(np.float32) / 255.0
+    return world_pts.astype(np.float64), colors_rgb
+
 def main():
     np.set_printoptions(precision=4, suppress=True)
     client = CLIENT_CLASS(port=PORT)
@@ -276,6 +346,7 @@ def main():
     # Project & draw amodal 2D box; show ROI crops for seg/depth
     disp = img.copy()
     amodal_bbox = None
+    roi_pcd = None  # (NEW) will hold Open3D point cloud from the clipped ROI
     if PROJECTION_ENABLED and cam_pose is not None:
         pts2d, depth_forward, valid = project_world_points_to_image(
             corners_w, cam_pose, P, w, h)
@@ -286,7 +357,7 @@ def main():
     else:
         print("Skipping projection.\n")
 
-    # ROI windows (segmentation & depth) inside the same 2D box
+    # ROI windows (segmentation & depth) + (NEW) build ROI point cloud
     if SHOW_ROI_WINDOWS and amodal_bbox is not None:
         x0, y0, x1, y1 = amodal_bbox
         # safety clip
@@ -297,29 +368,38 @@ def main():
             depth_roi = depth_img[y0:y1+1, x0:x1+1]
             depth_vis = depth_roi_to_vis(depth_roi)
 
-            # --- NEW: apply depth clip to segmentation ROI ---
             if DEPTH_CLIP_ENABLE:
-                # keep only pixels with finite depth in (0, DEPTH_CLIP_MAX_M]
                 valid_depth_mask = np.isfinite(depth_roi) & (depth_roi > 0) & (depth_roi <= DEPTH_CLIP_MAX_M)
                 seg_roi_clipped = np.zeros_like(seg_roi)
                 seg_roi_clipped[valid_depth_mask] = seg_roi[valid_depth_mask]
 
-                # --- NEW: list unique colors (RGB) in clipped seg ROI ---
+                # list unique colors in clipped seg ROI
                 flat = seg_roi_clipped.reshape(-1, 3)
-                # treat pure black as "masked-out"; skip it
                 nonzero = np.any(flat != 0, axis=1)
                 flat_nz = flat[nonzero]
                 if flat_nz.size > 0:
-                    # unique in BGR (OpenCV), then convert to RGB for printing
                     colors_bgr, counts = np.unique(flat_nz, axis=0, return_counts=True)
-                    colors_rgb = colors_bgr[:, ::-1]  # BGR -> RGB
-                    # pretty print
+                    colors_rgb = colors_bgr[:, ::-1]
                     rgb_list = [tuple(int(c) for c in row) for row in colors_rgb]
                     print(f"[Depth-clip <= {DEPTH_CLIP_MAX_M:.2f} m] Unique instance colors in seg ROI: {len(rgb_list)}")
                     print(" RGB colors:", rgb_list)
                 else:
                     print(f"[Depth-clip <= {DEPTH_CLIP_MAX_M:.2f} m] Unique instance colors in seg ROI: 0")
 
+                # (NEW) back-project clipped ROI to a world point cloud with P
+                if ADD_ROI_POINTS_TO_OPEN3D and o3d is not None:
+                    world_pts, colors = roi_points_to_world_pointcloud_P(
+                        seg_roi_clipped, depth_roi, x0, y0, w, h, P, cam_pose, stride=ROI_POINT_STRIDE
+                    )
+                    if world_pts is not None and world_pts.shape[0] > 0:
+                        pcd = o3d.geometry.PointCloud()
+                        pcd.points = o3d.utility.Vector3dVector(world_pts)
+                        pcd.colors = o3d.utility.Vector3dVector(colors)
+                        roi_pcd = pcd
+                        print(f"ROI point cloud: {world_pts.shape[0]} points added to Open3D (P-based).")
+                    else:
+                        print("ROI point cloud: no valid points (after clipping/stride).")
+                        
                 # show windows
                 if SHOW_ORIGINAL_SEG_ROI:
                     cv2.namedWindow("Seg ROI (raw)", cv2.WINDOW_NORMAL)
@@ -342,11 +422,10 @@ def main():
     cv2.namedWindow("Projected 3D Bounding Box", cv2.WINDOW_NORMAL)
     cv2.imshow("Projected 3D Bounding Box", disp)
 
-    print("Press any key to exit.")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    print("Press any key to exit (after Open3D closes if opened).")
+    cv2.waitKey(1)  # keep small; user can view while Open3D is up
 
-    # Optional Open3D viz (unchanged)
+    # Optional Open3D viz (now also shows ROI point cloud if available)
     if o3d:
         try:
             frames = []
@@ -367,12 +446,17 @@ def main():
             ls.colors = o3d.utility.Vector3dVector([[1,0,0]]*len(edges))
             frames.append(ls)
 
+            # (NEW) add ROI point cloud if we built it
+            if roi_pcd is not None:
+                frames.append(roi_pcd)
+
             print("Showing 3D viz in Open3D.")
             o3d.visualization.draw_geometries(frames)
         except Exception as e:
             print("Open3D error:", e)
-    else:
-        print("open3d not installed; skipping 3D visualization.")
+
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
