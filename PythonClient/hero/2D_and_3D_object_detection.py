@@ -11,6 +11,7 @@ Minimal script to:
   8) (NEW) Identify which seg colors lie most inside the 3D cuboid and print the dominant color(s).
   9) (NEW) Refit the 2D bbox tightly around the dominant color in the segmentation image.
  10) (NEW) Print all scene objects and which are (approximately) visible in the current camera view.
+ 11) (NEW) Draw 3D/2D boxes + instance PCD for ALL nearby keyword-matching objects (multi-object).
 """
 
 import math
@@ -38,7 +39,7 @@ PORT               = 41451
 PROJECTION_ENABLED = True
 DRAW_2D_BBOX       = True
 
-# --- choose object profile: "human" or "car"
+# --- choose object profile for the SINGLE “actor” section (kept for logging/demo)
 OBJECT_TYPE = "car"  # change to "human" for human-sized box
 
 # --- per-object profiles (dimensions in meters; Z is NED +Z down)
@@ -54,31 +55,37 @@ BOX_WIDTH     = PROFILES[OBJECT_TYPE]["W"]
 BOX_HEIGHT    = PROFILES[OBJECT_TYPE]["H"]
 Z_OFFSET_NED  = PROFILES[OBJECT_TYPE]["Z"]
 
-SHOW_ROI_WINDOWS   = True
+SHOW_ROI_WINDOWS   = True                # show per-object ROI windows (will name them with indices)
 
 # --- Depth-clip settings ---
-DEPTH_CLIP_ENABLE     = True     # if True, mask seg ROI by depth threshold
-DEPTH_CLIP_MAX_M      = 40.0     # keep pixels with depth <= this (meters)
-SHOW_ORIGINAL_SEG_ROI = True     # also show the raw (unclipped) seg ROI for comparison
+DEPTH_CLIP_ENABLE     = True             # if True, mask seg ROI by depth threshold
+DEPTH_CLIP_MAX_M      = 40.0             # keep pixels with depth <= this (meters)
+SHOW_ORIGINAL_SEG_ROI = True             # also show the raw (unclipped) seg ROI for comparison
 
 # --- Point cloud export from clipped ROI ---
-ADD_ROI_POINTS_TO_OPEN3D = True  # toggle adding ROI points into Open3D scene
-ROI_POINT_STRIDE          = 1    # stride ≥1; increase to subsample points (2,3,...)
+ADD_ROI_POINTS_TO_OPEN3D = True          # toggle adding ROI points into Open3D scene
+ROI_POINT_STRIDE          = 1            # stride ≥1; increase to subsample points (2,3,...)
 
-# --- NEW: tight-box refit params ---
+# --- tight-box refit params ---
 REFIT_USE_DEPTH_CLIP_FOR_TIGHT_BOX = True   # use same depth cutoff when finding tight box
 REFIT_MIN_PIXELS                   = 50     # require at least this many pixels
 REFIT_SEARCH_MARGIN_PX             = 20     # expand search region beyond the amodal box
 
-# --- NEW: visible-objects print controls ---
-VISIBLE_EPS_METERS = 1.0          # allowed mismatch between range-to-object and depth map
-MAX_VISIBLE_PRINT  = 200          # cap how many names we print
+# --- visible-objects print controls ---
+VISIBLE_EPS_METERS = 1.0              # allowed mismatch between range-to-object and depth map
+MAX_VISIBLE_PRINT  = 200              # cap how many names we print
 
-
-# --- NEW CONFIG: mapping csv + filters ---
+# --- mapping csv + filters for NEARBY set (multi-targets) ---
 CSV_PATH      = "/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/csv_data/ue_label_vs_name.csv"  # two columns: actor_label,IDname (header optional)
 KEYWORDS      = ("human", "car", "truck", "sedan", "suv", "vehicle")
 RANGE_MAX_M   = 40.0
+
+# --- multi-object drawing controls ---
+MAX_OBJECTS_TO_DRAW = 20              # hard cap to keep perf reasonable
+BOX_COLORS_BGR = [
+    (0,255,0), (0,165,255), (255,0,0), (255,255,0), (255,0,255),
+    (0,255,255), (128,255,0), (0,128,255), (255,128,0), (128,0,255)
+]  # cycled for 2D boxes
 
 # =====================
 def load_actor_map(csv_path):
@@ -119,6 +126,23 @@ def cam_to_point_range(pt_world, cam_pose):
     cam_p = np.array([cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val], dtype=float)
     p_cam = R_cam.T @ (pt_world - cam_p)
     return float(np.linalg.norm(p_cam)), p_cam[0]  # Euclidean range, forward-x
+
+# --- PROFILE RESOLVER FOR MULTI-OBJECTS ---
+def resolve_profile_for_name(idname, label=None):
+    """
+    Pick "human" if name/label contains 'human'; else use 'car' for {car, truck, sedan, suv, vehicle}.
+    Returns dict like PROFILES[...] .
+    """
+    key = None
+    s = (idname or "").lower() + " " + (label or "").lower()
+    if "human" in s:
+        key = "human"
+    elif any(k in s for k in ("car", "truck", "sedan", "suv", "vehicle")):
+        key = "car"
+    else:
+        # default to car dims if keyword matched earlier but we fell through
+        key = "car"
+    return PROFILES[key]
 
 def quaternion_to_euler(q):
     w,x,y,z = q.w_val, q.x_val, q.y_val, q.z_val
@@ -194,7 +218,7 @@ def project_world_points_to_image(world_pts, cam_pose, P, width, height):
     valid = depth_forward > 1e-6
     return pts2d, depth_forward, valid
 
-def draw_2d_bbox_and_get_rect(pts2d, valid, w, h, img_to_draw=None, color=(0,255,0), thickness=2):
+def draw_2d_bbox_and_get_rect(pts2d, valid, w, h, img_to_draw=None, color=(0,255,0), thickness=2, label_text=None):
     us = pts2d[valid, 0]; vs = pts2d[valid, 1]
     if us.size == 0 or vs.size == 0:
         return None
@@ -204,6 +228,9 @@ def draw_2d_bbox_and_get_rect(pts2d, valid, w, h, img_to_draw=None, color=(0,255
     y1 = int(min(h-1, math.ceil(vs.max())))
     if img_to_draw is not None:
         cv2.rectangle(img_to_draw, (x0,y0), (x1,y1), color, thickness)
+        if label_text:
+            cv2.putText(img_to_draw, label_text, (x0, max(0, y0-6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
     return (x0, y0, x1, y1)
 
 def resize_to(img, target_w, target_h, is_depth=False):
@@ -313,7 +340,7 @@ def dominant_colors_in_box(world_pts, colors_rgb, box_pose, L, W, H, top_k=3):
         results.append(((r,g,b), int(counts[i]), frac))
     return results, n_inside
 
-# --- NEW: tight box around a target RGB color, optionally depth-clipped, in a search rect
+# --- tight box around a target RGB color, optionally depth-clipped, in a search rect
 def tight_box_for_color(seg_img, depth_img, target_rgb, search_rect, use_depth=True,
                         depth_max=35.0, min_pixels=50):
     """
@@ -351,7 +378,7 @@ def tight_box_for_color(seg_img, depth_img, target_rgb, search_rect, use_depth=T
     by1 = int(y0 + ys.max())
     return (bx0, by0, bx1, by1), int(xs.size)
 
-# --- NEW HELPERS: approximate visibility test using DepthPerspective ---
+# --- approximate visibility test using DepthPerspective ---
 def world_to_cam_and_pixel(pt_world, cam_pose, P, img_w, img_h):
     """Return (p_cam, u, v, in_front, in_bounds)."""
     R_cam = quaternion_to_rotation_matrix(cam_pose.orientation)
@@ -411,7 +438,7 @@ def main():
         print(" No distortion active.")
     print()
 
-    # Find target actor
+    # Find target actor (kept for backward-compatible logging)
     objs = client.simListSceneObjects(ACTOR_PATTERN)
     if not objs:
         print(f"No actor matches '{ACTOR_PATTERN}'"); return
@@ -494,7 +521,6 @@ def main():
                     nearby.append((rng, name, label))
 
             nearby.sort(key=lambda t: t[0])
-
             print(f"Found {len(nearby)} matching object(s).")
             for i, (rng, idname, label) in enumerate(nearby, 1):
                 if label:
@@ -502,15 +528,10 @@ def main():
                 else:
                     print(f"  [{i:02d}] {rng:6.2f} m | IDname: {idname}")
 
-
     finally:
         client.simPause(False)
 
     # === VISIBLE OBJECTS (approx) ===
-    # We enumerate scene objects via simListSceneObjects(".*") and mark as visible if:
-    # - the object's world position projects into the image
-    # - it is in front of the camera
-    # - the depth map agrees (within VISIBLE_EPS_METERS) with the object's range
     print("\nEnumerating scene objects and testing visibility (approximate)...")
     try:
         all_objs = client.simListSceneObjects(".*")
@@ -520,7 +541,6 @@ def main():
 
     visible_names = []
     if cam_pose is not None and len(all_objs) > 0:
-        # AirSim projection matrix (4x4 row-major)
         P = np.array(cam_info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
         for name in all_objs:
             try:
@@ -543,11 +563,10 @@ def main():
     else:
         print("Camera pose not available or no scene objects found.")
 
-    # Log poses
+    # --- SINGLE ACTOR (kept) ---
     print_pose(f"Actor ({actor})", actor_pose)
     print_pose(f"Camera ({CAMERA_NAME})", cam_pose)
 
-    # Apply Z-offset to actor centroid in NED from selected profile
     adjusted_actor_pose = airsim.Pose(
         position_val=airsim.Vector3r(
             actor_pose.position.x_val,
@@ -559,154 +578,197 @@ def main():
     print(f"Profile: {OBJECT_TYPE} | Applied Z offset (NED): {Z_OFFSET_NED:+.4f} m")
     print_pose(f"Actor+Zoffset ({actor})", adjusted_actor_pose)
 
-    # Intrinsics (log only)
     K, vfov = compute_intrinsics_from_horizontal_fov(cam_info.fov, w, h)
     print(f"Resolution: {w}×{h}, HFOV: {cam_info.fov:.4f}°, VFOV: {vfov:.4f}°")
     print("K =\n", K, "\n")
 
-    # AirSim projection matrix (4x4 row-major)
     P = np.array(cam_info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
     print("AirSim projection matrix P=\n", P, "\n")
 
-    # Compute box corners (world)
-    corners_w = compute_bounding_box_corners_world(
+    # Compute single actor box (for continuity)
+    corners_w_single = compute_bounding_box_corners_world(
         adjusted_actor_pose, BOX_LENGTH, BOX_WIDTH, BOX_HEIGHT)
     print(f"[{OBJECT_TYPE}] Box L×W×H = {BOX_LENGTH}×{BOX_WIDTH}×{BOX_HEIGHT} m (Z-offset applied)")
-    for i, c in enumerate(corners_w):
+    for i, c in enumerate(corners_w_single):
         print(f" [{i}] x={c[0]:.4f}, y={c[1]:.4f}, z={c[2]:.4f}")
     print()
 
-    # Project & draw amodal 2D box; show ROI crops for seg/depth
     disp = img.copy()
-    amodal_bbox = None
-    roi_pcd = None
-    roi_world_pts = None
-    roi_colors_rgb = None
-    best_rgb = None  # NEW: keep dominant color RGB
 
+    # Draw single actor (same as before)
     if PROJECTION_ENABLED and cam_pose is not None:
         pts2d, depth_forward, valid = project_world_points_to_image(
-            corners_w, cam_pose, P, w, h)
-
-        amodal_bbox = draw_2d_bbox_and_get_rect(
-            pts2d, valid, w, h, img_to_draw=disp, color=(0,255,0), thickness=2)
+            corners_w_single, cam_pose, P, w, h)
+        _ = draw_2d_bbox_and_get_rect(
+            pts2d, valid, w, h, img_to_draw=disp, color=(0,255,0), thickness=2, label_text="actor")
     else:
-        print("Skipping projection.\n")
+        print("Skipping single-actor projection.\n")
 
-    # ROI windows + build ROI point cloud
-    if SHOW_ROI_WINDOWS and amodal_bbox is not None:
-        x0, y0, x1, y1 = amodal_bbox
-        x0 = max(0, min(w-1, x0)); x1 = max(0, min(w-1, x1))
-        y0 = max(0, min(h-1, y0)); y1 = max(0, min(h-1, y1))
-        if x1 > x0 and y1 > y0:
-            seg_roi   = seg_img[y0:y1+1, x0:x1+1, :]
-            depth_roi = depth_img[y0:y1+1, x0:x1+1]
-            depth_vis = depth_roi_to_vis(depth_roi)
+    # === MULTI-OBJECT DRAW ===
+    # For each filtered nearby object, draw:
+    # - 3D LineSet box in Open3D
+    # - amodal 2D bbox on the image
+    # - (optional) ROI windows + depth-clip + instance PCD
+    multi_linesets = []   # list of (o3d.geometry.LineSet)
+    multi_pcds     = []   # list of (o3d.geometry.PointCloud)
+    multi_infos    = []   # keep text tags per object for on-image labeling
 
-            if DEPTH_CLIP_ENABLE:
-                valid_depth_mask = np.isfinite(depth_roi) & (depth_roi > 0) & (depth_roi <= DEPTH_CLIP_MAX_M)
-                seg_roi_clipped = np.zeros_like(seg_roi)
-                seg_roi_clipped[valid_depth_mask] = seg_roi[valid_depth_mask]
+    edges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]]
 
-                # list unique colors in clipped seg ROI
-                flat = seg_roi_clipped.reshape(-1, 3)
-                nonzero = np.any(flat != 0, axis=1)
-                flat_nz = flat[nonzero]
-                if flat_nz.size > 0:
-                    colors_bgr, counts = np.unique(flat_nz, axis=0, return_counts=True)
-                    colors_rgb_arr = colors_bgr[:, ::-1]
-                    rgb_list = [tuple(int(c) for c in row) for row in colors_rgb_arr]
-                    print(f"[Depth-clip <= {DEPTH_CLIP_MAX_M:.2f} m] Unique instance colors in seg ROI: {len(rgb_list)}")
-                    print(" RGB colors:", rgb_list)
-                else:
-                    print(f"[Depth-clip <= {DEPTH_CLIP_MAX_M:.2f} m] Unique instance colors in seg ROI: 0")
+    if cam_pose is not None and len(nearby) > 0:
+        # cap for performance
+        draw_list = nearby[:MAX_OBJECTS_TO_DRAW]
 
-                # back-project clipped ROI to a world point cloud with P
-                if ADD_ROI_POINTS_TO_OPEN3D and o3d is not None:
-                    world_pts, colors = roi_points_to_world_pointcloud_P(
-                        seg_roi_clipped, depth_roi, x0, y0, w, h, P, cam_pose, stride=ROI_POINT_STRIDE
-                    )
-                    if world_pts is not None and world_pts.shape[0] > 0:
-                        roi_world_pts = world_pts
-                        roi_colors_rgb = colors
-                        pcd = o3d.geometry.PointCloud()
-                        pcd.points = o3d.utility.Vector3dVector(world_pts)
-                        pcd.colors = o3d.utility.Vector3dVector(colors)
-                        roi_pcd = pcd
-                        print(f"ROI point cloud: {world_pts.shape[0]} points added to Open3D (P-based).")
-                    else:
-                        print("ROI point cloud: no valid points (after clipping/stride).")
-                        
-                # show windows
-                if SHOW_ORIGINAL_SEG_ROI:
-                    cv2.namedWindow("Seg ROI (raw)", cv2.WINDOW_NORMAL)
-                    cv2.imshow("Seg ROI (raw)", seg_roi)
-                cv2.namedWindow(f"Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", cv2.WINDOW_NORMAL)
-                cv2.imshow(f"Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", seg_roi_clipped)
-            else:
-                cv2.namedWindow("Seg ROI", cv2.WINDOW_NORMAL)
-                cv2.imshow("Seg ROI", seg_roi)
+        for idx, (rng, obj_name, label) in enumerate(draw_list, 1):
+            try:
+                pose = client.simGetObjectPose(obj_name)
+            except Exception:
+                continue
+            if pose is None:
+                continue
 
-            cv2.namedWindow("Depth ROI", cv2.WINDOW_NORMAL)
-            cv2.imshow("Depth ROI", depth_vis)
-        else:
-            print("Amodal bbox collapsed after clipping; no ROI to show.")
+            profile = resolve_profile_for_name(obj_name, label)
+            L,W,H = profile["L"], profile["W"], profile["H"]
+            zoff  = profile["Z"]
 
-    # Dominant colors among points inside the 3D cuboid
-    if roi_world_pts is not None and roi_colors_rgb is not None:
-        top_colors, n_inside = dominant_colors_in_box(
-            roi_world_pts, roi_colors_rgb, adjusted_actor_pose, BOX_LENGTH, BOX_WIDTH, BOX_HEIGHT, top_k=3
-        )
-        print(f"Points inside 3D box: {n_inside}")
-        if n_inside == 0:
-            print("No ROI points fell inside the 3D cuboid.")
-        else:
-            if len(top_colors) > 0:
-                best_rgb, best_count, best_frac = top_colors[0]
-                print(f"Dominant color inside 3D box (RGB): {best_rgb}  count={best_count}  frac={best_frac:.3f}")
-                if len(top_colors) > 1:
-                    print("Top colors (RGB, count, frac):", top_colors)
+            # Adjust centroid with Z-offset
+            adjusted_pose = airsim.Pose(
+                position_val=airsim.Vector3r(
+                    pose.position.x_val,
+                    pose.position.y_val,
+                    pose.position.z_val + zoff
+                ),
+                orientation_val=pose.orientation
+            )
 
-                # --- NEW: refit the 2D bounding box tightly to this color ---
-                if amodal_bbox is not None:
-                    ax0, ay0, ax1, ay1 = amodal_bbox
-                    margin = REFIT_SEARCH_MARGIN_PX
-                    search_rect = (
-                        max(0, ax0 - margin),
-                        max(0, ay0 - margin),
-                        min(w-1, ax1 + margin),
-                        min(h-1, ay1 + margin),
-                    )
-                else:
-                    search_rect = (0, 0, w-1, h-1)
-
-                tight_box, pix_count = tight_box_for_color(
-                    seg_img,
-                    depth_img,
-                    best_rgb,
-                    search_rect=search_rect,
-                    use_depth=REFIT_USE_DEPTH_CLIP_FOR_TIGHT_BOX and DEPTH_CLIP_ENABLE,
-                    depth_max=DEPTH_CLIP_MAX_M,
-                    min_pixels=REFIT_MIN_PIXELS
+            # 3D corners and Open3D LineSet
+            corners_w = compute_bounding_box_corners_world(adjusted_pose, L, W, H)
+            if o3d is not None:
+                ls = o3d.geometry.LineSet(
+                    points=o3d.utility.Vector3dVector(corners_w),
+                    lines=o3d.utility.Vector2iVector(edges)
                 )
-                if tight_box is not None:
-                    tx0, ty0, tx1, ty1 = tight_box
-                    cv2.rectangle(disp, (tx0,ty0), (tx1,ty1), (0,165,255), 2)  # orange
-                    cv2.putText(disp, "tight color box", (tx0, max(0,ty0-6)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,165,255), 1)
-                    print(f"Tight 2D box for dominant color {best_rgb}: "
-                          f"({tx0},{ty0})-({tx1},{ty1}), pixels={pix_count}")
-                else:
-                    print(f"Tight 2D box: dominant color {best_rgb} not found "
-                          f"(min_pixels={REFIT_MIN_PIXELS}, search_rect={search_rect}).")
-            else:
-                print("No colors tallied (unexpected).")
+                ls.colors = o3d.utility.Vector3dVector([[1,0,0]]*len(edges))
+                multi_linesets.append(ls)
+
+            # Project to image and draw 2D bbox
+            pts2d, depth_forward, valid = project_world_points_to_image(
+                corners_w, cam_pose, P, w, h)
+            color = BOX_COLORS_BGR[(idx-1) % len(BOX_COLORS_BGR)]
+            tag   = (label if label else obj_name)
+            amodal_bbox = draw_2d_bbox_and_get_rect(
+                pts2d, valid, w, h, img_to_draw=disp, color=color, thickness=2,
+                label_text=f"{idx}:{tag[:24]}")
+
+            # ROI + depth-clip + instance PCD + tight box (same pipeline as single)
+            roi_pcd = None
+            roi_world_pts = None
+            roi_colors_rgb = None
+
+            if SHOW_ROI_WINDOWS and amodal_bbox is not None:
+                x0, y0, x1, y1 = amodal_bbox
+                x0 = max(0, min(w-1, x0)); x1 = max(0, min(w-1, x1))
+                y0 = max(0, min(h-1, y0)); y1 = max(0, min(h-1, y1))
+                if x1 > x0 and y1 > y0:
+                    seg_roi   = seg_img[y0:y1+1, x0:x1+1, :]
+                    depth_roi = depth_img[y0:y1+1, x0:x1+1]
+                    depth_vis = depth_roi_to_vis(depth_roi)
+
+                    if DEPTH_CLIP_ENABLE:
+                        valid_depth_mask = np.isfinite(depth_roi) & (depth_roi > 0) & (depth_roi <= DEPTH_CLIP_MAX_M)
+                        seg_roi_clipped = np.zeros_like(seg_roi)
+                        seg_roi_clipped[valid_depth_mask] = seg_roi[valid_depth_mask]
+
+                        # list unique colors (optional log per object)
+                        flat = seg_roi_clipped.reshape(-1, 3)
+                        nonzero = np.any(flat != 0, axis=1)
+                        flat_nz = flat[nonzero]
+                        if flat_nz.size > 0:
+                            colors_bgr, counts = np.unique(flat_nz, axis=0, return_counts=True)
+                            colors_rgb_arr = colors_bgr[:, ::-1]
+                            rgb_list = [tuple(int(c) for c in row) for row in colors_rgb_arr]
+                            print(f"[Obj#{idx} {obj_name}] seg colors (depth<={DEPTH_CLIP_MAX_M:.1f}m): {len(rgb_list)} found")
+                        else:
+                            print(f"[Obj#{idx} {obj_name}] seg colors: 0")
+
+                        # back-project clipped ROI to world PCD
+                        if ADD_ROI_POINTS_TO_OPEN3D and o3d is not None:
+                            world_pts, colors = roi_points_to_world_pointcloud_P(
+                                seg_roi_clipped, depth_roi, x0, y0, w, h, P, cam_pose, stride=ROI_POINT_STRIDE
+                            )
+                            if world_pts is not None and world_pts.shape[0] > 0:
+                                roi_world_pts = world_pts
+                                roi_colors_rgb = colors
+                                pcd = o3d.geometry.PointCloud()
+                                pcd.points = o3d.utility.Vector3dVector(world_pts)
+                                pcd.colors = o3d.utility.Vector3dVector(colors)
+                                roi_pcd = pcd
+                                multi_pcds.append(roi_pcd)
+                                print(f"[Obj#{idx}] ROI PCD: {world_pts.shape[0]} pts")
+                            else:
+                                print(f"[Obj#{idx}] ROI PCD: no valid points")
+                        
+                        # show per-object windows (named)
+                        winprefix = f"Obj#{idx}"
+                        if SHOW_ORIGINAL_SEG_ROI:
+                            cv2.namedWindow(f"{winprefix} Seg ROI (raw)", cv2.WINDOW_NORMAL)
+                            cv2.imshow(f"{winprefix} Seg ROI (raw)", seg_roi)
+                        cv2.namedWindow(f"{winprefix} Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", cv2.WINDOW_NORMAL)
+                        cv2.imshow(f"{winprefix} Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", seg_roi_clipped)
+                    else:
+                        winprefix = f"Obj#{idx}"
+                        cv2.namedWindow(f"{winprefix} Seg ROI", cv2.WINDOW_NORMAL)
+                        cv2.imshow(f"{winprefix} Seg ROI", seg_roi)
+
+                    cv2.namedWindow(f"{winprefix} Depth ROI", cv2.WINDOW_NORMAL)
+                    cv2.imshow(f"{winprefix} Depth ROI", depth_vis)
+
+            # Dominant color inside 3D box + tight 2D box
+            if roi_world_pts is not None and roi_colors_rgb is not None:
+                top_colors, n_inside = dominant_colors_in_box(
+                    roi_world_pts, roi_colors_rgb, adjusted_pose, L, W, H, top_k=3
+                )
+                print(f"[Obj#{idx}] points inside 3D box: {n_inside}")
+                if n_inside > 0 and len(top_colors) > 0:
+                    best_rgb, best_count, best_frac = top_colors[0]
+                    print(f"[Obj#{idx}] Dominant RGB: {best_rgb} count={best_count} frac={best_frac:.3f}")
+                    if amodal_bbox is not None:
+                        ax0, ay0, ax1, ay1 = amodal_bbox
+                        margin = REFIT_SEARCH_MARGIN_PX
+                        search_rect = (
+                            max(0, ax0 - margin),
+                            max(0, ay0 - margin),
+                            min(w-1, ax1 + margin),
+                            min(h-1, ay1 + margin),
+                        )
+                    else:
+                        search_rect = (0, 0, w-1, h-1)
+
+                    tight_box, pix_count = tight_box_for_color(
+                        seg_img,
+                        depth_img,
+                        best_rgb,
+                        search_rect=search_rect,
+                        use_depth=REFIT_USE_DEPTH_CLIP_FOR_TIGHT_BOX and DEPTH_CLIP_ENABLE,
+                        depth_max=DEPTH_CLIP_MAX_M,
+                        min_pixels=REFIT_MIN_PIXELS
+                    )
+                    if tight_box is not None:
+                        tx0, ty0, tx1, ty1 = tight_box
+                        cv2.rectangle(disp, (tx0,ty0), (tx1,ty1), color, 2)
+                        cv2.putText(disp, f"{idx}:tight", (tx0, max(0,ty0-6)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                        print(f"[Obj#{idx}] tight 2D: ({tx0},{ty0})-({tx1},{ty1}), px={pix_count}")
+                    else:
+                        print(f"[Obj#{idx}] tight 2D not found (min_pixels={REFIT_MIN_PIXELS}).")
+
+            multi_infos.append((idx, obj_name, label))
 
     # annotate & show main window
-    disp_text = f"Actor: {actor} | Profile: {OBJECT_TYPE} | Zoff(NED): {Z_OFFSET_NED:+.2f}m"
-    cv2.putText(disp, disp_text, (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
-    cv2.namedWindow("Projected 3D Bounding Box", cv2.WINDOW_NORMAL)
-    cv2.imshow("Projected 3D Bounding Box", disp)
+    disp_text = f"Actor: {actor} | Profile: {OBJECT_TYPE} | Zoff(NED): {Z_OFFSET_NED:+.2f}m | Multi: {min(len(nearby), MAX_OBJECTS_TO_DRAW)}"
+    cv2.putText(disp, disp_text, (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
+    cv2.namedWindow("Projected 3D Bounding Boxes (multi)", cv2.WINDOW_NORMAL)
+    cv2.imshow("Projected 3D Bounding Boxes (multi)", disp)
 
     print("Press any key to exit (after Open3D closes if opened).")
     cv2.waitKey(1)  # keep small; user can view while Open3D is up
@@ -715,6 +777,7 @@ def main():
     if o3d:
         try:
             frames = []
+            # Single-actor/camera frames (for reference)
             Ta = np.eye(4); Ta[:3,:3] = quaternion_to_rotation_matrix(actor_pose.orientation)
             Ta[:3,3]  = [actor_pose.position.x_val, actor_pose.position.y_val, actor_pose.position.z_val]
             fa = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5); fa.transform(Ta)
@@ -726,14 +789,20 @@ def main():
                 fc = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5); fc.transform(Tc)
                 frames.append(fc)
 
+            # Single-actor box (red)
             edges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]]
-            ls = o3d.geometry.LineSet(points=o3d.utility.Vector3dVector(corners_w),
-                                      lines=o3d.utility.Vector2iVector(edges))
-            ls.colors = o3d.utility.Vector3dVector([[1,0,0]]*len(edges))
-            frames.append(ls)
+            ls_single = o3d.geometry.LineSet(points=o3d.utility.Vector3dVector(corners_w_single),
+                                             lines=o3d.utility.Vector2iVector(edges))
+            ls_single.colors = o3d.utility.Vector3dVector([[1,0,0]]*len(edges))
+            frames.append(ls_single)
 
-            if roi_pcd is not None:
-                frames.append(roi_pcd)
+            # Multi-object boxes
+            for ls in multi_linesets:
+                frames.append(ls)
+
+            # Multi-object instance PCDs
+            for pcd in multi_pcds:
+                frames.append(pcd)
 
             print("Showing 3D viz in Open3D.")
             o3d.visualization.draw_geometries(frames)

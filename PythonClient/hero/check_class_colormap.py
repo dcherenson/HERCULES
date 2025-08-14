@@ -30,7 +30,7 @@ for cls_id in range(256):
     print(f"{cls_id}\t{color}")
     colors[cls_id] = color
 
-with open('seg_colors.csv', 'w') as f:
+with open('/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/csv_data/instance_segmentation_table.csv', 'w') as f:
     writer = csv.writer(f, delimiter=' ')
     for k, v in colors.items():
         writer.writerow([k] + list(v))
