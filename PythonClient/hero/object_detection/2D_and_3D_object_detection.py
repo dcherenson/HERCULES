@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Adds multi-target support (2+ named objects):
-- You can specify a second ACTOR pattern/name.
-- For EACH target: draw the 3D box + add its segmentation-depth–clipped ROI points to Open3D.
-- Draw each target's amodal 2D bounding box on the full RGB image.
-- ROI preview windows + tight color refit remain only for the FIRST target.
+Auto-select targets from CSV by actor_label keywords, verify they are in the
+current camera FOV and within range, then run the SAME per-target pipeline
+you already had (3D cuboid + amodal 2D box + ROI->Open3D + optional tight refit).
+
+Also shows a full-frame segmentation image clipped by depth <= DEPTH_CLIP_MAX_M.
 """
 
-import math
+import math, re
 import numpy as np
 import setup_path
 import cosysairsim as airsim
@@ -22,26 +22,7 @@ except ImportError:
     o3d = None
 
 # === CONFIGURATION ===
-# Replace the first pattern with your current object, and set the second to the other object you’ll name.
-# You can add more entries later if you wish.
-TARGETS = [
-    {
-        "label": "TargetA",
-        "ACTOR_PATTERN": "StaticMeshActor_UAID_E08F4CF5208AA07502_2022041209.*",
-        "OBJECT_TYPE": "car",           # "car" or "human"
-        "BOX_COLOR_BGR": (0, 255, 0),   # 2D box color on RGB image
-        "SHOW_ROI_WINDOWS": True,       # keep all your ROI/tight-box windows only for this first target
-        "ENABLE_TIGHT_REFIT": True
-    },
-    {
-        "label": "TargetB",
-        "ACTOR_PATTERN": "StaticMeshActor_UAID_E08F4CF5208AA07502_1083882316",
-        "OBJECT_TYPE": "car",
-        "BOX_COLOR_BGR": (255, 0, 255), # magenta for visual distinction
-        "SHOW_ROI_WINDOWS": False,      # no extra windows for the second object
-        "ENABLE_TIGHT_REFIT": True
-    }
-]
+TARGETS = []  # will be built automatically from CSV + scene + FOV
 
 CAMERA_NAME        = "front_center"
 CLIENT_CLASS       = airsim.MultirotorClient
@@ -56,12 +37,13 @@ PROFILES = {
     "car":   {"L": 4.2, "W": 1.90, "H": 1.60, "Z": -0.55},
 }
 
-SHOW_ROI_WINDOWS_GLOBAL = True  # master toggle; per-target flag also required
+SHOW_ROI_WINDOWS_GLOBAL = False  # avoid N windows when many auto targets are found
 
 # --- Depth-clip settings ---
+RANGE_MAX_M   = 40.0
 DEPTH_CLIP_ENABLE     = True
-DEPTH_CLIP_MAX_M      = 40.0
-SHOW_ORIGINAL_SEG_ROI = True
+DEPTH_CLIP_MAX_M      = RANGE_MAX_M   # keep in sync with detection range
+SHOW_ORIGINAL_SEG_ROI = False
 
 # --- Point cloud export from clipped ROI ---
 ADD_ROI_POINTS_TO_OPEN3D = True
@@ -78,10 +60,20 @@ MAX_VISIBLE_PRINT  = 200
 
 # --- mapping csv + filters ---
 CSV_PATH      = "/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/csv_data/ue_label_vs_name.csv"
-KEYWORDS      = ("human", "car", "truck", "sedan", "suv", "vehicle")
-RANGE_MAX_M   = 40.0
+KEYWORDS = (
+    "human", "person", "pedestrian",
+    "car", "truck", "sedan", "suv", "van", "bus", "vehicle",
+    "sportscar", "sports car", "policecar", "pickup", "taxi"
+)
+MAX_OBJECTS   = 200
 
-# ===================== (helpers from your original script, unchanged) =====================
+# Color palette for per-object box colors (BGR for cv2)
+BOX_COLORS_BGR = [
+    (0,255,0), (255,0,255), (0,165,255), (255,255,0), (0,255,255),
+    (255,0,0), (180,105,255), (128,0,255), (211,0,148), (0,128,255)
+]
+
+# ===================== helpers (kept from your working file) =====================
 def load_actor_map(csv_path):
     mapping = {}
     try:
@@ -89,7 +81,11 @@ def load_actor_map(csv_path):
             sniffer = csv.Sniffer()
             sample = f.read(1024)
             f.seek(0)
-            has_header = sniffer.has_header(sample)
+            has_header = False
+            try:
+                has_header = sniffer.has_header(sample)
+            except Exception:
+                pass
             reader = csv.reader(f)
             if has_header:
                 next(reader, None)
@@ -106,9 +102,17 @@ def load_actor_map(csv_path):
         print(f"Error reading CSV '{csv_path}': {e} (continuing without labels)")
     return mapping
 
-def name_has_keyword(idname, keywords):
-    s = idname.lower()
+def label_has_keyword(label, keywords):
+    s = (label or "").lower()
     return any(k.lower() in s for k in keywords)
+
+def infer_object_type_from_label(label):
+    s = (label or "").lower()
+    if ("human" in s) or ("person" in s) or ("pedestrian" in s) or ("splinehuman" in s):
+        return "human"
+    if any(k in s for k in ("car","truck","sedan","suv","vehicle","van","bus","sportscar","policecar","pickup")):
+        return "car"
+    return "car"
 
 def cam_to_point_range(pt_world, cam_pose):
     R_cam = quaternion_to_rotation_matrix(cam_pose.orientation)
@@ -255,7 +259,9 @@ def roi_points_to_world_pointcloud_P(seg_roi_clipped, depth_roi, x0, y0,
     p_cam = dirs_unit * r
 
     R_cam = quaternion_to_rotation_matrix(cam_pose.orientation)
-    cam_p = np.array([cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val], dtype=float)
+    cam_p = np.array([cam_pose.position.x_val,
+                      cam_pose.position.y_val,
+                      cam_pose.position.z_val], dtype=float)
     world_pts = (R_cam @ p_cam.T).T + cam_p
 
     colors_bgr = seg_roi_clipped[ys, xs, :]
@@ -346,24 +352,18 @@ def approx_visible(pt_world, cam_pose, P, img_w, img_h, depth_img, eps=1.0):
     if not np.isfinite(r_depth) or r_depth <= 0:
         return False
     return abs(r_depth - r_obj) <= eps
-# =========================================================================================
+# ================================================================================
 
 def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_img, P):
     """
-    Process one target:
-      - find actor
-      - compute adjusted pose using profile
-      - project 3D box, draw 2D bbox
-      - build seg-depth clipped ROI and back-project to world (for Open3D)
-      - optionally show ROI windows and tight-refit (first target only)
-    Returns dict with results for Open3D and UI drawing.
+    Your original per-target pipeline (unchanged).
     """
     label = target_cfg["label"]
     pattern = target_cfg["ACTOR_PATTERN"]
     obj_type = target_cfg["OBJECT_TYPE"]
     box_color = target_cfg["BOX_COLOR_BGR"]
     show_roi = SHOW_ROI_WINDOWS_GLOBAL and target_cfg.get("SHOW_ROI_WINDOWS", False)
-    enable_refit = target_cfg.get("ENABLE_TIGHT_REFIT", False)
+    enable_refit = target_cfg.get("ENABLE_TIGHT_REFIT", True)
 
     if obj_type not in PROFILES:
         raise ValueError(f"[{label}] Unknown OBJECT_TYPE '{obj_type}'. Choose from {list(PROFILES.keys())}.")
@@ -372,7 +372,7 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
     L, W, H = profile["L"], profile["W"], profile["H"]
     z_off   = profile["Z"]
 
-    # Find actor
+    # Find actor (exact ID, anchored regex to avoid accidental matches)
     objs = client.simListSceneObjects(pattern)
     if not objs:
         print(f"[{label}] No actor matches '{pattern}'")
@@ -380,7 +380,7 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
     actor = objs[0]
     print(f"[{label}] Target actor: {actor}")
 
-    # Get actor pose (compat for older/your API)
+    # Get actor pose
     try:
         actor_pose = client.simGetObjectPose(actor, True)
     except TypeError:
@@ -404,7 +404,7 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
     disp_img  = None
     if PROJECTION_ENABLED and cam_pose is not None:
         pts2d, depth_forward, valid = project_world_points_to_image(corners_w, cam_pose, P, w, h)
-        disp_img = img  # we draw on passed-in display image outside
+        disp_img = img
         disp_bbox = draw_2d_bbox_and_get_rect(
             pts2d, valid, w, h, img_to_draw=disp_img, color=box_color, thickness=2
         )
@@ -417,7 +417,6 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
     roi_pcd = None
     roi_world_pts = None
     roi_colors_rgb = None
-    best_rgb = None
 
     if disp_bbox is not None:
         x0, y0, x1, y1 = disp_bbox
@@ -432,7 +431,6 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
                 seg_roi_clipped = np.zeros_like(seg_roi)
                 seg_roi_clipped[valid_depth_mask] = seg_roi[valid_depth_mask]
 
-                # Open3D points
                 if ADD_ROI_POINTS_TO_OPEN3D and o3d is not None:
                     world_pts, colors = roi_points_to_world_pointcloud_P(
                         seg_roi_clipped, depth_roi, x0, y0, w, h, P, cam_pose, stride=ROI_POINT_STRIDE
@@ -447,7 +445,6 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
                         print(f"[{label}] ROI point cloud: {world_pts.shape[0]} points (P-based).")
                     else:
                         print(f"[{label}] ROI point cloud: no valid points.")
-                # Optional windows for FIRST target only
                 if show_roi:
                     depth_vis = depth_roi_to_vis(depth_roi)
                     if SHOW_ORIGINAL_SEG_ROI:
@@ -463,48 +460,43 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
                     cv2.namedWindow(f"{label} Seg ROI", cv2.WINDOW_NORMAL)
                     cv2.imshow(f"{label} Seg ROI", seg_roi)
 
-            # Dominant color + optional tight refit (first target only)
+            # Dominant color + optional tight refit
             if roi_world_pts is not None and roi_colors_rgb is not None:
                 top_colors, n_inside = dominant_colors_in_box(
                     roi_world_pts, roi_colors_rgb,
                     adjusted_actor_pose, L, W, H, top_k=3
                 )
                 print(f"[{label}] Points inside 3D box: {n_inside}")
-                if n_inside > 0 and len(top_colors) > 0:
+                if n_inside > 0 and len(top_colors) > 0 and target_cfg.get("ENABLE_TIGHT_REFIT", True):
                     best_rgb, best_count, best_frac = top_colors[0]
-                    print(f"[{label}] Dominant color (RGB): {best_rgb}  count={best_count}  frac={best_frac:.3f}")
-                    if enable_refit:
-                        # search region = amodal bbox with margin
-                        ax0, ay0, ax1, ay1 = disp_bbox
-                        margin = REFIT_SEARCH_MARGIN_PX
-                        search_rect = (
-                            max(0, ax0 - margin),
-                            max(0, ay0 - margin),
-                            min(w-1, ax1 + margin),
-                            min(h-1, ay1 + margin),
-                        )
-                        tight_box, pix_count = tight_box_for_color(
-                            seg_img,
-                            depth_img,
-                            best_rgb,
-                            search_rect=search_rect,
-                            use_depth=REFIT_USE_DEPTH_CLIP_FOR_TIGHT_BOX and DEPTH_CLIP_ENABLE,
-                            depth_max=DEPTH_CLIP_MAX_M,
-                            min_pixels=REFIT_MIN_PIXELS
-                        )
-                        if tight_box is not None:
-                            tx0, ty0, tx1, ty1 = tight_box
-                            cv2.rectangle(disp_img, (tx0,ty0), (tx1,ty1), (0,165,255), 2)
-                            cv2.putText(disp_img, f"{label}: tight color box", (tx0, max(0,ty0-6)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,165,255), 1)
-                            print(f"[{label}] Tight 2D box for dominant color {best_rgb}: "
-                                  f"({tx0},{ty0})-({tx1},{ty1}), pixels={pix_count}")
-                        else:
-                            print(f"[{label}] Tight 2D box not found (min_pixels={REFIT_MIN_PIXELS}).")
+                    ax0, ay0, ax1, ay1 = disp_bbox
+                    margin = REFIT_SEARCH_MARGIN_PX
+                    search_rect = (
+                        max(0, ax0 - margin),
+                        max(0, ay0 - margin),
+                        min(w-1, ax1 + margin),
+                        min(h-1, ay1 + margin),
+                    )
+                    tight_box, pix_count = tight_box_for_color(
+                        seg_img,
+                        depth_img,
+                        best_rgb,
+                        search_rect=search_rect,
+                        use_depth=REFIT_USE_DEPTH_CLIP_FOR_TIGHT_BOX and DEPTH_CLIP_ENABLE,
+                        depth_max=DEPTH_CLIP_MAX_M,
+                        min_pixels=REFIT_MIN_PIXELS
+                    )
+                    if tight_box is not None:
+                        tx0, ty0, tx1, ty1 = tight_box
+                        cv2.rectangle(disp_img, (tx0,ty0), (tx1,ty1), (0,165,255), 2)
+                        cv2.putText(disp_img, f"{label}: tight color box", (tx0, max(0,ty0-6)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,165,255), 1)
+                        print(f"[{label}] Tight 2D box: ({tx0},{ty0})-({tx1},{ty1}), pixels={pix_count}")
+                    else:
+                        print(f"[{label}] Tight 2D box not found (min_pixels={REFIT_MIN_PIXELS}).")
         else:
             print(f"[{label}] Amodal bbox collapsed after clipping; no ROI to process.")
 
-    # Return everything needed for final viz
     return {
         "found": True,
         "label": label,
@@ -517,6 +509,150 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
         "box_color": box_color
     }
 
+# ------------------ build targets from CSV + scene + FOV ------------------
+def amodal_bbox_for_actor(pose, label, cam_pose, P, img_w, img_h):
+    """
+    Project the object's 3D cuboid and return:
+      bbox (x0,y0,x1,y1) based on all *projected corners that land on the frame*,
+      has_any_valid_corner (bool),
+      corners_w (8x3),
+      adj_pose,
+      (L, W, H),
+      depth_forward (8,) forward distances for corners,
+      valid (8,) mask for corners with forward depth > 0
+    """
+    obj_type = infer_object_type_from_label(label)
+    prof = PROFILES.get(obj_type, PROFILES["car"])
+    L, W, H, z_off = prof["L"], prof["W"], prof["H"], prof["Z"]
+
+    # Z-offset the pose (your convention)
+    adj_pose = airsim.Pose(
+        position_val=airsim.Vector3r(
+            pose.position.x_val,
+            pose.position.y_val,
+            pose.position.z_val + z_off
+        ),
+        orientation_val=pose.orientation
+    )
+
+    corners_w = compute_bounding_box_corners_world(adj_pose, L, W, H)
+    pts2d, depth_forward, valid = project_world_points_to_image(
+        corners_w, cam_pose, P, img_w, img_h
+    )
+
+    if not np.any(valid):
+        return None, False, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
+    # keep only corners that are both in front and inside the frame bounds
+    u = pts2d[:, 0]; v = pts2d[:, 1]
+    in_bounds = (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
+    use = valid & in_bounds
+    if not np.any(use):
+        return None, True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
+    # bbox over the on-frame subset of corners
+    x0 = int(max(0, math.floor(u[use].min())))
+    y0 = int(max(0, math.floor(v[use].min())))
+    x1 = int(min(img_w - 1, math.ceil(u[use].max())))
+    y1 = int(min(img_h - 1, math.ceil(v[use].max())))
+    if x1 <= x0 or y1 <= y0:
+        return None, True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
+    return (x0, y0, x1, y1), True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
+
+def build_targets_from_csv_scene(client, id_to_label, cam_pose, P, img_w, img_h):
+    """
+    Select targets using:
+      - keyword match on CSV label OR UE idname,
+      - any cuboid corner in front AND on-frame,
+      - any forward corner within DEPTH_CLIP_MAX_M.
+    """
+    try:
+        scene_ids = list(client.simListSceneObjects(".*"))
+    except Exception as e:
+        print("simListSceneObjects failed:", e)
+        scene_ids = []
+
+    dropped_keyword = 0
+    dropped_geom    = 0
+    dropped_depth   = 0
+
+    candidates = []
+    for idname in scene_ids:
+        # Label from CSV if available
+        label = id_to_label.get(idname, "")
+
+        # Require a real keyword match (either in CSV label or in idname)
+        if not (label_has_keyword(label, KEYWORDS) or label_has_keyword(idname, KEYWORDS)):
+            dropped_keyword += 1
+            continue
+
+        text_for_type = label if label else idname
+        obj_type = infer_object_type_from_label(text_for_type)
+
+        # Pose
+        try:
+            pose = client.simGetObjectPose(idname)
+        except Exception:
+            continue
+        if pose is None:
+            continue
+
+        # Corner-based visibility & bbox on the image
+        bbox, has_any_valid, corners_w, adj_pose, (L, W, H), depth_fwd, valid = amodal_bbox_for_actor(
+            pose, text_for_type, cam_pose, P, img_w, img_h
+        )
+        if not has_any_valid or bbox is None:
+            dropped_geom += 1
+            continue
+
+        # Reject tiny specks (e.g., 1–2 px accidental hits)
+        x0, y0, x1, y1 = bbox
+        if (x1 - x0) * (y1 - y0) < 9:  # < 3x3 px
+            dropped_geom += 1
+            continue
+
+        # Depth cutoff using *corners*, not centroid
+        front_depths = depth_fwd[valid]
+        if not np.any(front_depths <= DEPTH_CLIP_MAX_M + 1e-6):
+            dropped_depth += 1
+            continue
+
+        near = float(np.min(front_depths))
+        pretty_label = label if label else idname
+        candidates.append((near, idname, pretty_label, obj_type))
+
+    candidates.sort(key=lambda t: t[0])
+    if len(candidates) > MAX_OBJECTS:
+        candidates = candidates[:MAX_OBJECTS]
+
+    print(
+        f"Auto-selected {len(candidates)} target(s) by corner-in-FOV & depth≤{DEPTH_CLIP_MAX_M:.1f} m."
+    )
+    print(
+        f"  Rejections → keyword/unknown:{dropped_keyword}, offscreen/behind:{dropped_geom}, depth>{DEPTH_CLIP_MAX_M:.1f}m:{dropped_depth}"
+    )
+
+    targets = []
+    for i, (near, idname, label, obj_type) in enumerate(candidates, 1):
+        color_bgr = BOX_COLORS_BGR[(i - 1) % len(BOX_COLORS_BGR)]
+        pattern = f"^{re.escape(idname)}$"  # exact match
+        targets.append({
+            "label": label,
+            "ACTOR_PATTERN": pattern,
+            "OBJECT_TYPE": obj_type,
+            "BOX_COLOR_BGR": color_bgr,
+            "SHOW_ROI_WINDOWS": False,
+            "ENABLE_TIGHT_REFIT": True
+        })
+        print(f"  [{i:03d}] {near:6.2f} m | {obj_type:6s} | ID: {idname} | label: '{label}'")
+
+    return targets
+
+
+
+# ===================== main =====================
 def main():
     np.set_printoptions(precision=4, suppress=True)
     client = CLIENT_CLASS(port=PORT)
@@ -572,77 +708,42 @@ def main():
         if depth_img.shape[:2] != (h, w):
             depth_img = resize_to(depth_img, w, h, is_depth=True)
 
+        # Show full-frame depth-clipped segmentation image
+        if DEPTH_CLIP_ENABLE:
+            valid_depth_mask = np.isfinite(depth_img) & (depth_img > 0) & (depth_img <= DEPTH_CLIP_MAX_M)
+            seg_full_clipped = np.zeros_like(seg_img)
+            seg_full_clipped[valid_depth_mask] = seg_img[valid_depth_mask]
+            nz = int(np.count_nonzero(np.any(seg_full_clipped != 0, axis=2)))
+            print(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m): nonzero pixels = {nz}")
+            cv2.namedWindow(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", cv2.WINDOW_NORMAL)
+            cv2.imshow(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", seg_full_clipped)
+
     finally:
         client.simPause(False)
 
-    # Nearby keyword objects (unchanged logging block from your script)
-    print(f"\nFiltering scene objects by keywords {KEYWORDS} within {RANGE_MAX_M:.1f} m of camera...")
-    id_to_label = load_actor_map(CSV_PATH)
-    try:
-        all_objs = client.simListSceneObjects(".*")
-    except Exception as e:
-        all_objs = []
-        print("simListSceneObjects failed:", e)
-
-    if cam_pose is not None:
-        nearby = []
-        for name in all_objs:
-            if not name_has_keyword(name, KEYWORDS):
-                continue
-            try:
-                pose = client.simGetObjectPose(name)
-            except Exception:
-                continue
-            if pose is None:
-                continue
-            ptw = np.array([pose.position.x_val, pose.position.y_val, pose.position.z_val], dtype=float)
-            rng, x_forward = cam_to_point_range(ptw, cam_pose)
-            if (x_forward > 0) and np.isfinite(rng) and (rng <= RANGE_MAX_M):
-                label = id_to_label.get(name, "")
-                nearby.append((rng, name, label))
-        nearby.sort(key=lambda t: t[0])
-        print(f"Found {len(nearby)} matching object(s).")
-        for i, (rng, idname, label) in enumerate(nearby, 1):
-            if label:
-                print(f"  [{i:02d}] {rng:6.2f} m | IDname: {idname} | label: {label}")
-            else:
-                print(f"  [{i:02d}] {rng:6.2f} m | IDname: {idname}")
-    else:
-        print("Camera pose unavailable; skipping nearby-object listing.")
-
-    # Visible objects (unchanged lightweight test)
-    print("\nEnumerating scene objects and testing visibility (approximate)...")
-    visible_names = []
-    if cam_pose is not None and len(all_objs) > 0:
-        P = np.array(cam_info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
-        for name in all_objs:
-            try:
-                pose = client.simGetObjectPose(name)
-            except Exception:
-                continue
-            if pose is None:
-                continue
-            pt_world = np.array([pose.position.x_val, pose.position.y_val, pose.position.z_val], dtype=float)
-            if approx_visible(pt_world, cam_pose, P, w, h, depth_img, eps=VISIBLE_EPS_METERS):
-                visible_names.append(name)
-        print(f"Total objects in scene: {len(all_objs)}")
-        print(f"Approx. visible in current {CAMERA_NAME} view: {len(visible_names)} "
-              f"(eps={VISIBLE_EPS_METERS:.2f} m)")
-        for i, n in enumerate(visible_names[:MAX_VISIBLE_PRINT], 1):
-            print(f"  [{i:03d}] {n}")
-        if len(visible_names) > MAX_VISIBLE_PRINT:
-            print(f"  ... and {len(visible_names) - MAX_VISIBLE_PRINT} more.")
-    else:
-        print("Camera pose not available or no scene objects found.")
-
-    # Intrinsics log
+    # Intrinsics & projection
     K, vfov = compute_intrinsics_from_horizontal_fov(cam_info.fov, w, h)
     print(f"Resolution: {w}×{h}, HFOV: {cam_info.fov:.4f}°, VFOV: {vfov:.4f}°")
     print("K =\n", K, "\n")
     P = np.array(cam_info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
     print("AirSim projection matrix P=\n", P, "\n")
 
-    # DISPLAY: we’ll draw boxes for all targets on this copy
+    # === Build TARGETS automatically from CSV + scene + FOV ===
+    id_to_label = load_actor_map(CSV_PATH)
+    print(f"CSV loaded from '{CSV_PATH}' with {len(id_to_label)} mappings.")
+    if cam_pose is None:
+        print("Camera pose unavailable; cannot select targets.")
+        cv2.waitKey(0); cv2.destroyAllWindows()
+        return
+
+    global TARGETS
+    TARGETS = build_targets_from_csv_scene(client, id_to_label, cam_pose, P, w, h)
+    if not TARGETS:
+        print("No auto-selected targets — nothing to draw.")
+        cv2.waitKey(0); cv2.destroyAllWindows()
+        return
+
+    # DISPLAY: draw boxes for all targets on this copy
     disp = img.copy()
 
     # Process each target sequentially
@@ -651,7 +752,6 @@ def main():
         print(f"\n--- Processing {tgt['label']} ---")
         res = process_target(tgt, client, cam_info, cam_pose, disp, seg_img, depth_img, P)
         results.append(res)
-        # Per-target pose logs if found
         if res.get("found", False):
             print_pose(f"{tgt['label']} Actor ({res['actor_name']})", res["actor_pose"])
             print_pose(f"{tgt['label']} Actor+Zoffset", res["adjusted_pose"])
@@ -659,7 +759,7 @@ def main():
             for j, c in enumerate(res["corners_w"]):
                 print(f"  [{j}] x={c[0]:.4f}, y={c[1]:.4f}, z={c[2]:.4f}")
 
-    # Annotate & show main window (single window with both boxes)
+    # Annotate & show main window
     cv2.putText(disp, f"Camera: {CAMERA_NAME}", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
     y_off = 50
     for res in results:
@@ -668,13 +768,13 @@ def main():
             cv2.putText(disp, f"{label}: {res['actor_name']}", (10,y_off),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
             y_off += 22
-    cv2.namedWindow("Projected 3D Bounding Box (multi-target)", cv2.WINDOW_NORMAL)
-    cv2.imshow("Projected 3D Bounding Box (multi-target)", disp)
+    cv2.namedWindow("Projected 3D Bounding Box (auto from CSV+FOV)", cv2.WINDOW_NORMAL)
+    cv2.imshow("Projected 3D Bounding Box (auto from CSV+FOV)", disp)
 
     print("Press any key to exit (after Open3D closes if opened).")
     cv2.waitKey(1)
 
-    # Open3D viz: add each target’s cuboid lines and ROI point cloud
+    # Open3D viz: add each target’s cuboid + ROI point cloud
     if o3d:
         try:
             frames = []
@@ -690,13 +790,11 @@ def main():
             for res in results:
                 if not res.get("found", False):
                     continue
-                # 3D cuboid (color mapped from BGR -> RGB 0..1)
                 bgr = res["box_color"]; rgb = [bgr[2]/255.0, bgr[1]/255.0, bgr[0]/255.0]
                 ls = o3d.geometry.LineSet(points=o3d.utility.Vector3dVector(res["corners_w"]),
                                           lines=o3d.utility.Vector2iVector(edges))
                 ls.colors = o3d.utility.Vector3dVector([rgb]*len(edges))
                 frames.append(ls)
-                # ROI point cloud (already colored by seg colors)
                 if res["roi_pcd"] is not None:
                     frames.append(res["roi_pcd"])
 

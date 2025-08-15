@@ -1,52 +1,66 @@
-# Import this module to automatically setup path to local airsim module
-# This module first tries to see if airsim module is installed via pip
-# If it does then we don't do anything else
-# Else we look up grand-parent folder to see if it has airsim folder
-#    and if it does then we add that in sys.path
+# setup_path.py
+# Robust path helper to import local cosysairsim from anywhere in nested folders.
 
-import os,sys,inspect,logging
+import os
+import sys
+import inspect
+import importlib.util
+import logging
 
-#this class simply tries to see if airsim 
+def _find_upwards(start_dir: str, target_pkg: str) -> str | None:
+    """
+    Walk upwards from start_dir to filesystem root looking for a directory named target_pkg.
+    Returns the absolute path to the package directory if found, else None.
+    """
+    path = os.path.abspath(start_dir)
+    last = None
+    while path != last:
+        candidate = os.path.join(path, target_pkg)
+        if os.path.isdir(candidate):
+            # treat it as a valid package if it has __init__.py or a known marker (client.py)
+            if (os.path.isfile(os.path.join(candidate, "__init__.py")) or
+                os.path.isfile(os.path.join(candidate, "client.py"))):
+                return candidate
+        last = path
+        path = os.path.dirname(path)
+    return None
+
 class SetupPath:
     @staticmethod
-    def getDirLevels(path):
-        path_norm = os.path.normpath(path)
-        return len(path_norm.split(os.sep))
-
-    @staticmethod
-    def getCurrentPath():
+    def _this_file_dir() -> str:
         cur_filepath = os.path.abspath(inspect.getfile(inspect.currentframe()))
         return os.path.dirname(cur_filepath)
 
     @staticmethod
-    def getGrandParentDir():
-        cur_path = SetupPath.getCurrentPath()
-        if SetupPath.getDirLevels(cur_path) >= 2:
-            return os.path.dirname(os.path.dirname(cur_path))
-        return ''
+    def addCosysAirSimModulePath():
+        # 1) If already importable (pip/install), do nothing
+        if importlib.util.find_spec("cosysairsim") is not None:
+            return
 
-    @staticmethod
-    def getParentDir():
-        cur_path = SetupPath.getCurrentPath()
-        if SetupPath.getDirLevels(cur_path) >= 1:
-            return os.path.dirname(cur_path)
-        return ''
+        # 2) Environment override: COSYSAIRSIM_PATH can point to either the package
+        #    directory (.../cosysairsim) or its parent (which contains 'cosysairsim')
+        env_path = os.environ.get("COSYSAIRSIM_PATH")
+        if env_path:
+            env_path = os.path.abspath(env_path)
+            pkg_parent = (os.path.dirname(env_path)
+                          if os.path.basename(env_path) == "cosysairsim" else env_path)
+            if os.path.isdir(os.path.join(pkg_parent, "cosysairsim")):
+                if pkg_parent not in sys.path:
+                    sys.path.insert(0, pkg_parent)
+                return
 
-    @staticmethod
-    def addAirSimModulePath():
-        # if airsim module is installed then don't do anything else
-        #import pkgutil
-        #airsim_loader = pkgutil.find_loader('airsim')
-        #if airsim_loader is not None:
-        #    return
-
-        parent = SetupPath.getParentDir()
-        if parent !=  '':
-            airsim_path = os.path.join(parent, 'cosysairsim')
-            client_path = os.path.join(airsim_path, 'client.py')
-            if os.path.exists(client_path):
+        # 3) Walk upwards from this file's directory to find the local package
+        cur_dir = SetupPath._this_file_dir()
+        pkg_dir = _find_upwards(cur_dir, "cosysairsim")
+        if pkg_dir:
+            parent = os.path.dirname(pkg_dir)  # We add the directory *containing* the package
+            if parent not in sys.path:
                 sys.path.insert(0, parent)
-        else:
-            logging.warning("airsim module not found in parent folder. Using installed package (pip install airsim).")
+            return
 
-SetupPath.addAirSimModulePath()
+        logging.warning(
+            "cosysairsim module not found in parent directories. "
+            "Falling back to installed package (pip install cosysairsim)."
+        )
+
+SetupPath.addCosysAirSimModulePath()
