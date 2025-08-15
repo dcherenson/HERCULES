@@ -102,9 +102,55 @@ def load_actor_map(csv_path):
         print(f"Error reading CSV '{csv_path}': {e} (continuing without labels)")
     return mapping
 
-def label_has_keyword(label, keywords):
-    s = (label or "").lower()
-    return any(k.lower() in s for k in keywords)
+def label_has_keyword(name_or_label, keywords):
+    """
+    Return True if any keyword appears in the given string, ignoring case,
+    separators, and camelCase. Also treats space/no-space variants as equal.
+    Examples that will match:
+      - 'SportsCar_01'  vs  'sports car'
+      - 'BLUE-PICKUP2'  vs  'pickup'
+      - 'BP_SplineHuman_TypeB' vs 'human'
+    """
+    if not name_or_label:
+        return False
+
+    s_raw = str(name_or_label)
+
+    # Split camelCase and letters-digits boundaries to expose words
+    s_cc = re.sub(r'(?<=[a-z])(?=[A-Z0-9])', ' ', s_raw)
+    s_cc = re.sub(r'(?<=[A-Z])(?=[0-9])', ' ', s_cc)
+
+    s_low = s_cc.lower()
+    # "Compact" form with all non-alphanumerics removed
+    s_compact = re.sub(r'[^a-z0-9]+', '', s_low)
+
+    for kw in keywords:
+        kw_low = kw.lower()
+        kw_compact = re.sub(r'[^a-z0-9]+', '', kw_low)
+
+        # 1) direct substring on the spaced/normalized string
+        if kw_low in s_low:
+            return True
+
+        # 2) compact substring (handles spaces/underscores/camelCase etc.)
+        if kw_compact and kw_compact in s_compact:
+            return True
+
+        # 3) allow any non-alnum between keyword characters (e.g., 'sport*sc@ar')
+        #    Only run if kw has multiple tokens to avoid over-matching tiny kws.
+        if ' ' in kw_low:
+            # replace runs of non-alnum in the keyword with a wildcard for non-alnum in the label
+            parts = re.split(r'[^a-z0-9]+', kw_low)
+            parts = [re.escape(p) for p in parts if p]
+            if parts:
+                rx = r'(?:^|[^a-z0-9])' + r'[^a-z0-9]*'.join(parts) + r'(?:[^a-z0-9]|$)'
+                if re.search(rx, s_low):
+                    return True
+
+    return False
+
+
+
 
 def infer_object_type_from_label(label):
     s = (label or "").lower()
