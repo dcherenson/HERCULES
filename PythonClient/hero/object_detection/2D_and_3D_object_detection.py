@@ -35,7 +35,7 @@ TARGETS = [
     },
     {
         "label": "TargetB",
-        "ACTOR_PATTERN": "StaticMeshActor_UAID_E08F4CF5208AA07502_1083882316.*",
+        "ACTOR_PATTERN": "StaticMeshActor_UAID_E08F4CF5208AA07502_1083882316",
         "OBJECT_TYPE": "car",
         "BOX_COLOR_BGR": (255, 0, 255), # magenta for visual distinction
         "SHOW_ROI_WINDOWS": False,      # no extra windows for the second object
