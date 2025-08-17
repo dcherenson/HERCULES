@@ -29,7 +29,9 @@ except ImportError:
 
 # === CONFIGURATION ===
 # ACTOR_PATTERN      = "SkeletalMeshActor_UAID.*"
-ACTOR_PATTERN      = "StaticMeshActor_UAID_E08F4CF5208AA07502_2022041209.*"
+# ACTOR_PATTERN      = "StaticMeshActor_UAID_E08F4CF5208AA07502_2022041209.*"
+# ACTOR_PATTERN = "StaticMeshActor_UAID_E08F4CF5208AA07502_2022041209"  # Sportscar_3
+ACTOR_PATTERN = "BP_VehicleAI_pickup_C_UAID_6C6E07132D49788102_1328099840"  # BP_VehicleAI_pickup4
 
 CAMERA_NAME        = "front_center"
 CLIENT_CLASS       = airsim.MultirotorClient

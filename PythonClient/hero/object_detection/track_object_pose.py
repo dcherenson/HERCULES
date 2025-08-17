@@ -35,7 +35,9 @@ def main():
     # object_name = "BP_VehicleAI_pickup_C_UAID_6C6E07132D49788102_1328099840"
     # object_name = "BP_SplineHuman_Mannequin2_C_UAID_E08F4CF5208A427A02_1146249951"
     # object_name = "BP_SplineHuman_Type10_C_UAID_6C6E07132D49C88102_1970519919"
-    object_name = "BP_SplineMotionHuman_C_UAID_6C6E07132D49588302_1105149321"
+    # object_name = "BP_SplineMotionHuman_C_UAID_6C6E07132D49588302_1105149321"
+    # object_name = "BP_VehicleAI_pickup_C_UAID_6C6E07132D49788102_1328099840"  # BP_VehicleAI_pickup4
+    object_name = "StaticMeshActor_UAID_E08F4CF5208AA07502_2022041209"  # Sportscar_3
 
     # polling interval in seconds
     interval = 0.5
