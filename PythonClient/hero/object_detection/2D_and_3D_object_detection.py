@@ -33,12 +33,39 @@ CLIENT_CLASS       = airsim.MultirotorClient
 PORT               = 41451
 
 PROJECTION_ENABLED = True
-DRAW_2D_BBOX       = True
+
+# Draw control:
+# - If True: draw ONLY the corrected/tight 2D boxes (orange) on the Scene RGB window.
+#            The initial amodal boxes and edge-overlays will NOT be drawn.
+# - If False: draw both the amodal (initial) box/edges and the corrected/tight boxes.
+DRAW_ONLY_CORRECTED_2D = True
+TIGHT_BOX_COLOR_BGR    = (0,165,255)   # orange for tight (corrected) box
+
+# NEW: Enforce dominant-color logic & occlusion filter for 2D drawing
+# When True:
+#   * We DO NOT draw any amodal/edge boxes.
+#   * We ONLY draw the tight box around the dominant color inside the 3D box.
+#   * If no ROI points fall inside the 3D box (occluded), the object is ignored entirely.
+DOMINANT_COLOR_ONLY = True
+
+# --- 2D bbox size gating (after color selection) ---
+DOMINANT_MIN_PIXELS = 120   # require this many pixels (post-clip) for the chosen color
+MIN_BBOX_WIDTH      = 20    # px
+MIN_BBOX_HEIGHT     = 20    # px
+MIN_BBOX_AREA       = 400   # px^2
 
 # --- per-object profiles (dimensions in meters; Z is NED +Z down)
 PROFILES = {
     "human": {"L": 0.5, "W": 0.75, "H": 1.9,  "Z": -0.90},
     "car":   {"L": 4.2, "W": 1.90, "H": 1.60, "Z": -0.55},
+}
+
+# --- OPTIONAL: per-ID substring overrides (applied whenever substring appears in idname)
+# Customize these numbers to your desired pickup dimensions and Z offset.
+PROFILE_OVERRIDES_BY_ID_SUBSTR = {
+    # example override for any id containing "pickup"
+    "pickup": {"L": 5.35, "W": 2.05, "H": 2.2, "Z": -1.0, "FWD_OFF_M": -0.45},
+    # add more substrings if needed...
 }
 
 SHOW_ROI_WINDOWS_GLOBAL = False  # avoid N windows when many auto targets are found
@@ -49,11 +76,16 @@ DEPTH_CLIP_ENABLE     = True
 DEPTH_CLIP_MAX_M      = RANGE_MAX_M   # keep in sync with detection range
 SHOW_ORIGINAL_SEG_ROI = False
 
+# --- Full-frame segmentation color filtering ---
+# Any unique color in the depth-clipped full-frame segmentation with fewer pixels
+# than this threshold will be removed from the display (set to black).
+MIN_SEG_COLOR_PIXELS_FULL = 2000
+
 # --- Point cloud export from clipped ROI ---
 ADD_ROI_POINTS_TO_OPEN3D = True
 ROI_POINT_STRIDE          = 1
 
-# --- tight-box refit params (applies only if target["ENABLE_TIGHT_REFIT"] is True)
+# --- tight-box refit params (used for dominant-color tight box too)
 REFIT_USE_DEPTH_CLIP_FOR_TIGHT_BOX = True
 REFIT_MIN_PIXELS                   = 50
 REFIT_SEARCH_MARGIN_PX             = 20
@@ -395,11 +427,98 @@ def resolve_id_exact_or_prefix(client, idname):
     print(f"[force] could not resolve '{idname}' (no exact or prefix match).")
     return None
 
+# ---- profile override helpers --------------------------------------------------
+
+def get_profile_for_idname(idname, obj_type):
+    """Start from PROFILES[obj_type], apply any substring overrides for the id."""
+    prof = PROFILES.get(obj_type, PROFILES["car"]).copy()
+    lname = idname.lower()
+    for substr, override in PROFILE_OVERRIDES_BY_ID_SUBSTR.items():
+        if substr in lname:
+            prof.update(override)
+            break
+    # defaults
+    if "FWD_OFF_M" not in prof:
+        prof["FWD_OFF_M"] = 0.0
+    return prof
+
+def pose_with_offsets(base_pose, z_off_m=0.0, fwd_off_m=0.0):
+    """
+    Return a new pose where the position is shifted by:
+      - +z_off_m in world Z (NED +Z is down in your setup)
+      - +fwd_off_m along the actor's local +X axis (forward)
+    Orientation is unchanged.
+    """
+    R = quaternion_to_rotation_matrix(base_pose.orientation)  # 3x3
+    fwd = R[:, 0]  # local +X expressed in world
+    p = np.array([base_pose.position.x_val,
+                  base_pose.position.y_val,
+                  base_pose.position.z_val], dtype=float)
+    p = p + fwd_off_m * fwd
+    p[2] = p[2] + z_off_m
+    return airsim.Pose(
+        position_val=airsim.Vector3r(p[0], p[1], p[2]),
+        orientation_val=base_pose.orientation
+    )
+
+
+def amodal_bbox_for_actor_with_dims(pose, cam_pose, P, img_w, img_h,
+                                    L, W, H, z_off, fwd_off=0.0):
+    """Same as amodal_bbox_for_actor, but with explicit dimensions/offset."""
+    adj_pose = airsim.Pose(
+        position_val=airsim.Vector3r(
+            pose.position.x_val,
+            pose.position.y_val,
+            pose.position.z_val + z_off
+        ),
+        orientation_val=pose.orientation
+    )
+    corners_w = compute_bounding_box_corners_world(adj_pose, L, W, H)
+    pts2d, depth_forward, valid = project_world_points_to_image(corners_w, cam_pose, P, img_w, img_h)
+    if not np.any(valid):
+        return None, False, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
+    u = pts2d[:, 0]; v = pts2d[:, 1]
+    in_bounds = (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
+    use = valid & in_bounds
+    if np.any(use):
+        x0 = int(max(0, math.floor(u[use].min())))
+        y0 = int(max(0, math.floor(v[use].min())))
+        x1 = int(min(img_w - 1, math.ceil(u[use].max())))
+        y1 = int(min(img_h - 1, math.ceil(v[use].max())))
+        if x1 > x0 and y1 > y0:
+            return (x0, y0, x1, y1), True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
+    # Edge-aware fallback
+    edges = [(0,1),(1,3),(3,2),(2,0),(4,5),(5,7),(7,6),(6,4),(0,4),(1,5),(2,6),(3,7)]
+    clipped_points = []
+    for a, b in edges:
+        if not (valid[a] and valid[b]):
+            continue
+        seg = _clip_segment_to_rect((u[a], v[a]), (u[b], v[b]), img_w, img_h)
+        if seg is not None:
+            p0, p1 = seg
+            clipped_points.append(p0)
+            clipped_points.append(p1)
+
+    if len(clipped_points) >= 2:
+        cps = np.array(clipped_points, dtype=float)
+        x0 = int(max(0, math.floor(cps[:,0].min())))
+        y0 = int(max(0, math.floor(cps[:,1].min())))
+        x1 = int(min(img_w - 1, math.ceil(cps[:,0].max())))
+        y1 = int(min(img_h - 1, math.ceil(cps[:,1].max())))
+        if x1 > x0 and y1 > y0:
+            return (x0, y0, x1, y1), True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
+    return None, True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
 # ================================================================================
 
 def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_img, P):
     """
     Per-target pipeline. IMPORTANT: This function assumes the sim is PAUSED.
+
+    Returns dict with drawing artifacts plus whether a tight/corrected box was drawn.
     """
     label = target_cfg["label"]
     pattern = target_cfg["ACTOR_PATTERN"]
@@ -407,10 +526,11 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
     box_color = target_cfg["BOX_COLOR_BGR"]
     show_roi = SHOW_ROI_WINDOWS_GLOBAL and target_cfg.get("SHOW_ROI_WINDOWS", False)
 
-    if obj_type not in PROFILES:
-        raise ValueError(f"[{label}] Unknown OBJECT_TYPE '{obj_type}'. Choose from {list(PROFILES.keys())}.")
+    # base profile, then apply per-target override if provided
+    profile = PROFILES[obj_type].copy() if obj_type in PROFILES else PROFILES["car"].copy()
+    if "PROFILE_OVERRIDE" in target_cfg and target_cfg["PROFILE_OVERRIDE"]:
+        profile.update(target_cfg["PROFILE_OVERRIDE"])
 
-    profile = PROFILES[obj_type]
     L, W, H = profile["L"], profile["W"], profile["H"]
     z_off   = profile["Z"]
 
@@ -426,14 +546,8 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
     actor_pose = _safe_get_pose(client, actor)
 
     # Apply Z-offset to actor centroid (NED)
-    adjusted_actor_pose = airsim.Pose(
-        position_val=airsim.Vector3r(
-            actor_pose.position.x_val,
-            actor_pose.position.y_val,
-            actor_pose.position.z_val + z_off
-        ),
-        orientation_val=actor_pose.orientation
-    )
+    fwd_off = profile.get("FWD_OFF_M", 0.0)
+    adjusted_actor_pose = pose_with_offsets(actor_pose, z_off_m=z_off, fwd_off_m=fwd_off)
 
     # Compute corners and project
     corners_w = compute_bounding_box_corners_world(adjusted_actor_pose, L, W, H)
@@ -441,10 +555,12 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
     h, w = img.shape[:2]
     disp_bbox = None
     disp_img  = img
+    drew_tight = False
+
     if PROJECTION_ENABLED and cam_pose is not None:
         pts2d, depth_forward, valid = project_world_points_to_image(corners_w, cam_pose, P, w, h)
 
-        # fast path: on-frame valid corners
+        # compute amodal bbox (for search region), but DO NOT draw if DOMINANT_COLOR_ONLY
         u = pts2d[:, 0]; v = pts2d[:, 1]
         in_bounds = (u >= 0) & (u < w) & (v >= 0) & (v < h)
         use = valid & in_bounds
@@ -455,10 +571,10 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
             y1 = int(min(h - 1, math.ceil(v[use].max())))
             if x1 > x0 and y1 > y0:
                 disp_bbox = (x0, y0, x1, y1)
-                cv2.rectangle(disp_img, (x0, y0), (x1, y1), box_color, 2)
-
-        # fallback: edge-clipped amodal bbox (also draws the edges)
+                if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
+                    cv2.rectangle(disp_img, (x0, y0), (x1, y1), box_color, 2)
         if disp_bbox is None:
+            # fallback: edge-clipped amodal bbox
             edges = [(0,1),(1,3),(3,2),(2,0),(4,5),(5,7),(7,6),(6,4),(0,4),(1,5),(2,6),(3,7)]
             clipped = []
             for a, b in edges:
@@ -468,7 +584,8 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
                 if seg is not None:
                     p0, p1 = seg
                     clipped.append(p0); clipped.append(p1)
-                    cv2.line(disp_img, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])), box_color, 2)
+                    if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
+                        cv2.line(disp_img, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])), box_color, 2)
             if len(clipped) >= 2:
                 cps = np.array(clipped, dtype=float)
                 x0 = int(max(0, math.floor(cps[:,0].min())))
@@ -477,20 +594,22 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
                 y1 = int(min(h - 1, math.ceil(cps[:,1].max())))
                 if x1 > x0 and y1 > y0:
                     disp_bbox = (x0, y0, x1, y1)
-                    cv2.rectangle(disp_img, (x0, y0), (x1, y1), box_color, 2)
+                    if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
+                        cv2.rectangle(disp_img, (x0, y0), (x1, y1), box_color, 2)
 
-        # centroid crosshair (sanity)
-        cx = float(np.mean(corners_w[:,0])); cy = float(np.mean(corners_w[:,1])); cz = float(np.mean(corners_w[:,2]))
-        p_cam, u_c, v_c, in_front, in_bounds_c = world_to_cam_and_pixel(
-            np.array([cx, cy, cz], dtype=float), cam_pose, P, w, h
-        )
-        if in_front and in_bounds_c:
-            cv2.drawMarker(disp_img, (int(round(u_c)), int(round(v_c))), box_color,
-                           markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
+        # centroid crosshair only when not restricting to corrected-only to avoid clutter
+        if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
+            cx = float(np.mean(corners_w[:,0])); cy = float(np.mean(corners_w[:,1])); cz = float(np.mean(corners_w[:,2]))
+            p_cam, u_c, v_c, in_front, in_bounds_c = world_to_cam_and_pixel(
+                np.array([cx, cy, cz], dtype=float), cam_pose, P, w, h
+            )
+            if in_front and in_bounds_c:
+                cv2.drawMarker(disp_img, (int(round(u_c)), int(round(v_c))), box_color,
+                               markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
     else:
         print(f"[{label}] Skipping projection.")
 
-    # Build ROI and back-project clipped points for Open3D
+    # Build ROI and back-project clipped points for Open3D + dominant color logic
     roi_pcd = None
     roi_world_pts = None
     roi_colors_rgb = None
@@ -531,21 +650,26 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
                     cv2.imshow(f"{label} Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", seg_roi_clipped)
                     cv2.namedWindow(f"{label} Depth ROI", cv2.WINDOW_NORMAL)
                     cv2.imshow(f"{label} Depth ROI", depth_vis)
-
             else:
-                if show_roi:
-                    cv2.namedWindow(f"{label} Seg ROI", cv2.WINDOW_NORMAL)
-                    cv2.imshow(f"{label} Seg ROI", seg_roi)
+                seg_roi_clipped = seg_roi  # no depth gating if disabled
 
-            # Dominant color + optional tight refit
+            # === Dominant color INSIDE the 3D cuboid ===
             if roi_world_pts is not None and roi_colors_rgb is not None:
                 top_colors, n_inside = dominant_colors_in_box(
                     roi_world_pts, roi_colors_rgb,
                     adjusted_actor_pose, L, W, H, top_k=3
                 )
                 print(f"[{label}] Points inside 3D box: {n_inside}")
-                if n_inside > 0 and len(top_colors) > 0 and target_cfg.get("ENABLE_TIGHT_REFIT", True):
+
+                # If object has no colored pixels inside the 3D box → treat as occluded and ignore entirely
+                if DOMINANT_COLOR_ONLY and n_inside == 0:
+                    print(f"[{label}] Occluded (no colored ROI points inside cuboid). Ignoring object.")
+                    return {"found": False}
+
+                if n_inside > 0 and len(top_colors) > 0:
                     best_rgb, best_count, best_frac = top_colors[0]
+
+                    # Search region: amodal box ± margin
                     ax0, ay0, ax1, ay1 = disp_bbox
                     margin = REFIT_SEARCH_MARGIN_PX
                     search_rect = (
@@ -565,14 +689,40 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
                     )
                     if tight_box is not None:
                         tx0, ty0, tx1, ty1 = tight_box
-                        cv2.rectangle(disp_img, (tx0,ty0), (tx1,ty1), (0,165,255), 2)
-                        cv2.putText(disp_img, f"{label}: tight color box", (tx0, max(0,ty0-6)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,165,255), 1)
-                        print(f"[{label}] Tight 2D box: ({tx0},{ty0})-({tx1},{ty1}), pixels={pix_count}")
+
+                        # --- Final small-box gating on the corrected box ---
+                        MIN_TIGHT_BOX_AREA_PX = MIN_BBOX_AREA
+                        MIN_TIGHT_BOX_MIN_SIDE = min(MIN_BBOX_WIDTH, MIN_BBOX_HEIGHT)
+                        w_box = tx1 - tx0
+                        h_box = ty1 - ty0
+                        if (w_box * h_box) < MIN_TIGHT_BOX_AREA_PX or min(w_box, h_box) < MIN_TIGHT_BOX_MIN_SIDE:
+                            print(f"[{label}] Tight box rejected: too small ({w_box}x{h_box}px).")
+                        else:
+                            cv2.rectangle(disp_img, (tx0,ty0), (tx1,ty1), TIGHT_BOX_COLOR_BGR, 2)
+                            cv2.putText(disp_img, f"{label}: dominant color box", (tx0, max(0,ty0-6)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, TIGHT_BOX_COLOR_BGR, 1)
+                            print(f"[{label}] Dominant-color tight 2D box: ({tx0},{ty0})-({tx1},{ty1})")
+                            drew_tight = True
                     else:
-                        print(f"[{label}] Tight 2D box not found (min_pixels={REFIT_MIN_PIXELS}).")
+                        print(f"[{label}] Dominant color present but tight 2D box not found (min_pixels={REFIT_MIN_PIXELS}).")
+                else:
+                    # No colors tallied → either empty ROI or all filtered out by depth/pruning
+                    if DOMINANT_COLOR_ONLY:
+                        print(f"[{label}] No dominant color candidates. Ignoring object.")
+                        return {"found": False}
+            else:
+                if DOMINANT_COLOR_ONLY:
+                    print(f"[{label}] No ROI 3D points/colors to evaluate. Ignoring object.")
+                    return {"found": False}
         else:
             print(f"[{label}] Amodal bbox collapsed after clipping; no ROI to process.")
+            if DOMINANT_COLOR_ONLY:
+                return {"found": False}
+
+    else:
+        # No amodal bbox (e.g., fully off-screen) — ignore if dominant-only is enabled
+        if DOMINANT_COLOR_ONLY:
+            return {"found": False}
 
     return {
         "found": True,
@@ -583,7 +733,8 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
         "L": L, "W": W, "H": H,
         "corners_w": corners_w,
         "roi_pcd": roi_pcd,
-        "box_color": box_color
+        "box_color": box_color,
+        "drew_tight": drew_tight
     }
 
 def obb_from_points(world_pts):
@@ -675,8 +826,13 @@ def build_targets_from_csv_scene(client, id_to_label, cam_pose, P, img_w, img_h)
         if pose is None:
             continue
 
-        bbox, has_any_valid, corners_w, adj_pose, (L, W, H), depth_fwd, valid = amodal_bbox_for_actor(
-            pose, text_for_type, cam_pose, P, img_w, img_h
+        # --- APPLY PROFILE OVERRIDES BY ID SUBSTRING HERE ---
+        prof = get_profile_for_idname(idname, obj_type)
+
+        bbox, has_any_valid, corners_w, adj_pose, (L, W, H), depth_fwd, valid = \
+        amodal_bbox_for_actor_with_dims(
+            pose, cam_pose, P, img_w, img_h,
+            prof["L"], prof["W"], prof["H"], prof["Z"], prof.get("FWD_OFF_M", 0.0)
         )
         if not has_any_valid or bbox is None:
             dropped_geom += 1
@@ -711,16 +867,19 @@ def build_targets_from_csv_scene(client, id_to_label, cam_pose, P, img_w, img_h)
     for i, (near, idname, label, obj_type) in enumerate(candidates, 1):
         color_bgr = BOX_COLORS_BGR[(i - 1) % len(BOX_COLORS_BGR)]
         pattern = f"^{re.escape(idname)}$"  # exact match
+
+        # include any override we’d apply at runtime so the per-target pipeline uses it
+        prof_override = get_profile_for_idname(idname, obj_type)
+
         targets.append({
             "label": label if label else idname,
             "ACTOR_PATTERN": pattern,
             "OBJECT_TYPE": obj_type,
             "BOX_COLOR_BGR": color_bgr,
             "SHOW_ROI_WINDOWS": False,
-            "ENABLE_TIGHT_REFIT": True
+            "ENABLE_TIGHT_REFIT": True,
+            "PROFILE_OVERRIDE": prof_override,   # <--- NEW
         })
-        print(f"  [{i:03d}] {near:6.2f} m | {obj_type:6s} | ID: {idname} | label: '{label}'")
-
     return targets
 
 def _clip_segment_to_rect(p0, p1, w, h):
@@ -745,8 +904,26 @@ def _clip_segment_to_rect(p0, p1, w, h):
             if t0 > t1:
                 return None
     cx0, cy0 = x0 + t0 * dx, y0 + t0 * dy
-    cx1, cy1 = x0 + t1 * dx, y0 + t1 * dy
+    cx1, cy1 = x0 + t1 * dx, y1 + t1 * dy
     return (cx0, cy0), (cx1, cy1)
+
+# --- full-frame segmentation color pruning (after depth-clip) ---
+def prune_small_seg_colors(seg_img_bgr, min_pixels):
+    """Return a copy where any unique BGR color present with < min_pixels is removed (set to 0)."""
+    out = np.zeros_like(seg_img_bgr)
+    flat = seg_img_bgr.reshape(-1, 3)
+    nz = np.any(flat != 0, axis=1)
+    if not np.any(nz):
+        return out
+    colors, counts = np.unique(flat[nz], axis=0, return_counts=True)
+    keep = colors[counts >= int(min_pixels)]
+    if keep.size == 0:
+        return out
+    # paint back only the kept colors
+    for c in keep:
+        m = (seg_img_bgr[:,:,0] == c[0]) & (seg_img_bgr[:,:,1] == c[1]) & (seg_img_bgr[:,:,2] == c[2])
+        out[m] = c
+    return out
 
 # ===================== main =====================
 def main():
@@ -805,10 +982,14 @@ def main():
             valid_depth_mask = np.isfinite(depth_img) & (depth_img > 0) & (depth_img <= DEPTH_CLIP_MAX_M)
             seg_full_clipped = np.zeros_like(seg_img)
             seg_full_clipped[valid_depth_mask] = seg_img[valid_depth_mask]
-            nz = int(np.count_nonzero(np.any(seg_full_clipped != 0, axis=2)))
-            print(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m): nonzero pixels = {nz}")
-            cv2.namedWindow(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", cv2.WINDOW_NORMAL)
-            cv2.imshow(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", seg_full_clipped)
+
+            # prune small color clusters from the depth-clipped full-frame segmentation
+            seg_full_pruned = prune_small_seg_colors(seg_full_clipped, MIN_SEG_COLOR_PIXELS_FULL)
+
+            nz = int(np.count_nonzero(np.any(seg_full_pruned != 0, axis=2)))
+            print(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, min_color_pix >= {MIN_SEG_COLOR_PIXELS_FULL}): nonzero pixels = {nz}")
+            cv2.namedWindow(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, ≥{MIN_SEG_COLOR_PIXELS_FULL}px)", cv2.WINDOW_NORMAL)
+            cv2.imshow(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, ≥{MIN_SEG_COLOR_PIXELS_FULL}px)", seg_full_pruned)
 
         # (2) Intrinsics & projection (frozen)
         K, vfov = compute_intrinsics_from_horizontal_fov(cam_info.fov, w, h)
@@ -841,13 +1022,16 @@ def main():
                 id_to_label.get(resolved, resolved)
             )
             color_bgr = FORCE_INCLUDE_COLOR_BGR or BOX_COLORS_BGR[len(TARGETS) % len(BOX_COLORS_BGR)]
+            # include per-id override for the forced target
+            prof_override = get_profile_for_idname(resolved, obj_type)
             TARGETS.append({
                 "label": id_to_label.get(resolved, resolved),
                 "ACTOR_PATTERN": f"^{re.escape(resolved)}$",
                 "OBJECT_TYPE": obj_type,
                 "BOX_COLOR_BGR": color_bgr,
                 "SHOW_ROI_WINDOWS": False,
-                "ENABLE_TIGHT_REFIT": True
+                "ENABLE_TIGHT_REFIT": True,
+                "PROFILE_OVERRIDE": prof_override,   # <--- NEW
             })
             print(f"[force] added '{resolved}' as OBJECT_TYPE='{obj_type}' with color BGR{color_bgr}.")
 
@@ -882,7 +1066,10 @@ def main():
             continue
         label = res["label"]; bgr = res["box_color"]
         cv2.rectangle(disp, (10, y_off-12), (26, y_off+2), bgr, thickness=-1)
-        cv2.putText(disp, f"{label}: {res['actor_name']}", (34, y_off),
+        suffix = ""
+        if (DRAW_ONLY_CORRECTED_2D or DOMINANT_COLOR_ONLY) and not res.get("drew_tight", False):
+            suffix = " (no dominant-color box)"
+        cv2.putText(disp, f"{label}: {res['actor_name']}{suffix}", (34, y_off),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
         y_off += 22
         legend_lines.append(f"  color BGR{bgr} -> {res['actor_name']}")
@@ -891,8 +1078,11 @@ def main():
         for line in legend_lines:
             print(line)
 
-    cv2.namedWindow("Projected 3D Bounding Box (auto from CSV+FOV)", cv2.WINDOW_NORMAL)
-    cv2.imshow("Projected 3D Bounding Box (auto from CSV+FOV)", disp)
+    title = "Projected 3D Bounding Box (dominant color only)" if DOMINANT_COLOR_ONLY else \
+            ("Projected 3D Bounding Box (corrected only)" if DRAW_ONLY_CORRECTED_2D else
+             "Projected 3D Bounding Box (auto from CSV+FOV)")
+    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.imshow(title, disp)
     print("Press any key to exit (after Open3D closes if opened).")
     cv2.waitKey(1)
 
@@ -909,7 +1099,7 @@ def main():
             fc.transform(Tc)
             geoms.append(fc)
 
-            # Add ROI point clouds FIRST
+            # Add ROI point clouds FIRST (only for kept objects)
             for res in results:
                 if res.get("found", False) and res["roi_pcd"] is not None:
                     geoms.append(res["roi_pcd"])
