@@ -426,11 +426,8 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
     actor = objs[0]
     print(f"[{label}] Target actor: {actor}")
 
-    # Get actor pose
-    try:
-        actor_pose = client.simGetObjectPose(actor, True)
-    except TypeError:
-        actor_pose = client.simGetObjectPose(actor)
+    # Get actor pose (WORLD pose)
+    actor_pose = client.simGetObjectPose(actor)  # <-- no extra boolean
 
     # Apply Z-offset to actor centroid (NED)
     adjusted_actor_pose = airsim.Pose(
@@ -454,8 +451,31 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
         disp_bbox = draw_2d_bbox_and_get_rect(
             pts2d, valid, w, h, img_to_draw=disp_img, color=box_color, thickness=2
         )
-        if disp_bbox is None:
-            print(f"[{label}] 2D bbox invalid (likely fully behind camera).")
+        # --- sanity check: centroid should project near the box; if not, re-fetch pose as fallback ---
+        if disp_bbox is not None:
+            cx = np.mean(corners_w[:,0]); cy = np.mean(corners_w[:,1]); cz = np.mean(corners_w[:,2])
+            p_cam, u_c, v_c, in_front, in_bounds = world_to_cam_and_pixel(
+                np.array([cx, cy, cz], dtype=float), cam_pose, P, w, h
+            )
+            if in_front and in_bounds:
+                x0, y0, x1, y1 = disp_bbox
+                # if centroid is far from the box, our pose is likely wrong → re-query without any flags and rebuild
+                if (u_c < x0 - 40) or (u_c > x1 + 40) or (v_c < y0 - 40) or (v_c > y1 + 40):
+                    # Re-query as absolute world pose again (defensive; keeps behavior robust if code elsewhere changes)
+                    actor_pose = client.simGetObjectPose(actor)
+                    adjusted_actor_pose = airsim.Pose(
+                        position_val=airsim.Vector3r(
+                            actor_pose.position.x_val,
+                            actor_pose.position.y_val,
+                            actor_pose.position.z_val + z_off
+                        ),
+                        orientation_val=actor_pose.orientation
+                    )
+                    corners_w = compute_bounding_box_corners_world(adjusted_actor_pose, L, W, H)
+                    pts2d, depth_forward, valid = project_world_points_to_image(corners_w, cam_pose, P, w, h)
+                    disp_bbox = draw_2d_bbox_and_get_rect(
+                        pts2d, valid, w, h, img_to_draw=disp_img, color=box_color, thickness=2
+                    )
     else:
         print(f"[{label}] Skipping projection.")
 
@@ -555,17 +575,31 @@ def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_i
         "box_color": box_color
     }
 
+
+def obb_from_points(world_pts):
+    """
+    Fit an oriented bounding box to Nx3 world points using Open3D's PCA OBB.
+    Returns (center(np3), R(3x3), extents(L,W,H)).
+    """
+    import numpy as _np
+    import open3d as _o3d
+    if world_pts is None or len(world_pts) < 10:
+        return None
+    pcd = _o3d.geometry.PointCloud()
+    pcd.points = _o3d.utility.Vector3dVector(world_pts.astype(_np.float64))
+    obb = pcd.get_oriented_bounding_box()  # PCA-based
+    c = _np.asarray(obb.center, dtype=float)
+    R = _np.asarray(obb.R, dtype=float)
+    extents = _np.asarray(obb.extent, dtype=float)  # lengths along OBB axes
+    return c, R, extents
+
+
 # ------------------ build targets from CSV + scene + FOV ------------------
 def amodal_bbox_for_actor(pose, label, cam_pose, P, img_w, img_h):
     """
-    Project the object's 3D cuboid and return:
-      bbox (x0,y0,x1,y1) based on all *projected corners that land on the frame*,
-      has_any_valid_corner (bool),
-      corners_w (8x3),
-      adj_pose,
-      (L, W, H),
-      depth_forward (8,) forward distances for corners,
-      valid (8,) mask for corners with forward depth > 0
+    Project the object's 3D cuboid and return an amodal 2D bbox that is
+    robust to the case where *no corners* land on the image but *edges*
+    cross the frame.
     """
     obj_type = infer_object_type_from_label(label)
     prof = PROFILES.get(obj_type, PROFILES["car"])
@@ -581,30 +615,54 @@ def amodal_bbox_for_actor(pose, label, cam_pose, P, img_w, img_h):
         orientation_val=pose.orientation
     )
 
+    # Corners in world + projection
     corners_w = compute_bounding_box_corners_world(adj_pose, L, W, H)
     pts2d, depth_forward, valid = project_world_points_to_image(
         corners_w, cam_pose, P, img_w, img_h
     )
 
+    # If no corners are in front of camera, nothing to draw
     if not np.any(valid):
         return None, False, corners_w, adj_pose, (L, W, H), depth_forward, valid
 
-    # keep only corners that are both in front and inside the frame bounds
+    # First: your original fast path — bbox over on-frame corners
     u = pts2d[:, 0]; v = pts2d[:, 1]
     in_bounds = (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
     use = valid & in_bounds
-    if not np.any(use):
-        return None, True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+    if np.any(use):
+        x0 = int(max(0, math.floor(u[use].min())))
+        y0 = int(max(0, math.floor(v[use].min())))
+        x1 = int(min(img_w - 1, math.ceil(u[use].max())))
+        y1 = int(min(img_h - 1, math.ceil(v[use].max())))
+        if x1 > x0 and y1 > y0:
+            return (x0, y0, x1, y1), True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+        # fall through to edge-aware path if collapsed
 
-    # bbox over the on-frame subset of corners
-    x0 = int(max(0, math.floor(u[use].min())))
-    y0 = int(max(0, math.floor(v[use].min())))
-    x1 = int(min(img_w - 1, math.ceil(u[use].max())))
-    y1 = int(min(img_h - 1, math.ceil(v[use].max())))
-    if x1 <= x0 or y1 <= y0:
-        return None, True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+    # Edge-aware fallback: clip 2D projections of edges to the image rect
+    edges = [(0,1),(1,3),(3,2),(2,0),(4,5),(5,7),(7,6),(6,4),(0,4),(1,5),(2,6),(3,7)]
+    clipped_points = []
 
-    return (x0, y0, x1, y1), True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+    # Only use edges whose endpoints are both in front of the camera
+    for a, b in edges:
+        if not (valid[a] and valid[b]):
+            continue
+        seg = _clip_segment_to_rect((u[a], v[a]), (u[b], v[b]), img_w, img_h)
+        if seg is not None:
+            p0, p1 = seg
+            clipped_points.append(p0)
+            clipped_points.append(p1)
+
+    if len(clipped_points) >= 2:
+        cps = np.array(clipped_points, dtype=float)
+        x0 = int(max(0, math.floor(cps[:,0].min())))
+        y0 = int(max(0, math.floor(cps[:,1].min())))
+        x1 = int(min(img_w - 1, math.ceil(cps[:,0].max())))
+        y1 = int(min(img_h - 1, math.ceil(cps[:,1].max())))
+        if x1 > x0 and y1 > y0:
+            return (x0, y0, x1, y1), True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
+    # Nothing intersects the image
+    return None, True, corners_w, adj_pose, (L, W, H), depth_forward, valid
 
 
 def build_targets_from_csv_scene(client, id_to_label, cam_pose, P, img_w, img_h):
@@ -696,6 +754,38 @@ def build_targets_from_csv_scene(client, id_to_label, cam_pose, P, img_w, img_h)
 
     return targets
 
+
+def _clip_segment_to_rect(p0, p1, w, h):
+    """
+    Liang–Barsky line clipping on rectangle [0, w-1] x [0, h-1].
+    p0, p1 are (u, v) float endpoints. Returns (c0, c1) or None.
+    """
+    x0, y0 = float(p0[0]), float(p0[1])
+    x1, y1 = float(p1[0]), float(p1[1])
+    dx, dy = x1 - x0, y1 - y0
+
+    t0, t1 = 0.0, 1.0
+    rect = [( -dx, x0 - 0.0      ),   # left   : x >= 0
+            (  dx, (w - 1) - x0  ),   # right  : x <= w-1
+            ( -dy, y0 - 0.0      ),   # top    : y >= 0
+            (  dy, (h - 1) - y0  )]   # bottom : y <= h-1
+
+    for p, q in rect:
+        if abs(p) < 1e-12:
+            if q < 0:
+                return None  # parallel outside
+        else:
+            t = q / p
+            if p < 0:
+                if t > t0: t0 = t
+            else:
+                if t < t1: t1 = t
+            if t0 > t1:
+                return None
+
+    cx0, cy0 = x0 + t0 * dx, y0 + t0 * dy
+    cx1, cy1 = x0 + t1 * dx, y0 + t1 * dy
+    return (cx0, cy0), (cx1, cy1)
 
 
 # ===================== main =====================
@@ -809,11 +899,16 @@ def main():
     cv2.putText(disp, f"Camera: {CAMERA_NAME}", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
     y_off = 50
     for res in results:
-        if res.get("found", False):
-            label = res["label"]
-            cv2.putText(disp, f"{label}: {res['actor_name']}", (10,y_off),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
-            y_off += 22
+        if not res.get("found", False):
+            continue
+        label = res["label"]
+        bgr   = res["box_color"]
+        # colored swatch
+        cv2.rectangle(disp, (10, y_off-12), (26, y_off+2), bgr, thickness=-1)
+        # text
+        cv2.putText(disp, f"{label}: {res['actor_name']}", (34, y_off),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
+        y_off += 22
     cv2.namedWindow("Projected 3D Bounding Box (auto from CSV+FOV)", cv2.WINDOW_NORMAL)
     cv2.imshow("Projected 3D Bounding Box (auto from CSV+FOV)", disp)
 
@@ -821,32 +916,58 @@ def main():
     cv2.waitKey(1)
 
     # Open3D viz: add each target’s cuboid + ROI point cloud
+    # Open3D viz: add each target’s ROI point cloud first, then the cuboid lines so boxes render on top
     if o3d:
         try:
-            frames = []
-            # camera frame
+            geoms = []
+
+            # camera frame (optional)
             if cam_pose:
-                Tc = np.eye(4); Tc[:3,:3] = quaternion_to_rotation_matrix(cam_pose.orientation)
-                Tc[:3,3]  = [cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val]
-                fc = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5); fc.transform(Tc)
-                frames.append(fc)
+                Tc = np.eye(4)
+                Tc[:3, :3] = quaternion_to_rotation_matrix(cam_pose.orientation)
+                Tc[:3, 3]  = [cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val]
+                fc = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
+                fc.transform(Tc)
+                geoms.append(fc)
 
+            # Add ROI point clouds FIRST (these should not cover the lines we add later)
+            for res in results:
+                if res.get("found", False) and res["roi_pcd"] is not None:
+                    geoms.append(res["roi_pcd"])
+
+            # Now add cuboid line sets LAST so they render on top of the points
             edges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]]
-
             for res in results:
                 if not res.get("found", False):
                     continue
-                bgr = res["box_color"]; rgb = [bgr[2]/255.0, bgr[1]/255.0, bgr[0]/255.0]
-                ls = o3d.geometry.LineSet(points=o3d.utility.Vector3dVector(res["corners_w"]),
-                                          lines=o3d.utility.Vector2iVector(edges))
-                ls.colors = o3d.utility.Vector3dVector([rgb]*len(edges))
-                frames.append(ls)
-                if res["roi_pcd"] is not None:
-                    frames.append(res["roi_pcd"])
+                bgr = res["box_color"]
+                rgb = [bgr[2]/255.0, bgr[1]/255.0, bgr[0]/255.0]
+                ls = o3d.geometry.LineSet(
+                    points=o3d.utility.Vector3dVector(res["corners_w"]),
+                    lines=o3d.utility.Vector2iVector(edges)
+                )
+                ls.colors = o3d.utility.Vector3dVector([rgb] * len(edges))
+                geoms.append(ls)
 
-            if len(frames) > 0:
-                print("Showing 3D viz in Open3D.")
-                o3d.visualization.draw_geometries(frames)
+            if len(geoms) > 0:
+                print("Showing 3D viz in Open3D (boxes are drawn on top of points).")
+
+                # Use Visualizer so we can tweak render options (smaller points, thicker lines)
+                vis = o3d.visualization.Visualizer()
+                vis.create_window(window_name="Open3D: ROI + 3D Boxes")
+                for g in geoms:
+                    vis.add_geometry(g)
+
+                opt = vis.get_render_option()
+                # make points smaller so lines are easier to see
+                if hasattr(opt, "point_size"):
+                    opt.point_size = 1.0
+                # line_width exists in newer Open3D builds; guard it
+                if hasattr(opt, "line_width"):
+                    opt.line_width = 3.0
+
+                vis.run()
+                vis.destroy_window()
             else:
                 print("Open3D: nothing to show.")
         except Exception as e:
