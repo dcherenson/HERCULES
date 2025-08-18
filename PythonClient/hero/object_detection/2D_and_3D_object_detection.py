@@ -48,6 +48,10 @@ TIGHT_BOX_COLOR_BGR    = (0,165,255)   # orange for tight (corrected) box
 #   * If no ROI points fall inside the 3D box (occluded), the object is ignored entirely.
 DOMINANT_COLOR_ONLY = True
 
+# Show full-frame segmentation with small-color pruning?
+SEG_FULL_PRUNE_COLORS = False  # set True to prune tiny color islands; False = show all colors
+
+
 # --- 2D bbox size gating (after color selection) ---
 DOMINANT_MIN_PIXELS = 120   # require this many pixels (post-clip) for the chosen color
 MIN_BBOX_WIDTH      = 20    # px
@@ -978,18 +982,25 @@ def main():
         if depth_img.shape[:2] != (h, w):
             depth_img = resize_to(depth_img, w, h, is_depth=True)
 
+        # Show full-frame depth-clipped segmentation image
         if DEPTH_CLIP_ENABLE:
             valid_depth_mask = np.isfinite(depth_img) & (depth_img > 0) & (depth_img <= DEPTH_CLIP_MAX_M)
             seg_full_clipped = np.zeros_like(seg_img)
             seg_full_clipped[valid_depth_mask] = seg_img[valid_depth_mask]
 
-            # prune small color clusters from the depth-clipped full-frame segmentation
-            seg_full_pruned = prune_small_seg_colors(seg_full_clipped, MIN_SEG_COLOR_PIXELS_FULL)
+            if SEG_FULL_PRUNE_COLORS:
+                seg_full_display = prune_small_seg_colors(seg_full_clipped, MIN_SEG_COLOR_PIXELS_FULL)
+                nz = int(np.count_nonzero(np.any(seg_full_display != 0, axis=2)))
+                print(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, ≥{MIN_SEG_COLOR_PIXELS_FULL}px): nonzero pixels = {nz}")
+                win_title = f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, ≥{MIN_SEG_COLOR_PIXELS_FULL}px)"
+            else:
+                seg_full_display = seg_full_clipped
+                nz = int(np.count_nonzero(np.any(seg_full_display != 0, axis=2)))
+                print(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m): nonzero pixels = {nz}")
+                win_title = f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m)"
 
-            nz = int(np.count_nonzero(np.any(seg_full_pruned != 0, axis=2)))
-            print(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, min_color_pix >= {MIN_SEG_COLOR_PIXELS_FULL}): nonzero pixels = {nz}")
-            cv2.namedWindow(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, ≥{MIN_SEG_COLOR_PIXELS_FULL}px)", cv2.WINDOW_NORMAL)
-            cv2.imshow(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, ≥{MIN_SEG_COLOR_PIXELS_FULL}px)", seg_full_pruned)
+            cv2.namedWindow(win_title, cv2.WINDOW_NORMAL)
+            cv2.imshow(win_title, seg_full_display)
 
         # (2) Intrinsics & projection (frozen)
         K, vfov = compute_intrinsics_from_horizontal_fov(cam_info.fov, w, h)
