@@ -404,3 +404,5 @@ docker/LinuxBlocks/*
 open_terminals.sh
 ros2/src/VINS-MONO-ROS2
 .~lock.instance_segmentation_colormap.csv#
+
+./csv_data/depth_frame.npy
