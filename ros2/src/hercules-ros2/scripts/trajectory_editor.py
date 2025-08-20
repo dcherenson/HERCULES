@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
 """
-trajectory_editor.py
+trajectory_editor.py (with interactive adjusted-origin support)
 
-A Python3 tool to load multiple robot trajectory TXT files and an occupancy grid map image (PNG/PGM),
-plot the trajectories on top of the map (with the map flipped vertically so that its horizontal axis is mirrored),
-apply a 90° clockwise rotation followed by a horizontal reflection to the displayed waypoints,
-and allow interactive dragging of trajectory points to modify trajectories, as well as adding new points by clicking.
-Modified trajectories can be saved back to their respective files.
-
-If a YAML file with the same base name as the map (for example, map.pgm and map.yaml) exists,
-it will automatically parse and apply 'resolution' and 'origin' from that YAML.
-
-New Features:
- - Each trajectory can be toggled on/off individually via checkboxes labeled by robot name.
- - Drones use a triangular marker (different colors), Huskies use a square marker (different colors).
- - Press 'a' to toggle add-point mode: when enabled, left-clicking on the map will append a new point to the selected trajectory.
- - Press number keys 1–N to choose which trajectory to append points to.
+Adds:
+ - Draws the map's current origin (0,0,0) and a user-selected adjusted origin.
+ - Press 'o' to enter "set-origin" mode, then click on the map to choose the adjusted origin.
+ - Press 'r' to clear the adjusted origin (back to None).
+ - When an adjusted origin is set, newly added points are stored relative to that adjusted origin.
+   (Existing points are not modified.)
 
 Usage example:
-python3 /path/to/trajectory_editor_with_add_point.py \
-    --map /path/to/map.pgm \
-    --traj Drone1_trajectory.txt Drone2_trajectory.txt
+Run from the directory of the txt files e.g. /home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity/
+python3 /home/sgarimella34/multi-robot-coordination/Cosys-AirSim/ros2/src/hercules-ros2/scripts/trajectory_editor.py \
+    --map /home/sgarimella34/multi-robot-coordination/trajectory_data/occupancy_grid_maps/customcity_0mAlt_OGM_0p5m.pgm \
+    --traj Drone1_trajectory.txt Husky1_trajectory.txt
 """
 
 import argparse
@@ -138,6 +131,16 @@ class TrajectoryEditor:
         self.add_mode = False
         self.current_traj_idx = 0
 
+        # Adjusted-origin state
+        # All trajectory coordinates are in the "internal" frame used by files and editor.
+        # Display uses a simple swap: x_disp = y_internal, y_disp = x_internal.
+        self.adjusted_origin_internal = None   # (x_int, y_int) or None
+        self.set_origin_mode = False           # True when waiting for a click to set adjusted origin
+
+        # Artists for origin markers (created on first draw)
+        self.current_origin_artist = None
+        self.adjusted_origin_artist = None
+
         # Set up figure and axes
         self.fig, self.ax = plt.subplots(figsize=(10, 8))
         plt.subplots_adjust(left=0.1, right=0.75, top=0.9, bottom=0.1)
@@ -157,9 +160,27 @@ class TrajectoryEditor:
         print(" - Click and drag trajectory points to move them.")
         print(" - Press 'a' to toggle add-point mode.")
         print(f" - Press 1–{len(self.trajectories)} to select trajectory for new points. (Currently 1)")
+        print(" - Press 'o' to set the adjusted origin (click on map after pressing 'o').")
+        print(" - Press 'r' to clear the adjusted origin.")
+        print(" - With an adjusted origin set, NEWLY ADDED points are stored relative to it.")
         print(" - Press 's' to save all modified trajectories.")
         print(" - Press 'q' to quit without saving.")
         print("=========================")
+
+    # ----- Coordinate helpers -----
+
+    @staticmethod
+    def internal_to_display(x_int, y_int):
+        """Map internal (file/editor) coordinates to display coordinates."""
+        # From original code's effective transform: x_disp = y_int, y_disp = x_int
+        return y_int, x_int
+
+    @staticmethod
+    def display_to_internal(x_disp, y_disp):
+        """Map display coords back to internal coords."""
+        return y_disp, x_disp
+
+    # ----- Drawing -----
 
     def _draw_map_and_trajectories(self):
         self.ax.clear()
@@ -169,17 +190,69 @@ class TrajectoryEditor:
         self.ax.set_aspect('equal')
         self.ax.set_title("Occupancy Grid (Flipped) with Transformed Trajectories")
 
+        # Draw all trajectories
         for traj in self.trajectories:
             pts = traj.points[:, :2]
-            rot = np.column_stack((pts[:,1], -pts[:,0]))
-            trans = np.column_stack((rot[:,0], -rot[:,1]))
-            xs, ys = trans[:,0], trans[:,1]
+            # Effective display mapping (see helpers): xs, ys = y, x
+            xs, ys = pts[:,1], pts[:,0]
             traj.line = self.ax.plot(xs, ys, '-', color=traj.color, linewidth=1.5, alpha=0.8)[0]
             traj.scatter = self.ax.scatter(xs, ys, s=50, color=traj.color,
                                            marker=traj.marker, edgecolors='black', picker=5)
+
+        # Draw current origin (0,0) and adjusted origin if set
+        self._draw_origins()
+
+        # Legend
         labels = [os.path.basename(t.filename).replace('_trajectory.txt','') for t in self.trajectories]
-        self.checkable = [t.scatter for t in self.trajectories]
-        self.ax.legend(self.checkable, labels, loc='upper left', bbox_to_anchor=(0.01,0.99))
+        legend_handles = [t.scatter for t in self.trajectories]
+
+        # Add origin markers to legend (small proxy artists)
+        proxy_current, = self.ax.plot([], [], marker='x', linestyle='None', markersize=8, color='black',
+                                      label='Current origin (0,0)')
+        legend_handles.append(proxy_current)
+        if self.adjusted_origin_internal is not None:
+            proxy_adjusted, = self.ax.plot([], [], marker='o', linestyle='None', markersize=8, fillstyle='none',
+                                           color='red', label='Adjusted origin')
+            legend_handles.append(proxy_adjusted)
+
+        legend_labels = labels + ['Current origin (0,0)'] + (['Adjusted origin'] if self.adjusted_origin_internal is not None else [])
+        self.ax.legend(legend_handles, legend_labels, loc='upper left', bbox_to_anchor=(0.01,0.99))
+
+        self.fig.canvas.draw_idle()
+
+    def _draw_origins(self):
+        # Current origin is fixed at internal (0,0)
+        x_disp_curr, y_disp_curr = self.internal_to_display(0.0, 0.0)
+        # Draw/refresh current origin marker
+        if self.current_origin_artist is None:
+            self.current_origin_artist = self.ax.scatter([x_disp_curr], [y_disp_curr],
+                                                         marker='x', s=80, color='black', linewidths=2, zorder=5)
+            self.ax.annotate("Current origin (0,0)", (x_disp_curr, y_disp_curr),
+                             textcoords="offset points", xytext=(8, 8), ha='left', color='black',
+                             fontsize=9, zorder=6)
+        else:
+            self.current_origin_artist.set_offsets(np.c_[[x_disp_curr], [y_disp_curr]])
+
+        # Adjusted origin marker
+        if self.adjusted_origin_internal is not None:
+            ax_int, ay_int = self.adjusted_origin_internal
+            x_disp_adj, y_disp_adj = self.internal_to_display(ax_int, ay_int)
+            if self.adjusted_origin_artist is None:
+                self.adjusted_origin_artist = self.ax.scatter([x_disp_adj], [y_disp_adj],
+                                                              marker='o', s=90, facecolors='none', edgecolors='red',
+                                                              linewidths=2, zorder=5)
+                self.ax.annotate("Adjusted origin", (x_disp_adj, y_disp_adj),
+                                 textcoords="offset points", xytext=(8, 8), ha='left', color='red',
+                                 fontsize=9, zorder=6)
+            else:
+                self.adjusted_origin_artist.set_offsets(np.c_[[x_disp_adj], [y_disp_adj]])
+        else:
+            # If cleared, remove the artist if it exists
+            if self.adjusted_origin_artist is not None:
+                self.adjusted_origin_artist.remove()
+                self.adjusted_origin_artist = None
+
+    # ----- Visibility toggles -----
 
     def _create_toggle_buttons(self):
         axbox = self.fig.add_axes([0.80, 0.1, 0.15, 0.8])
@@ -198,6 +271,8 @@ class TrajectoryEditor:
                 break
         self.fig.canvas.draw_idle()
 
+    # ----- Interactions -----
+
     def on_pick(self, event):
         for i, traj in enumerate(self.trajectories):
             if event.artist == traj.scatter:
@@ -207,6 +282,7 @@ class TrajectoryEditor:
                 self.selected_pt_idx = ind[0]
                 self.dragging = True
                 x_c, y_c = event.mouseevent.xdata, event.mouseevent.ydata
+                # Internal -> display is swap; so display coords of the selected point:
                 x_o, y_o = traj.points[self.selected_pt_idx,0], traj.points[self.selected_pt_idx,1]
                 disp_x, disp_y = y_o, x_o
                 self.offset = (disp_x - x_c, disp_y - y_c)
@@ -217,7 +293,9 @@ class TrajectoryEditor:
         if event.xdata is None or event.ydata is None: return
         new_disp_x = event.xdata + self.offset[0]
         new_disp_y = event.ydata + self.offset[1]
-        x_new = new_disp_y; y_new = new_disp_x
+        # display->internal: (x_int, y_int) = (y_disp, x_disp)
+        x_new = new_disp_y
+        y_new = new_disp_x
         traj = self.trajectories[self.selected_traj]
         traj.points[self.selected_pt_idx,0] = x_new
         traj.points[self.selected_pt_idx,1] = y_new
@@ -240,6 +318,17 @@ class TrajectoryEditor:
             self.current_traj_idx = idx
             name = os.path.basename(self.traj_files[idx])
             print(f"Selected trajectory for adding: {event.key} ({name})")
+        elif event.key == 'o':
+            # Enter set-origin mode: next left click sets the adjusted origin
+            self.set_origin_mode = True
+            print("Set-origin mode ON: click on the map to choose the adjusted origin.")
+        elif event.key == 'r':
+            # Reset/clear adjusted origin
+            self.adjusted_origin_internal = None
+            self.set_origin_mode = False
+            print("Adjusted origin CLEARED.")
+            # Redraw origin markers/legend
+            self._draw_map_and_trajectories()
         elif event.key == 's':
             for traj in self.trajectories:
                 traj.save_to_file()
@@ -249,23 +338,48 @@ class TrajectoryEditor:
             plt.close(self.fig)
 
     def on_click(self, event):
-        if not self.add_mode or event.button != 1 or event.inaxes != self.ax:
+        # Ignore clicks outside axes
+        if event.inaxes != self.ax:
             return
-        x_orig = event.ydata
-        y_orig = event.xdata
+
+        # Handle set-origin mode first
+        if self.set_origin_mode and event.button == 1:
+            # Convert clicked display coords to internal coords
+            x_int, y_int = self.display_to_internal(event.xdata, event.ydata)
+            self.adjusted_origin_internal = (x_int, y_int)
+            self.set_origin_mode = False
+            print(f"Adjusted origin set at internal coords: ({x_int:.3f}, {y_int:.3f})")
+            # Redraw to show the adjusted origin marker and legend entry
+            self._draw_map_and_trajectories()
+            return
+
+        # Handle add-point mode
+        if not self.add_mode or event.button != 1:
+            return
+
+        # Map display click -> internal click
+        click_x_int, click_y_int = self.display_to_internal(event.xdata, event.ydata)
+
+        # If adjusted origin exists, store NEW point relative to it
+        if self.adjusted_origin_internal is not None:
+            ox_int, oy_int = self.adjusted_origin_internal
+            x_store = click_x_int - ox_int
+            y_store = click_y_int - oy_int
+        else:
+            x_store = click_x_int
+            y_store = click_y_int
+
         traj = self.trajectories[self.current_traj_idx]
         last_z = traj.points[-1,2]
         last_t = traj.points[-1,3]
-        new_point = [x_orig, y_orig, last_z, last_t+1.0]
+        new_point = [x_store, y_store, last_z, last_t+1.0]
         traj.points = np.vstack([traj.points, new_point])
         self._update_plot(traj)
         self.fig.canvas.draw_idle()
 
     def _update_plot(self, traj):
         pts = traj.points[:,:2]
-        rot = np.column_stack((pts[:,1], -pts[:,0]))
-        trans = np.column_stack((rot[:,0], -rot[:,1]))
-        xs, ys = trans[:,0], trans[:,1]
+        xs, ys = pts[:,1], pts[:,0]  # internal->display
         traj.line.set_data(xs, ys)
         traj.scatter.set_offsets(np.c_[xs, ys])
 
@@ -274,7 +388,7 @@ class TrajectoryEditor:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Interactive Trajectory Editor with Add-Point Mode and Selection")
+    parser = argparse.ArgumentParser(description="Interactive Trajectory Editor with Add-Point Mode, Selection, and Adjusted Origin")
     parser.add_argument('--map', required=True, help="Path to occupancy grid map (PNG or PGM).")
     parser.add_argument('--traj', nargs='+', required=True, help="One or more trajectory text files.")
     parser.add_argument('--origin', nargs=2, type=float, default=[0.0, 0.0], metavar=('OX','OY'),

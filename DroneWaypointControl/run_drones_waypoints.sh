@@ -16,8 +16,11 @@ EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_r
 
 # CSLAM random explore motion
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test_thruroad_dump"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test_thruroad_dump"
 # WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
+
+# BEVP DAIR-V2X data collection in custom city:
+WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity/"
 
 # Default number of drones if none specified
 DEFAULT_NUM_DRONES=2
@@ -26,8 +29,8 @@ DEFAULT_NUM_DRONES=2
 VELOCITY=1.4
 
 # Default fly altitude. NOTE!!! This altitude is relative to the PlayerStart object's height in UE5, which is 1.5m above ground
-# for DAIR-V2X-style inf camera flying in city env
-FLY_ALTITUDE=-5.5 
+# for DAIR-V2X-style inf camera flying in city env; so -6.0 is 
+FLY_ALTITUDE=-6.0 
 
 # for under the canopy flying in AUsEnv
 # FLY_ALTITUDE=-2.5  

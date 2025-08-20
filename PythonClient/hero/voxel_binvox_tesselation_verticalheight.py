@@ -14,7 +14,7 @@ def fmt(v: float) -> str:
 
 def generate_voxel_patch(client, center, patch_size, resolution, output_file):
     """
-    Create one 100×100×100 m cube centered at `center`.
+    Create one 100x100x100 m cube centered at `center`.
     Try both common AirSim RPC signatures to dodge std::bad_cast.
     """
     px = int(patch_size)
@@ -43,7 +43,7 @@ def main():
     resolution   = 0.5        # voxel size (m)
     world_center = (0.0, 0.0, 0.0)    # ground (NED Z = 0)
     output_dir   = "/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customcity_0p5mcubed"
-    port         = 41452
+    port         = 41451
     # ----------------------
 
     os.makedirs(output_dir, exist_ok=True)
