@@ -132,7 +132,7 @@ def kitti_json_from_result(res, cam_pose, P, img_size):
     Build a DAIR-V2X/KITTI-style entry from one processed target.
     Prefer the tight 2D box; fall back to amodal; if neither present, rebuild
     from world cuboid corners using THE CLASS projector (H.project_world_points_to_image),
-    which matches AirSim’s 4x4 OpenGL-style P convention.
+    which matches AirSim's 4x4 OpenGL-style P convention.
     """
     if not res.get("found", False):
         return None
@@ -140,7 +140,7 @@ def kitti_json_from_result(res, cam_pose, P, img_size):
     # Prefer boxes from your class if you later expose them
     box = res.get("tight_bbox_xyxy") or res.get("amodal_bbox_xyxy")
 
-    # If class didn’t return a 2D box, rebuild from corners using H.project_world_points_to_image
+    # If class didn't return a 2D box, rebuild from corners using H.project_world_points_to_image
     if box is None:
         corners_w = res.get("corners_w", None)
         if corners_w is None:
@@ -201,7 +201,6 @@ def kitti_json_from_result(res, cam_pose, P, img_size):
         "3d_location": {"x": float(p_cam[0]), "y": float(p_cam[1]), "z": float(p_cam[2])},
         "rotation": float(rot_yaw)
     }
-
 
 
 # ------------------ MAIN ------------------
