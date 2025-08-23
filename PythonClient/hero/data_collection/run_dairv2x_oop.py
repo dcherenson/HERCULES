@@ -65,25 +65,38 @@ for group in PATHS.values():
 
 # ------------------ HELPERS ------------------
 def get_images(client, vehicle_name):
-    """Return (BGR uint8), (depth_m float32), (seg BGR uint8)."""
+    """Return (BGR uint8), (depth_m float32), (seg BGR uint8) with matching WxH."""
     reqs = [
-        airsim.ImageRequest(CAM_NAME, airsim.ImageType.Scene,       False, False),
-        airsim.ImageRequest(CAM_NAME, airsim.ImageType.DepthPlanar, True,  False),
-        airsim.ImageRequest(CAM_NAME, airsim.ImageType.Segmentation,False, False),
+        airsim.ImageRequest(CAM_NAME, airsim.ImageType.Scene,            False, False),
+        airsim.ImageRequest(CAM_NAME, airsim.ImageType.DepthPerspective, True,  False),  # <-- was DepthPlanar
+        airsim.ImageRequest(CAM_NAME, airsim.ImageType.Segmentation,     False, False),
     ]
     while True:
         imgs = client.simGetImages(reqs, vehicle_name=vehicle_name)
-        if len(imgs) != 3: 
+        if len(imgs) != 3:
             continue
         scene, depth, seg = imgs
         if scene.width <= 0 or scene.height <= 0:
             continue
+
+        # RGB
         rgb = np.frombuffer(scene.image_data_uint8, dtype=np.uint8).reshape(scene.height, scene.width, 3)
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        H, W = bgr.shape[:2]
+
+        # Depth (Perspective = true range)
         depth_m = np.array(depth.image_data_float, dtype=np.float32).reshape(depth.height, depth.width)
+        if depth_m.shape[:2] != (H, W):
+            depth_m = cv2.resize(depth_m, (W, H), interpolation=cv2.INTER_NEAREST)
+
+        # Segmentation
         seg_rgb = np.frombuffer(seg.image_data_uint8, dtype=np.uint8).reshape(seg.height, seg.width, 3)
         seg_bgr = cv2.cvtColor(seg_rgb, cv2.COLOR_RGB2BGR)
+        if seg_bgr.shape[:2] != (H, W):
+            seg_bgr = cv2.resize(seg_bgr, (W, H), interpolation=cv2.INTER_NEAREST)
+
         return bgr, depth_m, seg_bgr
+
 
 def get_lidar_points(client, vehicle_name):
     ld = client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=vehicle_name)
@@ -131,50 +144,71 @@ def kitti_json_from_result(res, cam_pose, P, img_size):
     """
     Build a DAIR-V2X/KITTI-style entry from one processed target.
     Prefer the tight 2D box; fall back to amodal; if neither present, rebuild
-    from world cuboid corners using THE CLASS projector (H.project_world_points_to_image),
-    which matches AirSim's 4x4 OpenGL-style P convention.
+    from world cuboid corners using H.project_world_points_to_image (AirSim 4x4 P).
     """
-    if not res.get("found", False):
+    if not res or not res.get("found", False):
         return None
 
-    # Prefer boxes from your class if you later expose them
-    box = res.get("tight_bbox_xyxy") or res.get("amodal_bbox_xyxy")
+    # unpack width/height without shadowing the class alias H
+    img_w, img_h = img_size
 
-    # If class didn't return a 2D box, rebuild from corners using H.project_world_points_to_image
+    # 2D box preference: tight -> amodal -> rebuild from corners
+    box = res.get("tight_bbox_xyxy") or res.get("amodal_bbox_xyxy")
     if box is None:
-        corners_w = res.get("corners_w", None)
+        corners_w = res.get("corners_w")
         if corners_w is None:
             return None
 
-        w_img, h_img = img_size  # do NOT shadow the class alias H
+        # project world cuboid corners using your class projector (handles AirSim P)
         pts2d, depth_forward, valid = H.project_world_points_to_image(
-            np.asarray(corners_w, dtype=float), cam_pose, P, w_img, h_img
+            np.asarray(corners_w, dtype=float), cam_pose, P, img_w, img_h
         )
-        u, v = pts2d[:, 0], pts2d[:, 1]
-        in_bounds = (u >= 0) & (u < w_img) & (v >= 0) & (v < h_img)
-        use = valid & in_bounds
-        if not np.any(use):
+        if pts2d is None or valid is None:
             return None
-        x0 = int(max(0, np.floor(u[use].min())))
-        y0 = int(max(0, np.floor(v[use].min())))
-        x1 = int(min(w_img - 1, np.ceil(u[use].max())))
-        y1 = int(min(h_img - 1, np.ceil(v[use].max())))
+
+        u, v = pts2d[:, 0], pts2d[:, 1]
+        in_bounds = (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
+        use = valid & in_bounds
+
+        # if nothing is simultaneously valid+in-bounds, try valid-only then clamp to image
+        if not np.any(use):
+            use = valid
+            if not np.any(use):
+                return None
+
+        x0 = int(np.floor(np.nanmin(u[use])))
+        y0 = int(np.floor(np.nanmin(v[use])))
+        x1 = int(np.ceil (np.nanmax(u[use])))
+        y1 = int(np.ceil (np.nanmax(v[use])))
+
+        # clamp to image bounds
+        x0 = max(0, min(img_w - 1, x0))
+        y0 = max(0, min(img_h - 1, y0))
+        x1 = max(0, min(img_w - 1, x1))
+        y1 = max(0, min(img_h - 1, y1))
         if not (x1 > x0 and y1 > y0):
             return None
+
         box = (x0, y0, x1, y1)
 
     bx0, by0, bx1, by1 = map(int, box)
 
     # 3D dims from your class
-    Hh, Wd, Ld = float(res["H"]), float(res["W"]), float(res["L"])
+    Hh = float(res["H"])
+    Wd = float(res["W"])
+    Ld = float(res["L"])
 
-    # 3D location and yaw in camera frame (AirSim: X forward, Y right, Z down)
+    # Choose pose (prefer adjusted_pose; fall back to actor_pose if needed)
+    adj = res.get("adjusted_pose") or res.get("actor_pose")
+    if adj is None:
+        return None
+
+    # camera-frame location & yaw (AirSim: X fwd, Y right, Z down)
     R_cam = H.quaternion_to_rotation_matrix(cam_pose.orientation)
     cam_p = np.array([cam_pose.position.x_val,
                       cam_pose.position.y_val,
                       cam_pose.position.z_val], dtype=float)
 
-    adj = res["adjusted_pose"]
     obj_c = np.array([adj.position.x_val,
                       adj.position.y_val,
                       adj.position.z_val], dtype=float)
@@ -184,7 +218,7 @@ def kitti_json_from_result(res, cam_pose, P, img_size):
     heading_cam = R_cam.T @ R_obj @ np.array([1, 0, 0], dtype=float)
     rot_yaw = math.atan2(heading_cam[1], heading_cam[0])
 
-    # Pedestrian vs Car (robust)
+    # label mapping (robust)
     lbl = str(res.get("label", "")).lower()
     if ("human" in lbl) or ("pedestrian" in lbl):
         label_type = "Pedestrian"
@@ -201,6 +235,7 @@ def kitti_json_from_result(res, cam_pose, P, img_size):
         "3d_location": {"x": float(p_cam[0]), "y": float(p_cam[1]), "z": float(p_cam[2])},
         "rotation": float(rot_yaw)
     }
+
 
 
 # ------------------ MAIN ------------------

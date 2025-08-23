@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 # ---- Set your image path here ----
-IMAGE_PATH = "/home/sgarimella34/Pictures/Screenshots/segroi.png"
+IMAGE_PATH = "/home/sgarimella34/Pictures/Screenshots/debug_1.png"
 # ----------------------------------
 
 # Load image (OpenCV loads as BGR)
