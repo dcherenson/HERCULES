@@ -64,6 +64,107 @@ for group in PATHS.values():
         os.makedirs(p, exist_ok=True)
 
 # ------------------ HELPERS ------------------
+def _deg2rad(d): 
+    return d * math.pi / 180.0
+
+def _R_from_rpy_deg(roll_deg, pitch_deg, yaw_deg):
+    """
+    AirSim convention (NED, right-handed):
+      - X: forward, Y: right, Z: down
+      - Roll about +X, Pitch about +Y, Yaw about +Z
+    We use column vectors; rotation composition is Rz(yaw) * Ry(pitch) * Rx(roll).
+    """
+    r, p, y = map(_deg2rad, (roll_deg, pitch_deg, yaw_deg))
+    cr, sr = math.cos(r), math.sin(r)
+    cp, sp = math.cos(p), math.sin(p)
+    cy, sy = math.cos(y), math.sin(y)
+
+    Rx = np.array([[1, 0, 0],
+                   [0, cr, -sr],
+                   [0, sr,  cr]], dtype=float)
+    Ry = np.array([[ cp, 0, sp],
+                   [  0, 1,  0],
+                   [-sp, 0, cp]], dtype=float)
+    Rz = np.array([[cy, -sy, 0],
+                   [sy,  cy, 0],
+                   [ 0,   0, 1]], dtype=float)
+    return Rz @ Ry @ Rx
+
+def _T_from_xyzrpy(x, y, z, roll_deg, pitch_deg, yaw_deg):
+    """Vehicle->Sensor transform from settings: translation in meters; angles in deg."""
+    T = np.eye(4, dtype=float)
+    T[:3,:3] = _R_from_rpy_deg(roll_deg, pitch_deg, yaw_deg)
+    T[:3, 3] = np.array([x, y, z], dtype=float)
+    return T
+
+def _load_settings(path=None):
+    """
+    Loads AirSim settings.json. If path is None, uses default:
+      Windows:  %USERPROFILE%/Documents/AirSim/settings.json
+      Linux:    ~/Documents/AirSim/settings.json
+    """
+    if path is None:
+        home = os.path.expanduser("~")
+        path = os.path.join(home, "Documents", "AirSim", "settings.json")
+    with open(path, "r") as f:
+        return json.load(f)
+
+def extrinsics_from_settings(vehicle_name, cam_name, lidar_name, settings_path=None):
+    """
+    Returns T_cam_lidar (4x4) built purely from settings.json for ONE vehicle.
+      vehicle_name: e.g. "Drone1" or "Husky1"
+      cam_name:     e.g. "front_center"
+      lidar_name:   e.g. "LidarSensor1"
+    """
+    js = _load_settings(settings_path)
+    V = js.get("Vehicles", {})
+    if vehicle_name not in V:
+        raise KeyError(f"Vehicle '{vehicle_name}' not found in settings.json")
+
+    v = V[vehicle_name]
+
+    # Camera pose (relative to VEHICLE body)
+    cams = v.get("Cameras", {})
+    if cam_name not in cams:
+        raise KeyError(f"Camera '{cam_name}' not found under vehicle '{vehicle_name}'")
+    c = cams[cam_name]
+    cx, cy, cz = c.get("X", 0.0), c.get("Y", 0.0), c.get("Z", 0.0)
+    croll, cpitch, cyaw = c.get("Roll", 0.0), c.get("Pitch", 0.0), c.get("Yaw", 0.0)
+    T_v_to_c = _T_from_xyzrpy(cx, cy, cz, croll, cpitch, cyaw)    # ^cT_v? (see below)
+
+    # LiDAR pose (relative to VEHICLE body)
+    sens = v.get("Sensors", {})
+    if lidar_name not in sens:
+        raise KeyError(f"LiDAR '{lidar_name}' not found under vehicle '{vehicle_name}'")
+    l = sens[lidar_name]
+    lx, ly, lz = l.get("X", 0.0), l.get("Y", 0.0), l.get("Z", 0.0)
+    lroll, lpitch, lyaw = l.get("Roll", 0.0), l.get("Pitch", 0.0), l.get("Yaw", 0.0)
+    T_v_to_l = _T_from_xyzrpy(lx, ly, lz, lroll, lpitch, lyaw)
+
+    # Important: AirSim sensor poses in settings are SENSOR w.r.t VEHICLE (i.e., vehicle→sensor).
+    # We want lidar→camera:
+    #   p_cam = T_cam_lidar * p_lidar
+    #   T_cam_lidar = (T_v→c)^(-1) * (T_v→l)
+    T_cam_lidar = np.linalg.inv(T_v_to_c) @ T_v_to_l
+    return T_cam_lidar
+
+
+def _pose_to_T(pose):
+    # AirSim: right-handed, X=forward, Y=right, Z=down
+    q = pose.orientation
+    w, x, y, z = q.w_val, q.x_val, q.y_val, q.z_val
+    # 3x3 (world->sensor) rotation from quaternion (right-handed, same basis)
+    R = np.array([
+        [1-2*(y*y+z*z),   2*(x*y - z*w),   2*(x*z + y*w)],
+        [  2*(x*y + z*w), 1-2*(x*x+z*z),   2*(y*z - x*w)],
+        [  2*(x*z - y*w),   2*(y*z + x*w), 1-2*(x*x+y*y)]
+    ], dtype=float)
+    t = np.array([pose.position.x_val, pose.position.y_val, pose.position.z_val], dtype=float)
+    T = np.eye(4, dtype=float)
+    T[:3,:3] = R
+    T[:3, 3] = t
+    return T
+
 def get_images(client, vehicle_name):
     """Return (BGR uint8), (depth_m float32), (seg BGR uint8) with matching WxH."""
     reqs = [
@@ -112,21 +213,47 @@ def save_lidar_bin(path, xyz):
     arr = np.hstack([xyz.astype(np.float32), np.ones((N,1), dtype=np.float32)])
     arr.astype(np.float32).tofile(path)
 
+
 def build_calib_json(client, side_name):
-    """
-    Get K and P from your class using FOV + a single image for size.
-    AirSim CameraInfo has FOV and pose but not width/height, so we read one frame for w,h.
-    """
     img, depth, seg = get_images(client, side_name)
     h, w = img.shape[:2]
 
     info = client.simGetCameraInfo(CAM_NAME, vehicle_name=side_name)
-    K, _vfov = H.compute_intrinsics_from_horizontal_fov(info.fov, w, h)  # class static method
+    K, _vfov = H.compute_intrinsics_from_horizontal_fov(info.fov, w, h)
     P = np.array(info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
     if not np.isfinite(P).all() or np.allclose(P, 0):
-        P = np.eye(4, dtype=float); P[:3,:3] = K  # fallback
+        P = np.eye(4, dtype=float); P[:3,:3] = K
 
-    return {"K": K, "P": P, "image_size": (w, h)}
+    # --- Build T_cam_lidar ---
+    T_cam_lidar = None
+
+    # 1) Try runtime (preferred)
+    try:
+        T_wc = _pose_to_T(info.pose)                        # world→camera
+        ld = client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=side_name)
+        if hasattr(ld, "pose") and ld.pose is not None:
+            T_wl = _pose_to_T(ld.pose)                      # world→lidar
+            T_cw = np.linalg.inv(T_wc)
+            T_cam_lidar = T_cw @ T_wl                       # lidar→camera
+    except Exception:
+        T_cam_lidar = None
+
+    # 2) Fallback to settings.json (static)
+    if T_cam_lidar is None:
+        try:
+            # If vehicle names differ between sides, just pass that name (e.g., "Drone1" / "Husky1")
+            T_cam_lidar = extrinsics_from_settings(side_name, CAM_NAME, LIDAR_NAME, settings_path=None)
+        except Exception:
+            T_cam_lidar = None  # last resort
+
+    out = {
+        "K": K, "P": P, "image_size": (w, h),
+        "camera_name": CAM_NAME, "lidar_name": LIDAR_NAME
+    }
+    if T_cam_lidar is not None:
+        out["T_cam_lidar"] = T_cam_lidar.tolist()
+    return out
+
 
 def write_calib_json(path, calib):
     out = {
