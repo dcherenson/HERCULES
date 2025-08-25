@@ -26,7 +26,6 @@ except ImportError:
     o3d = None
 
 
-
 class Hercules2D3DDetector:
     """
     Class-based refactor of the original 2D & 3D object detection script.
@@ -67,6 +66,12 @@ class Hercules2D3DDetector:
     MIN_BBOX_HEIGHT     = 20    # px
     MIN_BBOX_AREA       = 400   # px^2
     
+    # lidar data settings
+    LIDAR_ENABLED      = True
+    LIDAR_VEHICLE_NAME = "Drone1"       # matches Vehicles.Drone1 in settings.json
+    LIDAR_NAME         = "LidarSensor1" # matches Sensors.LidarSensor1 in settings.json
+    LIDAR_POINT_SIZE   = 2.0            # Open3D point size in lidar window
+
     # --- per-object profiles (dimensions in meters; Z is NED +Z down)
     PROFILES = {
         "human": {"L": 0.5, "W": 0.75, "H": 1.9,  "Z": -0.90},
@@ -130,6 +135,36 @@ class Hercules2D3DDetector:
     FORCE_INCLUDE_COLOR_BGR   = (0, 0, 255)    # red, reserved for this actor
     
     # ===================== helpers =====================
+
+    @staticmethod
+    def _lidar_points_world_from_airsim(client, lidar_name, vehicle_name):
+        """
+        Fetch LiDAR data and return Nx3 numpy array of points in WORLD frame.
+        Works with AirSim's Python API (cosysairsim compatible).
+        """
+        try:
+            # AirSim getLidarData(lidar_name, vehicle_name) typically returns:
+            #   .point_cloud (flat [x1,y1,z1, x2,y2,z2, ...] in lidar LOCAL frame),
+            #   .time_stamp, .pose (lidar pose in WORLD), etc.
+            ld = client.getLidarData(lidar_name=lidar_name, vehicle_name=vehicle_name)
+        except TypeError:
+            # Older signature compatibility
+            ld = client.getLidarData(lidar_name, vehicle_name)
+
+        if ld is None or len(ld.point_cloud) < 3:
+            return None
+
+        import numpy as _np
+        pts = _np.array(ld.point_cloud, dtype=_np.float64).reshape(-1, 3)  # lidar local frame
+
+        # Transform to WORLD using lidar pose (position + orientation as quaternion)
+        lp = ld.pose.position
+        lo = ld.pose.orientation
+        R = Hercules2D3DDetector.quaternion_to_rotation_matrix(lo)
+        t = _np.array([lp.x_val, lp.y_val, lp.z_val], dtype=_np.float64)
+
+        pts_world = (R @ pts.T).T + t
+        return pts_world
 
     @staticmethod
     def load_actor_map(csv_path):
@@ -1187,6 +1222,73 @@ class Hercules2D3DDetector:
                     print("Open3D: nothing to show.")
             except Exception as e:
                 print("Open3D error:", e)
+
+
+        # (7b) SECOND Open3D window: LiDAR point cloud + 3D detections in WORLD frame
+        if o3d and self.LIDAR_ENABLED:
+            try:
+                lidar_pts_world = self._lidar_points_world_from_airsim(
+                    client,
+                    self.LIDAR_NAME,
+                    self.LIDAR_VEHICLE_NAME
+                )
+
+                geoms_lidar = []
+
+                # World coordinate frame for context
+                world_axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
+                geoms_lidar.append(world_axis)
+
+                # Camera frame (same as earlier, optional)
+                if cam_pose is not None:
+                    Tc = np.eye(4)
+                    Tc[:3, :3] = self.quaternion_to_rotation_matrix(cam_pose.orientation)
+                    Tc[:3, 3]  = [cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val]
+                    fc2 = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
+                    fc2.transform(Tc)
+                    geoms_lidar.append(fc2)
+
+                # LiDAR point cloud
+                if lidar_pts_world is not None and lidar_pts_world.shape[0] > 0:
+                    pcd_lidar = o3d.geometry.PointCloud()
+                    pcd_lidar.points = o3d.utility.Vector3dVector(lidar_pts_world.astype(np.float64))
+                    geoms_lidar.append(pcd_lidar)
+                else:
+                    print("LiDAR: no points to display.")
+
+                # Same 3D cuboids as the 2D/ROI pipeline (color-matched)
+                edges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]]
+                for res in results:
+                    if not res.get("found", False):
+                        continue
+                    bgr = res["box_color"]
+                    rgb = [bgr[2]/255.0, bgr[1]/255.0, bgr[0]/255.0]
+                    ls = o3d.geometry.LineSet(
+                        points=o3d.utility.Vector3dVector(res["corners_w"]),
+                        lines=o3d.utility.Vector2iVector(edges)
+                    )
+                    ls.colors = o3d.utility.Vector3dVector([rgb] * len(edges))
+                    geoms_lidar.append(ls)
+
+                if len(geoms_lidar) > 0:
+                    print("Showing LiDAR + 3D detections in Open3D (WORLD frame).")
+                    vis_lidar = o3d.visualization.Visualizer()
+                    vis_lidar.create_window(window_name="Open3D: LiDAR + 3D Detections")
+                    for g in geoms_lidar:
+                        vis_lidar.add_geometry(g)
+                    opt2 = vis_lidar.get_render_option()
+                    if hasattr(opt2, "point_size"):
+                        opt2.point_size = float(self.LIDAR_POINT_SIZE)
+                    if hasattr(opt2, "line_width"):
+                        opt2.line_width = 3.0
+                    vis_lidar.run()
+                    vis_lidar.destroy_window()
+                else:
+                    print("Open3D (LiDAR): nothing to show.")
+            except Exception as e:
+                print("Open3D (LiDAR) error:", e)
+
+
 
         cv2.waitKey(0)
         cv2.destroyAllWindows()
