@@ -918,6 +918,8 @@ class Hercules2D3DDetector:
 
         # ===================== SINGLE PAUSE WINDOW =====================
         client.simPause(True)
+        # client.simContinueForTime(0.5)
+
         try:
             # (1) Camera info and synchronized image pack
             cam_info = client.simGetCameraInfo(CAMERA_NAME)
@@ -929,6 +931,7 @@ class Hercules2D3DDetector:
                 airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.DepthPerspective, True,  False),
             ]
             scene_resp, seg_resp, depth_resp = client.simGetImages(reqs)
+            print("IMAGE DATA TS: ", scene_resp.time_stamp, seg_resp.time_stamp, depth_resp.time_stamp)
 
             img = cv2.imdecode(np.frombuffer(scene_resp.image_data_uint8, np.uint8), cv2.IMREAD_COLOR)
             if img is None:
@@ -964,6 +967,9 @@ class Hercules2D3DDetector:
                 try:
                     # Newer signature: (lidar_name, vehicle_name)
                     lidar_data = client.getLidarData(self.LIDAR_NAME, self.VEHICLE_NAME)
+                    print("LIDAR DATA TS: ", lidar_data.time_stamp)
+                    print("TIME DIFFERENCE: ", (scene_resp.time_stamp - lidar_data.time_stamp)/(10**9))
+
                 except TypeError:
                     # Older signature may omit vehicle name
                     lidar_data = client.getLidarData(self.LIDAR_NAME)
