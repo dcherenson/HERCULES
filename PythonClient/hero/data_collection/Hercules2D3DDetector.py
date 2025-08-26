@@ -10,14 +10,7 @@ IMPORTANT: All camera data AND all object poses are sampled during a SINGLE
 simPause(True) interval. No additional pauses occur after that, so all 3D boxes
 correspond to the same simulation time-step.
 
-This version locks LiDAR↔camera extrinsics to settings.json (Option B) and uses those
-to compute:
-  - WORLD LiDAR cloud:  ^W T_L = ^W T_V · ^V T_L   (from settings)
-  - Camera<-LiDAR:      ^C T_L = (^W T_C)^-1 · ^W T_L
-  - Camera pose for projection/back-projection: ^W T_C (from settings)
-
-It also ensures the LiDAR buffer is ACTUALLY populated (not all zeros) by advancing
-the sim a few sub-steps while paused (simContinueForTime), and filters [0,0,0] rows.
+MOD: Also samples LiDAR in the SAME pause window and visualizes it in Open3D.
 """
 
 import math, re
@@ -27,7 +20,6 @@ import cosysairsim as airsim
 import cv2
 import csv
 from collections import defaultdict
-import os, json
 
 # optional visualization
 try:
@@ -36,223 +28,107 @@ except ImportError:
     o3d = None
 
 
+
 class Hercules2D3DDetector:
+    """
+    Class-based refactor of the original 2D & 3D object detection script.
+
+    This class preserves the original behavior and outputs while enabling clean imports and reuse.
+    The configuration values below mirror the originals as class attributes.
+    """
     # === CONFIGURATION ===
-    TARGETS = []
+    TARGETS = []  # will be built automatically from CSV + scene + FOV
+    
     CAMERA_NAME        = "front_center"
     CLIENT_CLASS       = airsim.MultirotorClient
     PORT               = 41451
-
+    
     PROJECTION_ENABLED = True
-
+    
+    # Draw control:
     DRAW_ONLY_CORRECTED_2D = True
-    TIGHT_BOX_COLOR_BGR    = (0,165,255)
-    DOMINANT_COLOR_ONLY    = True
-
-    SEG_FULL_PRUNE_COLORS = False
-
+    TIGHT_BOX_COLOR_BGR    = (0,165,255)   # orange for tight (corrected) box
+    
+    # Dominant color logic & occlusion filter for 2D drawing
+    DOMINANT_COLOR_ONLY = True
+    
+    # Show full-frame segmentation with small-color pruning?
+    SEG_FULL_PRUNE_COLORS = False  # set True to prune tiny color islands; False = show all colors
+    
+    # --- 2D bbox size gating (after color selection) ---
     DOMINANT_MIN_PIXELS = 120
     MIN_BBOX_WIDTH      = 20
     MIN_BBOX_HEIGHT     = 20
     MIN_BBOX_AREA       = 400
-
-    # LiDAR settings
-    LIDAR_ENABLED      = True
-    LIDAR_VEHICLE_NAME = "Drone1"
-    LIDAR_NAME         = "LidarSensor1"
-    LIDAR_POINT_SIZE   = 2.0
-
-    # Per-object profiles (Z is NED +Z down)
+    
+    # --- per-object profiles (dimensions in meters; Z is NED +Z down)
     PROFILES = {
         "human": {"L": 0.5, "W": 0.75, "H": 1.9,  "Z": -0.90},
         "car":   {"L": 4.2, "W": 1.90, "H": 1.60, "Z": -0.55},
     }
+    
     PROFILE_OVERRIDES_BY_ID_SUBSTR = {
         "pickup": {"L": 5.35, "W": 2.05, "H": 2.2, "Z": -1.0, "FWD_OFF_M": -0.45},
     }
-
-    SHOW_ROI_WINDOWS_GLOBAL = False
-
+    
+    SHOW_ROI_WINDOWS_GLOBAL = False  # avoid N windows when many auto targets are found
+    
+    # --- Depth-clip settings ---
     RANGE_MAX_M   = 40.0
     DEPTH_CLIP_ENABLE     = True
-    DEPTH_CLIP_MAX_M      = RANGE_MAX_M
+    DEPTH_CLIP_MAX_M      = RANGE_MAX_M   # keep in sync with detection range
     SHOW_ORIGINAL_SEG_ROI = False
-
+    
+    # --- Full-frame segmentation color filtering ---
     MIN_SEG_COLOR_PIXELS_FULL = 2000
-
+    
+    # --- Point cloud export from clipped ROI ---
     ADD_ROI_POINTS_TO_OPEN3D = True
     ROI_POINT_STRIDE          = 1
-
+    
+    # --- tight-box refit params ---
     REFIT_USE_DEPTH_CLIP_FOR_TIGHT_BOX = True
     REFIT_MIN_PIXELS                   = 50
     REFIT_SEARCH_MARGIN_PX             = 20
-
+    
+    # --- visible-objects print controls ---
     VISIBLE_EPS_METERS = 1.0
     MAX_VISIBLE_PRINT  = 200
-
-    CSV_PATH    = "/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/csv_data/ue_label_vs_name.csv"
+    
+    # --- mapping csv + filters ---
+    CSV_PATH      = "/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/csv_data/ue_label_vs_name.csv"
     KEYWORDS = (
         "human", "person", "pedestrian",
         "car", "truck", "sedan", "suv", "van", "bus", "vehicle",
         "sportscar", "sports car", "policecar", "pickup", "taxi"
     )
-    MAX_OBJECTS = 200
-
+    MAX_OBJECTS   = 200
+    
+    # Color palette for per-object box colors (BGR for cv2)
     BOX_COLORS_BGR = [
         (0,255,0), (255,0,255), (0,165,255), (255,255,0), (0,255,255),
         (255,0,0), (180,105,255), (128,0,255), (211,0,148), (0,128,255)
     ]
-
+    
+    # ---- Force-included actors ----
     FORCE_INCLUDE_IDNAMES = [
         "BP_VehicleAI_pickup_C_UAID_6C6E07132D49788102_1328099840",
     ]
     FORCE_INCLUDE_OBJECT_TYPE = "car"
-    FORCE_INCLUDE_COLOR_BGR   = (0, 0, 255)
+    FORCE_INCLUDE_COLOR_BGR   = (0, 0, 255)    # red, reserved for this actor
+
+    # === LiDAR: NEW ===
+    # Names align with your settings.json; change VEHICLE_NAME to "Husky1" if needed.
+    VEHICLE_NAME = "Drone1"
+    LIDAR_NAME   = "LidarSensor1"
+    ADD_LIDAR_TO_OPEN3D = True
+    LIDAR_STRIDE = 1              # 1 = keep all points; >1 to subsample
+    LIDAR_VOXEL_DOWNSAMPLE = None # meters; set to 0 or None to disable
+    LIDAR_COLOR_RGB = (1.0, 0.0, 0.0)  # red
+
 
     # ===================== helpers =====================
-    @staticmethod
-    def _rpy_to_R(roll_deg, pitch_deg, yaw_deg):
-        r, p, y = np.deg2rad([roll_deg, pitch_deg, yaw_deg])
-        cy, sy = np.cos(y), np.sin(y)
-        cp, sp = np.cos(p), np.sin(p)
-        cr, sr = np.cos(r), np.sin(r)
-        Rz = np.array([[cy, -sy, 0],
-                       [sy,  cy, 0],
-                       [ 0,   0, 1]], dtype=float)
-        Ry = np.array([[ cp, 0, sp],
-                       [  0, 1,  0],
-                       [-sp, 0, cp]], dtype=float)
-        Rx = np.array([[1,  0,   0],
-                       [0, cr, -sr],
-                       [0, sr,  cr]], dtype=float)
-        return Rz @ Ry @ Rx
 
-    @staticmethod
-    def quaternion_to_rotation_matrix(q):
-        w,x,y,z = q.w_val, q.x_val, q.y_val, q.z_val
-        norm = math.sqrt(w*w + x*x + y*y + z*z)
-        if norm == 0: return np.eye(3)
-        w,x,y,z = w/norm, x/norm, y/norm, z/norm
-        return np.array([
-            [1-2*(y*y+z*z),   2*(x*y - z*w),  2*(x*z + y*w)],
-            [2*(x*y + z*w),   1-2*(x*x+z*z),  2*(y*z - x*w)],
-            [2*(x*z - y*w),   2*(y*z + x*w),  1-2*(x*x+y*y)]
-        ], dtype=float)
-
-    @staticmethod
-    def quaternion_to_euler(q):
-        w,x,y,z = q.w_val, q.x_val, q.y_val, q.z_val
-        norm = math.sqrt(w*w + x*x + y*y + z*z)
-        if norm == 0: return 0.0, 0.0, 0.0
-        w,x,y,z = w/norm, x/norm, y/norm, z/norm
-        sinr = 2*(w*x + y*z);  cosr = 1 - 2*(x*x + y*y)
-        roll = math.atan2(sinr, cosr)
-        sinp = 2*(w*y - z*x)
-        pitch = math.copysign(math.pi/2, sinp) if abs(sinp)>=1 else math.asin(sinp)
-        siny = 2*(w*z + x*y);  cosy = 1 - 2*(y*y + z*z)
-        yaw = math.atan2(siny, cosy)
-        return roll, pitch, yaw
-
-    @staticmethod
-    def _R_to_quat_wxyz(R):
-        t = float(np.trace(R))
-        if t > 0:
-            S = math.sqrt(t + 1.0) * 2.0
-            w = 0.25 * S
-            x = (R[2,1] - R[1,2]) / S
-            y = (R[0,2] - R[2,0]) / S
-            z = (R[1,0] - R[0,1]) / S
-        else:
-            if R[0,0] > R[1,1] and R[0,0] > R[2,2]:
-                S = math.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2]) * 2.0
-                w = (R[2,1] - R[1,2]) / S
-                x = 0.25 * S
-                y = (R[0,1] + R[1,0]) / S
-                z = (R[0,2] + R[2,0]) / S
-            elif R[1,1] > R[2,2]:
-                S = math.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2]) * 2.0
-                w = (R[0,2] - R[2,0]) / S
-                x = (R[0,1] + R[1,0]) / S
-                y = 0.25 * S
-                z = (R[1,2] + R[2,1]) / S
-            else:
-                S = math.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1]) * 2.0
-                w = (R[1,0] - R[0,1]) / S
-                x = (R[0,2] + R[2,0]) / S
-                y = (R[1,2] + R[2,1]) / S
-                z = 0.25 * S
-        q = np.array([w,x,y,z], dtype=float)
-        q /= max(1e-12, np.linalg.norm(q))
-        return float(q[0]), float(q[1]), float(q[2]), float(q[3])
-
-    @staticmethod
-    def _pose_to_T(pose):
-        R = Hercules2D3DDetector.quaternion_to_rotation_matrix(pose.orientation)
-        t = np.array([pose.position.x_val, pose.position.y_val, pose.position.z_val], dtype=float)
-        T = np.eye(4); T[:3,:3] = R; T[:3,3] = t
-        return T
-
-    @staticmethod
-    def _T_to_pose(T):
-        R = T[:3,:3]; t = T[:3,3]
-        w,x,y,z = Hercules2D3DDetector._R_to_quat_wxyz(R)
-        return airsim.Pose(
-            position_val=airsim.Vector3r(float(t[0]), float(t[1]), float(t[2])),
-            orientation_val=airsim.Quaternionr(float(x), float(y), float(z), float(w))
-        )
-
-    @staticmethod
-    def _load_T_vc_T_vl_from_settings(settings_path, vehicle_name, cam_name, lidar_name):
-        with open(settings_path, "r") as f:
-            S = json.load(f)
-        V = S["Vehicles"][vehicle_name]
-        C = V["Cameras"][cam_name]
-        L = V["Sensors"][lidar_name]
-        R_vc = Hercules2D3DDetector._rpy_to_R(C.get("Roll",0), C.get("Pitch",0), C.get("Yaw",0))
-        t_vc = np.array([C["X"], C["Y"], C["Z"]], dtype=float)
-        R_vl = Hercules2D3DDetector._rpy_to_R(L.get("Roll",0), L.get("Pitch",0), L.get("Yaw",0))
-        t_vl = np.array([L["X"], L["Y"], L["Z"]], dtype=float)
-        T_v_c = np.eye(4); T_v_c[:3,:3]=R_vc; T_v_c[:3,3]=t_vc
-        T_v_l = np.eye(4); T_v_l[:3,:3]=R_vl; T_v_l[:3,3]=t_vl
-        return T_v_c, T_v_l
-
-    # ===== LiDAR acquisition that guarantees NON-ZERO points inside the paused window =====
-    @staticmethod
-    def _get_lidar_world_points_from_settings_during_pause(client, lidar_name, vehicle_name, T_w_l,
-                                                           max_tries=30, step_sec=0.02):
-        """
-        Advance the sim in tiny slices (still within a single paused session using
-        simContinueForTime) until LiDAR returns non-zero points. Then transform with ^W T_L.
-
-        Returns (pts_W (Nx3 or None), timestamp)
-        """
-        ld = None
-        for _ in range(max_tries):
-            try:
-                ld = client.getLidarData(lidar_name=lidar_name, vehicle_name=vehicle_name)
-            except TypeError:
-                ld = client.getLidarData(lidar_name, vehicle_name)
-
-            if ld is not None and ld.point_cloud and len(ld.point_cloud) >= 3:
-                pts_L = np.array(ld.point_cloud, dtype=np.float64).reshape(-1,3)
-
-                # filter invalid rows: non-finite or exact zeros (AirSim placeholder)
-                good = np.isfinite(pts_L).all(axis=1) & (np.linalg.norm(pts_L, axis=1) > 1e-9)
-                pts_L = pts_L[good]
-                if pts_L.shape[0] > 0:
-                    R_w_l = T_w_l[:3,:3]; t_w_l = T_w_l[:3,3]
-                    pts_W = (R_w_l @ pts_L.T).T + t_w_l
-                    return pts_W, getattr(ld, "time_stamp", None)
-
-            # still empty/zeros → advance a tad and try again (keeps us in the same "paused" block)
-            try:
-                client.simContinueForTime(step_sec)
-            except Exception:
-                pass
-
-        return None, getattr(ld, "time_stamp", None)
-
-    # ---------- rest of your original helpers (unchanged where not LiDAR-specific) ----------
     @staticmethod
     def load_actor_map(csv_path):
         mapping = {}
@@ -281,7 +157,6 @@ class Hercules2D3DDetector:
         except Exception as e:
             print(f"Error reading CSV '{csv_path}': {e} (continuing without labels)")
         return mapping
-
     @staticmethod
     def label_has_keyword(name_or_label, keywords):
         if not name_or_label:
@@ -303,7 +178,6 @@ class Hercules2D3DDetector:
                     rx = r'(?:^|[^a-z0-9])' + r'[^a-z0-9]*'.join(parts) + r'(?:[^a-z0-9]|$)'
                     if re.search(rx, s_low): return True
         return False
-
     @staticmethod
     def infer_object_type_from_label(label):
         s = (label or "").lower()
@@ -312,26 +186,47 @@ class Hercules2D3DDetector:
         if any(k in s for k in ("car","truck","sedan","suv","vehicle","van","bus","sportscar","policecar","pickup")):
             return "car"
         return "car"
-
     @staticmethod
     def cam_to_point_range(pt_world, cam_pose):
-        R_cam = Hercules2D3DDetector.quaternion_to_rotation_matrix(cam_pose.orientation)
+        R_cam = quaternion_to_rotation_matrix(cam_pose.orientation)
         cam_p = np.array([cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val], dtype=float)
         p_cam = R_cam.T @ (pt_world - cam_p)
         return float(np.linalg.norm(p_cam)), p_cam[0]
-
+    @staticmethod
+    def quaternion_to_euler(q):
+        w,x,y,z = q.w_val, q.x_val, q.y_val, q.z_val
+        norm = math.sqrt(w*w + x*x + y*y + z*z)
+        if norm == 0: return 0.0, 0.0, 0.0
+        w,x,y,z = w/norm, x/norm, y/norm, z/norm
+        sinr = 2*(w*x + y*z);  cosr = 1 - 2*(x*x + y*y)
+        roll = math.atan2(sinr, cosr)
+        sinp = 2*(w*y - z*x)
+        pitch = math.copysign(math.pi/2, sinp) if abs(sinp)>=1 else math.asin(sinp)
+        siny = 2*(w*z + x*y);  cosy = 1 - 2*(y*y + z*z)
+        yaw = math.atan2(siny, cosy)
+        return roll, pitch, yaw
+    @staticmethod
+    def quaternion_to_rotation_matrix(q):
+        w,x,y,z = q.w_val, q.x_val, q.y_val, q.z_val
+        norm = math.sqrt(w*w + x*x + y*y + z*z)
+        if norm == 0: return np.eye(3)
+        w,x,y,z = w/norm, x/norm, y/norm, z/norm
+        return np.array([
+            [1-2*(y*y+z*z),   2*(x*y - z*w),  2*(x*z + y*w)],
+            [2*(x*y + z*w),   1-2*(x*x+z*z),  2*(y*z - x*w)],
+            [2*(x*z - y*w),   2*(y*z + x*w),  1-2*(x*x+y*y)]
+        ], dtype=float)
     @staticmethod
     def print_pose(label, pose):
         if pose is None:
             print(f"{label}: <no pose>")
             return
         p,o = pose.position, pose.orientation
-        r,pit,y = Hercules2D3DDetector.quaternion_to_euler(o)
+        r,pit,y = quaternion_to_euler(o)
         print(f"=== {label} ===")
         print(f" Position (NED): x={p.x_val:.6f}, y={p.y_val:.6f}, z={p.z_val:.6f}")
         print(f" Quaternion (w,x,y,z): ({o.w_val:.6f}, {o.x_val:.6f}, {o.y_val:.6f}, {o.z_val:.6f})")
         print(f" Euler (deg): roll={math.degrees(r):.2f}, pitch={math.degrees(pit):.2f}, yaw={math.degrees(y):.2f}\n")
-
     @staticmethod
     def compute_intrinsics_from_horizontal_fov(hfov_deg, width, height):
         hfov = math.radians(hfov_deg)
@@ -341,7 +236,6 @@ class Hercules2D3DDetector:
         K = np.array([[fx, 0, cx],[0, fy, cy],[0, 0, 1]], dtype=float)
         vfov = 2 * math.degrees(math.atan((height/2.0)/fy))
         return K, vfov
-
     @staticmethod
     def compute_bounding_box_corners_world(pose, L, W, H):
         hl, hw, hh = L/2.0, W/2.0, H/2.0
@@ -351,13 +245,12 @@ class Hercules2D3DDetector:
             [-hl,  hw,  hh], [-hl,  hw, -hh],
             [-hl, -hw,  hh], [-hl, -hw, -hh],
         ], dtype=float)
-        R = Hercules2D3DDetector.quaternion_to_rotation_matrix(pose.orientation)
+        R = quaternion_to_rotation_matrix(pose.orientation)
         t = np.array([pose.position.x_val, pose.position.y_val, pose.position.z_val], dtype=float)
         return (R @ corners_local.T).T + t
-
     @staticmethod
     def project_world_points_to_image(world_pts, cam_pose, P, width, height):
-        R_cam = Hercules2D3DDetector.quaternion_to_rotation_matrix(cam_pose.orientation)
+        R_cam = quaternion_to_rotation_matrix(cam_pose.orientation)
         cam_p = np.array([cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val], dtype=float)
         cam_pts = (R_cam.T @ (world_pts - cam_p).T).T
         pts_h = np.hstack([cam_pts, np.ones((cam_pts.shape[0], 1), dtype=float)])
@@ -370,7 +263,6 @@ class Hercules2D3DDetector:
         depth_forward = cam_pts[:, 0]
         valid = depth_forward > 1e-6
         return pts2d, depth_forward, valid
-
     @staticmethod
     def draw_2d_bbox_and_get_rect(pts2d, valid, w, h, img_to_draw=None, color=(0,255,0), thickness=2):
         us = pts2d[valid, 0]; vs = pts2d[valid, 1]
@@ -383,13 +275,11 @@ class Hercules2D3DDetector:
         if img_to_draw is not None:
             cv2.rectangle(img_to_draw, (x0,y0), (x1,y1), color, thickness)
         return (x0, y0, x1, y1)
-
     @staticmethod
     def resize_to(img, target_w, target_h, is_depth=False):
         if img.shape[1] == target_w and img.shape[0] == target_h:
             return img
         return cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-
     @staticmethod
     def depth_roi_to_vis(depth_roi):
         d = depth_roi.copy()
@@ -404,7 +294,6 @@ class Hercules2D3DDetector:
         else:
             vis = np.zeros_like(d, dtype=np.uint8)
         return cv2.applyColorMap(vis, cv2.COLORMAP_JET)
-
     @staticmethod
     def roi_points_to_world_pointcloud_P(seg_roi_clipped, depth_roi, x0, y0,
                                          img_w, img_h, P, cam_pose, stride=1):
@@ -433,9 +322,10 @@ class Hercules2D3DDetector:
         dirs = np.stack([np.ones_like(rat_y), rat_y, rat_z], axis=1)
         norms = np.linalg.norm(dirs, axis=1, keepdims=True)
         dirs_unit = dirs / np.maximum(norms, 1e-12)
+        # Note: using DepthPerspective as forward depth; if needed, convert to ray-range.
         r = depth_roi[ys, xs].astype(np.float64)[:, None]
         p_cam = dirs_unit * r
-        R_cam = Hercules2D3DDetector.quaternion_to_rotation_matrix(cam_pose.orientation)
+        R_cam = quaternion_to_rotation_matrix(cam_pose.orientation)
         cam_p = np.array([cam_pose.position.x_val,
                           cam_pose.position.y_val,
                           cam_pose.position.z_val], dtype=float)
@@ -443,12 +333,11 @@ class Hercules2D3DDetector:
         colors_bgr = seg_roi_clipped[ys, xs, :]
         colors_rgb = colors_bgr[:, ::-1].astype(np.float32) / 255.0
         return world_pts.astype(np.float64), colors_rgb
-
     @staticmethod
     def points_inside_oriented_box(world_pts, box_pose, L, W, H, eps=1e-6):
         if world_pts is None or world_pts.size == 0:
             return np.zeros((0,), dtype=bool)
-        R = Hercules2D3DDetector.quaternion_to_rotation_matrix(box_pose.orientation)
+        R = quaternion_to_rotation_matrix(box_pose.orientation)
         t = np.array([box_pose.position.x_val,
                       box_pose.position.y_val,
                       box_pose.position.z_val], dtype=float)
@@ -456,12 +345,11 @@ class Hercules2D3DDetector:
         hl, hw, hh = L/2.0 + eps, W/2.0 + eps, H/2.0 + eps
         inside = (np.abs(p_local[:,0]) <= hl) & (np.abs(p_local[:,1]) <= hw) & (np.abs(p_local[:,2]) <= hh)
         return inside
-
     @staticmethod
     def dominant_colors_in_box(world_pts, colors_rgb, box_pose, L, W, H, top_k=3):
         if world_pts is None or colors_rgb is None or world_pts.shape[0] == 0:
             return [], 0
-        inside = Hercules2D3DDetector.points_inside_oriented_box(world_pts, box_pose, L, W, H)
+        inside = points_inside_oriented_box(world_pts, box_pose, L, W, H)
         n_inside = int(inside.sum())
         if n_inside == 0:
             return [], 0
@@ -475,7 +363,6 @@ class Hercules2D3DDetector:
             frac = float(counts[i]) / float(n_inside)
             results.append(((r,g,b), int(counts[i]), frac))
         return results, n_inside
-
     @staticmethod
     def tight_box_for_color(seg_img, depth_img, target_rgb, search_rect, use_depth=True,
                             depth_max=35.0, min_pixels=50):
@@ -500,10 +387,9 @@ class Hercules2D3DDetector:
         bx0 = int(x0 + xs.min()); bx1 = int(x0 + xs.max())
         by0 = int(y0 + ys.min()); by1 = int(y0 + ys.max())
         return (bx0, by0, bx1, by1), int(xs.size)
-
     @staticmethod
     def world_to_cam_and_pixel(pt_world, cam_pose, P, img_w, img_h):
-        R_cam = Hercules2D3DDetector.quaternion_to_rotation_matrix(cam_pose.orientation)
+        R_cam = quaternion_to_rotation_matrix(cam_pose.orientation)
         cam_p = np.array([cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val], dtype=float)
         p_cam = R_cam.T @ (pt_world - cam_p)
         in_front = p_cam[0] > 1e-6
@@ -511,13 +397,12 @@ class Hercules2D3DDetector:
         clip  = (P @ pts_h.T).T
         ndc   = (clip[:, :3] / clip[:, 3:4])[0]
         u = (1.0 - (ndc[0] * 0.5 + 0.5)) * img_w
-        v = (ndc[1] * 0.5 + 0.5) * img_h
+        v = (ndc[1] * 0.5 * 1.0 + 0.5) * img_h
         in_bounds = (u >= 0) and (u < img_w) and (v >= 0) and (v < img_h)
         return p_cam, float(u), float(v), bool(in_front), bool(in_bounds)
-
     @staticmethod
     def approx_visible(pt_world, cam_pose, P, img_w, img_h, depth_img, eps=1.0):
-        p_cam, u, v, in_front, in_bounds = Hercules2D3DDetector.world_to_cam_and_pixel(pt_world, cam_pose, P, img_w, img_h)
+        p_cam, u, v, in_front, in_bounds = world_to_cam_and_pixel(pt_world, cam_pose, P, img_w, img_h)
         if not (in_front and in_bounds):
             return False
         r_obj = float(np.linalg.norm(p_cam))
@@ -530,14 +415,13 @@ class Hercules2D3DDetector:
         if not np.isfinite(r_depth) or r_depth <= 0:
             return False
         return abs(r_depth - r_obj) <= eps
-
     @staticmethod
     def _safe_get_pose(client, name):
+        """Try newer signature with 'True', fall back if unsupported."""
         try:
             return client.simGetObjectPose(name, True)
         except TypeError:
             return client.simGetObjectPose(name)
-
     @staticmethod
     def resolve_id_exact_or_prefix(client, idname):
         m = client.simListSceneObjects(f"^{re.escape(idname)}$")
@@ -553,21 +437,21 @@ class Hercules2D3DDetector:
         print(f"[force] could not resolve '{idname}' (no exact or prefix match).")
         return None
 
+    # ---- profile override helpers --------------------------------------------------
     @staticmethod
     def get_profile_for_idname(idname, obj_type):
-        prof = Hercules2D3DDetector.PROFILES.get(obj_type, Hercules2D3DDetector.PROFILES["car"]).copy()
+        prof = PROFILES.get(obj_type, PROFILES["car"]).copy()
         lname = idname.lower()
-        for substr, override in Hercules2D3DDetector.PROFILE_OVERRIDES_BY_ID_SUBSTR.items():
+        for substr, override in PROFILE_OVERRIDES_BY_ID_SUBSTR.items():
             if substr in lname:
                 prof.update(override)
                 break
         if "FWD_OFF_M" not in prof:
             prof["FWD_OFF_M"] = 0.0
         return prof
-
     @staticmethod
     def pose_with_offsets(base_pose, z_off_m=0.0, fwd_off_m=0.0):
-        R = Hercules2D3DDetector.quaternion_to_rotation_matrix(base_pose.orientation)
+        R = quaternion_to_rotation_matrix(base_pose.orientation)
         fwd = R[:, 0]
         p = np.array([base_pose.position.x_val,
                       base_pose.position.y_val,
@@ -578,7 +462,6 @@ class Hercules2D3DDetector:
             position_val=airsim.Vector3r(p[0], p[1], p[2]),
             orientation_val=base_pose.orientation
         )
-
     @staticmethod
     def amodal_bbox_for_actor_with_dims(pose, cam_pose, P, img_w, img_h,
                                         L, W, H, z_off, fwd_off=0.0):
@@ -590,10 +473,11 @@ class Hercules2D3DDetector:
             ),
             orientation_val=pose.orientation
         )
-        corners_w = Hercules2D3DDetector.compute_bounding_box_corners_world(adj_pose, L, W, H)
-        pts2d, depth_forward, valid = Hercules2D3DDetector.project_world_points_to_image(corners_w, cam_pose, P, img_w, img_h)
+        corners_w = compute_bounding_box_corners_world(adj_pose, L, W, H)
+        pts2d, depth_forward, valid = project_world_points_to_image(corners_w, cam_pose, P, img_w, img_h)
         if not np.any(valid):
             return None, False, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
         u = pts2d[:, 0]; v = pts2d[:, 1]
         in_bounds = (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
         use = valid & in_bounds
@@ -604,17 +488,18 @@ class Hercules2D3DDetector:
             y1 = int(min(img_h - 1, math.ceil(v[use].max())))
             if x1 > x0 and y1 > y0:
                 return (x0, y0, x1, y1), True, corners_w, adj_pose, (L, W, H), depth_forward, valid
-        # edge fallback
+
         edges = [(0,1),(1,3),(3,2),(2,0),(4,5),(5,7),(7,6),(6,4),(0,4),(1,5),(2,6),(3,7)]
         clipped_points = []
         for a, b in edges:
             if not (valid[a] and valid[b]):
                 continue
-            seg = Hercules2D3DDetector._clip_segment_to_rect((u[a], v[a]), (u[b], v[b]), img_w, img_h)
+            seg = _clip_segment_to_rect((u[a], v[a]), (u[b], v[b]), img_w, img_h)
             if seg is not None:
                 p0, p1 = seg
                 clipped_points.append(p0)
                 clipped_points.append(p1)
+
         if len(clipped_points) >= 2:
             cps = np.array(clipped_points, dtype=float)
             x0 = int(max(0, math.floor(cps[:,0].min())))
@@ -623,6 +508,7 @@ class Hercules2D3DDetector:
             y1 = int(min(img_h - 1, math.ceil(cps[:,1].max())))
             if x1 > x0 and y1 > y0:
                 return (x0, y0, x1, y1), True, corners_w, adj_pose, (L, W, H), depth_forward, valid
+
         return None, True, corners_w, adj_pose, (L, W, H), depth_forward, valid
 
     # ================================================================================
@@ -632,9 +518,9 @@ class Hercules2D3DDetector:
         pattern = target_cfg["ACTOR_PATTERN"]
         obj_type = target_cfg["OBJECT_TYPE"]
         box_color = target_cfg["BOX_COLOR_BGR"]
-        show_roi = Hercules2D3DDetector.SHOW_ROI_WINDOWS_GLOBAL and target_cfg.get("SHOW_ROI_WINDOWS", False)
+        show_roi = SHOW_ROI_WINDOWS_GLOBAL and target_cfg.get("SHOW_ROI_WINDOWS", False)
 
-        profile = Hercules2D3DDetector.PROFILES[obj_type].copy() if obj_type in Hercules2D3DDetector.PROFILES else Hercules2D3DDetector.PROFILES["car"].copy()
+        profile = PROFILES[obj_type].copy() if obj_type in PROFILES else PROFILES["car"].copy()
         if "PROFILE_OVERRIDE" in target_cfg and target_cfg["PROFILE_OVERRIDE"]:
             profile.update(target_cfg["PROFILE_OVERRIDE"])
 
@@ -648,20 +534,20 @@ class Hercules2D3DDetector:
         actor = objs[0]
         print(f"[{label}] Target actor: {actor}")
 
-        actor_pose = Hercules2D3DDetector._safe_get_pose(client, actor)
+        actor_pose = _safe_get_pose(client, actor)
 
         fwd_off = profile.get("FWD_OFF_M", 0.0)
-        adjusted_actor_pose = Hercules2D3DDetector.pose_with_offsets(actor_pose, z_off_m=z_off, fwd_off_m=fwd_off)
+        adjusted_actor_pose = pose_with_offsets(actor_pose, z_off_m=z_off, fwd_off_m=fwd_off)
 
-        corners_w = Hercules2D3DDetector.compute_bounding_box_corners_world(adjusted_actor_pose, L, W, H)
+        corners_w = compute_bounding_box_corners_world(adjusted_actor_pose, L, W, H)
 
         h, w = img.shape[:2]
         disp_bbox = None
         disp_img  = img
         drew_tight = False
 
-        if Hercules2D3DDetector.PROJECTION_ENABLED and cam_pose is not None:
-            pts2d, depth_forward, valid = Hercules2D3DDetector.project_world_points_to_image(corners_w, cam_pose, P, w, h)
+        if PROJECTION_ENABLED and cam_pose is not None:
+            pts2d, depth_forward, valid = project_world_points_to_image(corners_w, cam_pose, P, w, h)
 
             u = pts2d[:, 0]; v = pts2d[:, 1]
             in_bounds = (u >= 0) & (u < w) & (v >= 0) & (v < h)
@@ -673,7 +559,7 @@ class Hercules2D3DDetector:
                 y1 = int(min(h - 1, math.ceil(v[use].max())))
                 if x1 > x0 and y1 > y0:
                     disp_bbox = (x0, y0, x1, y1)
-                    if not (Hercules2D3DDetector.DOMINANT_COLOR_ONLY or Hercules2D3DDetector.DRAW_ONLY_CORRECTED_2D):
+                    if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
                         cv2.rectangle(disp_img, (x0, y0), (x1, y1), box_color, 2)
             if disp_bbox is None:
                 edges = [(0,1),(1,3),(3,2),(2,0),(4,5),(5,7),(7,6),(6,4),(0,4),(1,5),(2,6),(3,7)]
@@ -681,11 +567,11 @@ class Hercules2D3DDetector:
                 for a, b in edges:
                     if not (valid[a] and valid[b]):
                         continue
-                    seg = Hercules2D3DDetector._clip_segment_to_rect((u[a], v[a]), (u[b], v[b]), w, h)
+                    seg = _clip_segment_to_rect((u[a], v[a]), (u[b], v[b]), w, h)
                     if seg is not None:
                         p0, p1 = seg
                         clipped.append(p0); clipped.append(p1)
-                        if not (Hercules2D3DDetector.DOMINANT_COLOR_ONLY or Hercules2D3DDetector.DRAW_ONLY_CORRECTED_2D):
+                        if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
                             cv2.line(disp_img, (int(p0[0]), int(p0[1])), (int(p1[0]), int(p1[1])), box_color, 2)
                 if len(clipped) >= 2:
                     cps = np.array(clipped, dtype=float)
@@ -695,12 +581,12 @@ class Hercules2D3DDetector:
                     y1 = int(min(h - 1, math.ceil(cps[:,1].max())))
                     if x1 > x0 and y1 > y0:
                         disp_bbox = (x0, y0, x1, y1)
-                        if not (Hercules2D3DDetector.DOMINANT_COLOR_ONLY or Hercules2D3DDetector.DRAW_ONLY_CORRECTED_2D):
+                        if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
                             cv2.rectangle(disp_img, (x0, y0), (x1, y1), box_color, 2)
 
-            if not (Hercules2D3DDetector.DOMINANT_COLOR_ONLY or Hercules2D3DDetector.DRAW_ONLY_CORRECTED_2D):
+            if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
                 cx = float(np.mean(corners_w[:,0])); cy = float(np.mean(corners_w[:,1])); cz = float(np.mean(corners_w[:,2]))
-                p_cam, u_c, v_c, in_front, in_bounds_c = Hercules2D3DDetector.world_to_cam_and_pixel(
+                p_cam, u_c, v_c, in_front, in_bounds_c = world_to_cam_and_pixel(
                     np.array([cx, cy, cz], dtype=float), cam_pose, P, w, h
                 )
                 if in_front and in_bounds_c:
@@ -721,14 +607,14 @@ class Hercules2D3DDetector:
                 seg_roi   = seg_img[y0:y1+1, x0:x1+1, :]
                 depth_roi = depth_img[y0:y1+1, x0:x1+1]
 
-                if Hercules2D3DDetector.DEPTH_CLIP_ENABLE:
-                    valid_depth_mask = np.isfinite(depth_roi) & (depth_roi > 0) & (depth_roi <= Hercules2D3DDetector.DEPTH_CLIP_MAX_M)
+                if DEPTH_CLIP_ENABLE:
+                    valid_depth_mask = np.isfinite(depth_roi) & (depth_roi > 0) & (depth_roi <= DEPTH_CLIP_MAX_M)
                     seg_roi_clipped = np.zeros_like(seg_roi)
                     seg_roi_clipped[valid_depth_mask] = seg_roi[valid_depth_mask]
 
-                    if Hercules2D3DDetector.ADD_ROI_POINTS_TO_OPEN3D and o3d is not None:
-                        world_pts, colors = Hercules2D3DDetector.roi_points_to_world_pointcloud_P(
-                            seg_roi_clipped, depth_roi, x0, y0, w, h, P, cam_pose, stride=Hercules2D3DDetector.ROI_POINT_STRIDE
+                    if ADD_ROI_POINTS_TO_OPEN3D and o3d is not None:
+                        world_pts, colors = roi_points_to_world_pointcloud_P(
+                            seg_roi_clipped, depth_roi, x0, y0, w, h, P, cam_pose, stride=ROI_POINT_STRIDE
                         )
                         if world_pts is not None and world_pts.shape[0] > 0:
                             roi_world_pts = world_pts
@@ -741,79 +627,78 @@ class Hercules2D3DDetector:
                         else:
                             print(f"[{label}] ROI point cloud: no valid points.")
                     if show_roi:
-                        depth_vis = Hercules2D3DDetector.depth_roi_to_vis(depth_roi)
-                        if Hercules2D3DDetector.SHOW_ORIGINAL_SEG_ROI:
+                        depth_vis = depth_roi_to_vis(depth_roi)
+                        if SHOW_ORIGINAL_SEG_ROI:
                             cv2.namedWindow(f"{label} Seg ROI (raw)", cv2.WINDOW_NORMAL)
                             cv2.imshow(f"{label} Seg ROI (raw)", seg_roi)
-                        cv2.namedWindow(f"{label} Seg ROI (depth <= {Hercules2D3DDetector.DEPTH_CLIP_MAX_M:.1f} m)", cv2.WINDOW_NORMAL)
-                        cv2.imshow(f"{label} Seg ROI (depth <= {Hercules2D3DDetector.DEPTH_CLIP_MAX_M:.1f} m)", seg_roi_clipped)
+                        cv2.namedWindow(f"{label} Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", cv2.WINDOW_NORMAL)
+                        cv2.imshow(f"{label} Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", seg_roi_clipped)
                         cv2.namedWindow(f"{label} Depth ROI", cv2.WINDOW_NORMAL)
                         cv2.imshow(f"{label} Depth ROI", depth_vis)
                 else:
                     seg_roi_clipped = seg_roi
 
                 if roi_world_pts is not None and roi_colors_rgb is not None:
-                    top_colors, n_inside = Hercules2D3DDetector.dominant_colors_in_box(
+                    top_colors, n_inside = dominant_colors_in_box(
                         roi_world_pts, roi_colors_rgb,
                         adjusted_actor_pose, L, W, H, top_k=3
                     )
                     print(f"[{label}] Points inside 3D box: {n_inside}")
 
-                    if Hercules2D3DDetector.DOMINANT_COLOR_ONLY and n_inside == 0:
+                    if DOMINANT_COLOR_ONLY and n_inside == 0:
                         print(f"[{label}] Occluded (no colored ROI points inside cuboid). Ignoring object.")
                         return {"found": False}
 
                     if n_inside > 0 and len(top_colors) > 0:
                         best_rgb, best_count, best_frac = top_colors[0]
-
                         ax0, ay0, ax1, ay1 = disp_bbox
-                        margin = Hercules2D3DDetector.REFIT_SEARCH_MARGIN_PX
+                        margin = REFIT_SEARCH_MARGIN_PX
                         search_rect = (
                             max(0, ax0 - margin),
                             max(0, ay0 - margin),
                             min(w-1, ax1 + margin),
                             min(h-1, ay1 + margin),
                         )
-                        tight_box, pix_count = Hercules2D3DDetector.tight_box_for_color(
+                        tight_box, pix_count = tight_box_for_color(
                             seg_img,
                             depth_img,
                             best_rgb,
                             search_rect=search_rect,
-                            use_depth=Hercules2D3DDetector.REFIT_USE_DEPTH_CLIP_FOR_TIGHT_BOX and Hercules2D3DDetector.DEPTH_CLIP_ENABLE,
-                            depth_max=Hercules2D3DDetector.DEPTH_CLIP_MAX_M,
-                            min_pixels=Hercules2D3DDetector.REFIT_MIN_PIXELS
+                            use_depth=REFIT_USE_DEPTH_CLIP_FOR_TIGHT_BOX and DEPTH_CLIP_ENABLE,
+                            depth_max=DEPTH_CLIP_MAX_M,
+                            min_pixels=REFIT_MIN_PIXELS
                         )
                         if tight_box is not None:
                             tx0, ty0, tx1, ty1 = tight_box
-                            MIN_TIGHT_BOX_AREA_PX = Hercules2D3DDetector.MIN_BBOX_AREA
-                            MIN_TIGHT_BOX_MIN_SIDE = min(Hercules2D3DDetector.MIN_BBOX_WIDTH, Hercules2D3DDetector.MIN_BBOX_HEIGHT)
+                            MIN_TIGHT_BOX_AREA_PX = MIN_BBOX_AREA
+                            MIN_TIGHT_BOX_MIN_SIDE = min(MIN_BBOX_WIDTH, MIN_BBOX_HEIGHT)
                             w_box = tx1 - tx0
                             h_box = ty1 - ty0
                             if (w_box * h_box) < MIN_TIGHT_BOX_AREA_PX or min(w_box, h_box) < MIN_TIGHT_BOX_MIN_SIDE:
                                 print(f"[{label}] Tight box rejected: too small ({w_box}x{h_box}px).")
                             else:
-                                cv2.rectangle(disp_img, (tx0,ty0), (tx1,ty1), Hercules2D3DDetector.TIGHT_BOX_COLOR_BGR, 2)
+                                cv2.rectangle(disp_img, (tx0,ty0), (tx1,ty1), TIGHT_BOX_COLOR_BGR, 2)
                                 cv2.putText(disp_img, f"{label}: dominant color box", (tx0, max(0,ty0-6)),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, Hercules2D3DDetector.TIGHT_BOX_COLOR_BGR, 1)
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, TIGHT_BOX_COLOR_BGR, 1)
                                 print(f"[{label}] Dominant-color tight 2D box: ({tx0},{ty0})-({tx1},{ty1})")
                                 drew_tight = True
                         else:
-                            print(f"[{label}] Dominant color present but tight 2D box not found (min_pixels={Hercules2D3DDetector.REFIT_MIN_PIXELS}).")
+                            print(f"[{label}] Dominant color present but tight 2D box not found (min_pixels={REFIT_MIN_PIXELS}).")
                     else:
-                        if Hercules2D3DDetector.DOMINANT_COLOR_ONLY:
+                        if DOMINANT_COLOR_ONLY:
                             print(f"[{label}] No dominant color candidates. Ignoring object.")
                             return {"found": False}
                 else:
-                    if Hercules2D3DDetector.DOMINANT_COLOR_ONLY:
+                    if DOMINANT_COLOR_ONLY:
                         print(f"[{label}] No ROI 3D points/colors to evaluate. Ignoring object.")
                         return {"found": False}
             else:
                 print(f"[{label}] Amodal bbox collapsed after clipping; no ROI to process.")
-                if Hercules2D3DDetector.DOMINANT_COLOR_ONLY:
+                if DOMINANT_COLOR_ONLY:
                     return {"found": False}
 
         else:
-            if Hercules2D3DDetector.DOMINANT_COLOR_ONLY:
+            if DOMINANT_COLOR_ONLY:
                 return {"found": False}
 
         return {
@@ -828,7 +713,6 @@ class Hercules2D3DDetector:
             "box_color": box_color,
             "drew_tight": drew_tight
         }
-
     @staticmethod
     def obb_from_points(world_pts):
         import numpy as _np
@@ -843,10 +727,11 @@ class Hercules2D3DDetector:
         extents = _np.asarray(obb.extent, dtype=float)
         return c, R, extents
 
+    # ------------------ build targets from CSV + scene + FOV ------------------
     @staticmethod
     def amodal_bbox_for_actor(pose, label, cam_pose, P, img_w, img_h):
-        obj_type = Hercules2D3DDetector.infer_object_type_from_label(label)
-        prof = Hercules2D3DDetector.PROFILES.get(obj_type, Hercules2D3DDetector.PROFILES["car"])
+        obj_type = infer_object_type_from_label(label)
+        prof = PROFILES.get(obj_type, PROFILES["car"])
         L, W, H, z_off = prof["L"], prof["W"], prof["H"], prof["Z"]
         adj_pose = airsim.Pose(
             position_val=airsim.Vector3r(
@@ -856,8 +741,8 @@ class Hercules2D3DDetector:
             ),
             orientation_val=pose.orientation
         )
-        corners_w = Hercules2D3DDetector.compute_bounding_box_corners_world(adj_pose, L, W, H)
-        pts2d, depth_forward, valid = Hercules2D3DDetector.project_world_points_to_image(
+        corners_w = compute_bounding_box_corners_world(adj_pose, L, W, H)
+        pts2d, depth_forward, valid = project_world_points_to_image(
             corners_w, cam_pose, P, img_w, img_h
         )
         if not np.any(valid):
@@ -877,7 +762,7 @@ class Hercules2D3DDetector:
         for a, b in edges:
             if not (valid[a] and valid[b]):
                 continue
-            seg = Hercules2D3DDetector._clip_segment_to_rect((u[a], v[a]), (u[b], v[b]), img_w, img_h)
+            seg = _clip_segment_to_rect((u[a], v[a]), (u[b], v[b]), img_w, img_h)
             if seg is not None:
                 p0, p1 = seg
                 clipped_points.append(p0)
@@ -891,7 +776,6 @@ class Hercules2D3DDetector:
             if x1 > x0 and y1 > y0:
                 return (x0, y0, x1, y1), True, corners_w, adj_pose, (L, W, H), depth_forward, valid
         return None, True, corners_w, adj_pose, (L, W, H), depth_forward, valid
-
     @staticmethod
     def build_targets_from_csv_scene(client, id_to_label, cam_pose, P, img_w, img_h):
         try:
@@ -907,21 +791,21 @@ class Hercules2D3DDetector:
         candidates = []
         for idname in scene_ids:
             label = id_to_label.get(idname, "")
-            if not (Hercules2D3DDetector.label_has_keyword(label, Hercules2D3DDetector.KEYWORDS) or Hercules2D3DDetector.label_has_keyword(idname, Hercules2D3DDetector.KEYWORDS)):
+            if not (label_has_keyword(label, KEYWORDS) or label_has_keyword(idname, KEYWORDS)):
                 dropped_keyword += 1
                 continue
 
             text_for_type = label if label else idname
-            obj_type = Hercules2D3DDetector.infer_object_type_from_label(text_for_type)
+            obj_type = infer_object_type_from_label(text_for_type)
 
-            pose = Hercules2D3DDetector._safe_get_pose(client, idname)
+            pose = _safe_get_pose(client, idname)
             if pose is None:
                 continue
 
-            prof = Hercules2D3DDetector.get_profile_for_idname(idname, obj_type)
+            prof = get_profile_for_idname(idname, obj_type)
 
             bbox, has_any_valid, corners_w, adj_pose, (L, W, H), depth_fwd, valid = \
-            Hercules2D3DDetector.amodal_bbox_for_actor_with_dims(
+            amodal_bbox_for_actor_with_dims(
                 pose, cam_pose, P, img_w, img_h,
                 prof["L"], prof["W"], prof["H"], prof["Z"], prof.get("FWD_OFF_M", 0.0)
             )
@@ -935,7 +819,7 @@ class Hercules2D3DDetector:
                 continue
 
             front_depths = depth_fwd[valid]
-            if not np.any(front_depths <= Hercules2D3DDetector.DEPTH_CLIP_MAX_M + 1e-6):
+            if not np.any(front_depths <= DEPTH_CLIP_MAX_M + 1e-6):
                 dropped_depth += 1
                 continue
 
@@ -944,21 +828,23 @@ class Hercules2D3DDetector:
             candidates.append((near, idname, pretty_label, obj_type))
 
         candidates.sort(key=lambda t: t[0])
-        if len(candidates) > Hercules2D3DDetector.MAX_OBJECTS:
-            candidates = candidates[:Hercules2D3DDetector.MAX_OBJECTS]
+        if len(candidates) > MAX_OBJECTS:
+            candidates = candidates[:MAX_OBJECTS]
 
         print(
-            f"Auto-selected {len(candidates)} target(s) by corner-in-FOV & depth≤{Hercules2D3DDetector.DEPTH_CLIP_MAX_M:.1f} m."
+            f"Auto-selected {len(candidates)} target(s) by corner-in-FOV & depth≤{DEPTH_CLIP_MAX_M:.1f} m."
         )
         print(
-            f"  Rejections → keyword/unknown:{dropped_keyword}, offscreen/behind:{dropped_geom}, depth>{Hercules2D3DDetector.DEPTH_CLIP_MAX_M:.1f}m:{dropped_depth}"
+            f"  Rejections → keyword/unknown:{dropped_keyword}, offscreen/behind:{dropped_geom}, depth>{DEPTH_CLIP_MAX_M:.1f}m:{dropped_depth}"
         )
 
         targets = []
         for i, (near, idname, label, obj_type) in enumerate(candidates, 1):
-            color_bgr = Hercules2D3DDetector.BOX_COLORS_BGR[(i - 1) % len(Hercules2D3DDetector.BOX_COLORS_BGR)]
-            pattern = f"^{re.escape(idname)}$"
-            prof_override = Hercules2D3DDetector.get_profile_for_idname(idname, obj_type)
+            color_bgr = BOX_COLORS_BGR[(i - 1) % len(BOX_COLORS_BGR)]
+            pattern = f"^{re.escape(idname)}$"  # exact match
+
+            prof_override = get_profile_for_idname(idname, obj_type)
+
             targets.append({
                 "label": label if label else idname,
                 "ACTOR_PATTERN": pattern,
@@ -969,7 +855,6 @@ class Hercules2D3DDetector:
                 "PROFILE_OVERRIDE": prof_override,
             })
         return targets
-
     @staticmethod
     def _clip_segment_to_rect(p0, p1, w, h):
         x0, y0 = float(p0[0]), float(p0[1])
@@ -993,9 +878,10 @@ class Hercules2D3DDetector:
                 if t0 > t1:
                     return None
         cx0, cy0 = x0 + t0 * dx, y0 + t0 * dy
-        cx1, cy1 = x0 + t1 * dx, y0 + t1 * dy
+        cx1, cy1 = x0 + t1 * dx, y1 + t1 * dy
         return (cx0, cy0), (cx1, cy1)
 
+    # --- full-frame segmentation color pruning (after depth-clip) ---
     @staticmethod
     def prune_small_seg_colors(seg_img_bgr, min_pixels):
         out = np.zeros_like(seg_img_bgr)
@@ -1013,61 +899,34 @@ class Hercules2D3DDetector:
         return out
 
     # ===================== main =====================
+
     def run(self):
         np.set_printoptions(precision=4, suppress=True)
-        client = Hercules2D3DDetector.CLIENT_CLASS(port=Hercules2D3DDetector.PORT)
+        client = CLIENT_CLASS(port=PORT)
         client.confirmConnection()
         print("Connected!\n")
 
-        # Resolve settings.json path
-        settings_candidates = [
-            os.environ.get("AIRSIM_SETTINGS_JSON"),
-            os.path.expanduser("~/.config/AirSim/settings.json"),
-            os.path.expanduser("~/Documents/AirSim/settings.json"),
-            os.path.abspath("settings.json"),
-            "/home/sgarimella34/Documents/AirSim/settings.json",
-        ]
-        SETTINGS_PATH = next((p for p in settings_candidates if p and os.path.isfile(p)), None)
-        if SETTINGS_PATH is None:
-            print("FATAL: settings.json not found in known locations.")
-            return
-        print(f"Using settings.json: {SETTINGS_PATH}")
-
         # Zero lens distortion if any
-        dparams = client.simGetDistortionParams(Hercules2D3DDetector.CAMERA_NAME)
+        dparams = client.simGetDistortionParams(CAMERA_NAME)
         print("Distortion params:", dparams)
         if any(abs(d)>1e-9 for d in dparams):
             print(" Zeroing distortion.")
-            client.simSetDistortionParams(Hercules2D3DDetector.CAMERA_NAME, {"K1":0.0, "K2":0.0, "K3":0.0, "P1":0.0, "P2":0.0})
+            client.simSetDistortionParams(CAMERA_NAME, {"K1":0.0, "K2":0.0, "K3":0.0, "P1":0.0, "P2":0.0})
         else:
             print(" No distortion active.")
         print()
 
-        # Warm-up before the paused block
-        if self.LIDAR_ENABLED:
-            try:
-                client.simPause(False)
-                try:
-                    client.simContinueForTime(0.10)
-                except Exception:
-                    import time; time.sleep(0.10)
-            except Exception:
-                pass
-
+        # ===================== SINGLE PAUSE WINDOW =====================
         client.simPause(True)
         try:
-            try:
-                client.simContinueForTime(0.016)
-            except Exception:
-                pass
-
-            # (1) Camera info + images (paused)
-            cam_info = client.simGetCameraInfo(Hercules2D3DDetector.CAMERA_NAME)
+            # (1) Camera info and synchronized image pack
+            cam_info = client.simGetCameraInfo(CAMERA_NAME)
+            cam_pose = cam_info.pose if cam_info else None
 
             reqs = [
-                airsim.ImageRequest(Hercules2D3DDetector.CAMERA_NAME, airsim.ImageType.Scene,         False, True),
-                airsim.ImageRequest(Hercules2D3DDetector.CAMERA_NAME, airsim.ImageType.Segmentation,  False, True),
-                airsim.ImageRequest(Hercules2D3DDetector.CAMERA_NAME, airsim.ImageType.DepthPerspective, True,  False),
+                airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Scene,         False, True),
+                airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Segmentation,  False, True),
+                airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.DepthPerspective, True,  False),
             ]
             scene_resp, seg_resp, depth_resp = client.simGetImages(reqs)
 
@@ -1089,84 +948,135 @@ class Hercules2D3DDetector:
                 depth_img  = depth_flat.reshape(depth_resp.height, depth_resp.width)
 
             if seg_img.shape[:2] != (h, w):
-                seg_img = Hercules2D3DDetector.resize_to(seg_img, w, h, is_depth=False)
+                seg_img = resize_to(seg_img, w, h, is_depth=False)
             if depth_img.shape[:2] != (h, w):
-                depth_img = Hercules2D3DDetector.resize_to(depth_img, w, h, is_depth=True)
+                depth_img = resize_to(depth_img, w, h, is_depth=True)
+
+            # (1b) LiDAR data — sampled inside the SAME pause window  === LiDAR: NEW ===
+            lidar_pcd_world = None
+            lidar_pcd_sensor = None     # for the second window
+            lidar_frame_mesh = None
+            # transforms we'll reuse for sensor-frame window
+            R_wv = None; t_wv = None; R_vs = None; t_vs = None; R_ws = None; t_ws = None; R_sw = None
+
+            if o3d is not None and self.ADD_LIDAR_TO_OPEN3D:
+                lidar_data = None
+                try:
+                    # Newer signature: (lidar_name, vehicle_name)
+                    lidar_data = client.getLidarData(self.LIDAR_NAME, self.VEHICLE_NAME)
+                except TypeError:
+                    # Older signature may omit vehicle name
+                    lidar_data = client.getLidarData(self.LIDAR_NAME)
+                except Exception as e:
+                    print("LiDAR fetch error:", e)
+                    lidar_data = None
+
+                if lidar_data is not None and hasattr(lidar_data, "point_cloud") and len(lidar_data.point_cloud) >= 3:
+                    pts = np.array(lidar_data.point_cloud, dtype=np.float64).reshape(-1, 3)
+                    if self.LIDAR_STRIDE > 1:
+                        pts = pts[::self.LIDAR_STRIDE]
+
+                    # Compose world transform: world <- vehicle <- sensor
+                    try:
+                        veh_pose = client.simGetVehiclePose(self.VEHICLE_NAME)
+                    except TypeError:
+                        veh_pose = client.simGetVehiclePose()
+
+                    R_vs = quaternion_to_rotation_matrix(lidar_data.pose.orientation)
+                    t_vs = np.array([lidar_data.pose.position.x_val,
+                                     lidar_data.pose.position.y_val,
+                                     lidar_data.pose.position.z_val], dtype=float)
+                    R_wv = quaternion_to_rotation_matrix(veh_pose.orientation)
+                    t_wv = np.array([veh_pose.position.x_val,
+                                     veh_pose.position.y_val,
+                                     veh_pose.position.z_val], dtype=float)
+
+                    # World points
+                    p_world = (R_wv @ (R_vs @ pts.T + t_vs.reshape(3,1))).T + t_wv
+
+                    # Build Open3D point cloud (world)
+                    lidar_pcd_world = o3d.geometry.PointCloud()
+                    lidar_pcd_world.points = o3d.utility.Vector3dVector(p_world)
+                    if self.LIDAR_VOXEL_DOWNSAMPLE and self.LIDAR_VOXEL_DOWNSAMPLE > 0:
+                        lidar_pcd_world = lidar_pcd_world.voxel_down_sample(self.LIDAR_VOXEL_DOWNSAMPLE)
+                    lidar_pcd_world.paint_uniform_color(self.LIDAR_COLOR_RGB)
+                    print(f"LiDAR: {np.asarray(lidar_pcd_world.points).shape[0]} point(s) @ ts={getattr(lidar_data, 'time_stamp', 'NA')}.")
+
+                    # LiDAR pose in world, and world->sensor transform
+                    R_ws = R_wv @ R_vs
+                    t_ws = t_wv + (R_wv @ t_vs)
+                    R_sw = R_ws.T
+
+                    # === LiDAR SENSOR-FRAME WINDOW (NEW) ===
+                    # Convert world-frame points to LiDAR sensor frame
+                    p_sensor = (R_sw @ (p_world.T - t_ws.reshape(3,1))).T
+                    lidar_pcd_sensor = o3d.geometry.PointCloud()
+                    lidar_pcd_sensor.points = o3d.utility.Vector3dVector(p_sensor)
+                    if self.LIDAR_VOXEL_DOWNSAMPLE and self.LIDAR_VOXEL_DOWNSAMPLE > 0:
+                        lidar_pcd_sensor = lidar_pcd_sensor.voxel_down_sample(self.LIDAR_VOXEL_DOWNSAMPLE)
+                    lidar_pcd_sensor.paint_uniform_color(self.LIDAR_COLOR_RGB)
+
+                    # Optional: sensor frame in world window (for reference)
+                    T_ws = np.eye(4)
+                    T_ws[:3,:3] = R_ws
+                    T_ws[:3, 3] = t_ws
+                    lidar_frame_mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
+                    lidar_frame_mesh.transform(T_ws)
+                else:
+                    print("LiDAR: no points.")
+            # === end LiDAR: NEW ===
 
             # Show full-frame depth-clipped segmentation image
-            if Hercules2D3DDetector.DEPTH_CLIP_ENABLE:
-                valid_depth_mask = np.isfinite(depth_img) & (depth_img > 0) & (depth_img <= Hercules2D3DDetector.DEPTH_CLIP_MAX_M)
+            if DEPTH_CLIP_ENABLE:
+                valid_depth_mask = np.isfinite(depth_img) & (depth_img > 0) & (depth_img <= DEPTH_CLIP_MAX_M)
                 seg_full_clipped = np.zeros_like(seg_img)
                 seg_full_clipped[valid_depth_mask] = seg_img[valid_depth_mask]
 
-                if Hercules2D3DDetector.SEG_FULL_PRUNE_COLORS:
-                    seg_full_display = Hercules2D3DDetector.prune_small_seg_colors(seg_full_clipped, Hercules2D3DDetector.MIN_SEG_COLOR_PIXELS_FULL)
+                if SEG_FULL_PRUNE_COLORS:
+                    seg_full_display = prune_small_seg_colors(seg_full_clipped, MIN_SEG_COLOR_PIXELS_FULL)
                     nz = int(np.count_nonzero(np.any(seg_full_display != 0, axis=2)))
-                    print(f"Segmentation (depth <= {Hercules2D3DDetector.DEPTH_CLIP_MAX_M:.1f} m, ≥{Hercules2D3DDetector.MIN_SEG_COLOR_PIXELS_FULL}px): nonzero pixels = {nz}")
-                    win_title = f"Segmentation (depth <= {Hercules2D3DDetector.DEPTH_CLIP_MAX_M:.1f} m, ≥{Hercules2D3DDetector.MIN_SEG_COLOR_PIXELS_FULL}px)"
+                    print(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, ≥{MIN_SEG_COLOR_PIXELS_FULL}px): nonzero pixels = {nz}")
+                    win_title = f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m, ≥{MIN_SEG_COLOR_PIXELS_FULL}px)"
                 else:
                     seg_full_display = seg_full_clipped
                     nz = int(np.count_nonzero(np.any(seg_full_display != 0, axis=2)))
-                    print(f"Segmentation (depth <= {Hercules2D3DDetector.DEPTH_CLIP_MAX_M:.1f} m): nonzero pixels = {nz}")
-                    win_title = f"Segmentation (depth <= {Hercules2D3DDetector.DEPTH_CLIP_MAX_M:.1f} m)"
+                    print(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m): nonzero pixels = {nz}")
+                    win_title = f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m)"
 
                 cv2.namedWindow(win_title, cv2.WINDOW_NORMAL)
                 cv2.imshow(win_title, seg_full_display)
 
-            # (2) Intrinsics & projection
-            K, vfov = Hercules2D3DDetector.compute_intrinsics_from_horizontal_fov(cam_info.fov, w, h)
+            # (2) Intrinsics & projection (frozen)
+            K, vfov = compute_intrinsics_from_horizontal_fov(cam_info.fov, w, h)
             print(f"Resolution: {w}×{h}, HFOV: {cam_info.fov:.4f}°, VFOV: {vfov:.4f}°")
             print("K =\n", K, "\n")
             P = np.array(cam_info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
             print("AirSim projection matrix P=\n", P, "\n")
 
-            # (2b) ^W T_C and ^W T_L from settings + vehicle pose (paused tick)
-            T_w_v = Hercules2D3DDetector._pose_to_T(client.simGetVehiclePose(Hercules2D3DDetector.LIDAR_VEHICLE_NAME))
-            T_v_c, T_v_l = Hercules2D3DDetector._load_T_vc_T_vl_from_settings(
-                SETTINGS_PATH, Hercules2D3DDetector.LIDAR_VEHICLE_NAME, Hercules2D3DDetector.CAMERA_NAME, Hercules2D3DDetector.LIDAR_NAME
-            )
-            T_w_c = T_w_v @ T_v_c
-            T_w_l = T_w_v @ T_v_l
-            T_c_l_settings = np.linalg.inv(T_w_c) @ T_w_l
-            print("C<-L from settings at paused tick:\n", T_c_l_settings)
-
-            # Build cam_pose from ^W T_C for projection/back-projection
-            cam_pose = Hercules2D3DDetector._T_to_pose(T_w_c)
-
-            # (3) LiDAR points (paused): insist on non-zero, then transform with ^W T_L
-            lidar_pts_world_paused, lidar_ts = Hercules2D3DDetector._get_lidar_world_points_from_settings_during_pause(
-                client,
-                Hercules2D3DDetector.LIDAR_NAME,
-                Hercules2D3DDetector.LIDAR_VEHICLE_NAME,
-                T_w_l,
-                max_tries=60,         # up to ~1.2s of sim time in worst case
-                step_sec=0.02
-            )
-            n_lidar = 0 if lidar_pts_world_paused is None else lidar_pts_world_paused.shape[0]
-            print(f"[LiDAR] paused tick (settings-based, non-zero enforced): {n_lidar} pts, ts={lidar_ts}")
-
-            # (4) Build TARGETS automatically (paused)
-            id_to_label = Hercules2D3DDetector.load_actor_map(Hercules2D3DDetector.CSV_PATH)
-            print(f"CSV loaded from '{Hercules2D3DDetector.CSV_PATH}' with {len(id_to_label)} mappings.")
+            # (3) Build TARGETS automatically (PAUSED → all poses consistent)
+            id_to_label = load_actor_map(CSV_PATH)
+            print(f"CSV loaded from '{CSV_PATH}' with {len(id_to_label)} mappings.")
             if cam_pose is None:
                 print("Camera pose unavailable; cannot select targets.")
                 return
 
-            TARGETS = Hercules2D3DDetector.build_targets_from_csv_scene(client, id_to_label, cam_pose, P, w, h)
+            global TARGETS
+            TARGETS = build_targets_from_csv_scene(client, id_to_label, cam_pose, P, w, h)
 
-            for idname_req in Hercules2D3DDetector.FORCE_INCLUDE_IDNAMES:
-                resolved = Hercules2D3DDetector.resolve_id_exact_or_prefix(client, idname_req)
+            # (4) Force-include the requested ID(s)
+            for idname_req in FORCE_INCLUDE_IDNAMES:
+                resolved = resolve_id_exact_or_prefix(client, idname_req)
                 if not resolved:
                     continue
                 already = any(re.fullmatch(t["ACTOR_PATTERN"].strip("^$"), resolved) for t in TARGETS)
                 if already:
                     print(f"[force] '{resolved}' already in TARGETS from FOV pass.")
                     continue
-                obj_type = Hercules2D3DDetector.FORCE_INCLUDE_OBJECT_TYPE or Hercules2D3DDetector.infer_object_type_from_label(
+                obj_type = FORCE_INCLUDE_OBJECT_TYPE or infer_object_type_from_label(
                     id_to_label.get(resolved, resolved)
                 )
-                color_bgr = Hercules2D3DDetector.FORCE_INCLUDE_COLOR_BGR or Hercules2D3DDetector.BOX_COLORS_BGR[len(TARGETS) % len(Hercules2D3DDetector.BOX_COLORS_BGR)]
-                prof_override = Hercules2D3DDetector.get_profile_for_idname(resolved, obj_type)
+                color_bgr = FORCE_INCLUDE_COLOR_BGR or BOX_COLORS_BGR[len(TARGETS) % len(BOX_COLORS_BGR)]
+                prof_override = get_profile_for_idname(resolved, obj_type)
                 TARGETS.append({
                     "label": id_to_label.get(resolved, resolved),
                     "ACTOR_PATTERN": f"^{re.escape(resolved)}$",
@@ -1182,25 +1092,26 @@ class Hercules2D3DDetector:
                 print("No auto-selected targets — nothing to draw.")
                 return
 
-            # (5) Process each target (paused)
+            # (5) Process each target while PAUSED — all poses/images are from the same step
             disp = img.copy()
             results = []
             for i, tgt in enumerate(TARGETS):
                 print(f"\n--- Processing {tgt['label']} ---")
-                res = Hercules2D3DDetector.process_target(tgt, client, cam_info, cam_pose, disp, seg_img, depth_img, P)
+                res = process_target(tgt, client, cam_info, cam_pose, disp, seg_img, depth_img, P)
                 results.append(res)
                 if res.get("found", False):
-                    Hercules2D3DDetector.print_pose(f"{tgt['label']} Actor ({res['actor_name']})", res["actor_pose"])
-                    Hercules2D3DDetector.print_pose(f"{tgt['label']} Actor+Zoffset", res["adjusted_pose"])
+                    print_pose(f"{tgt['label']} Actor ({res['actor_name']})", res["actor_pose"])
+                    print_pose(f"{tgt['label']} Actor+Zoffset", res["adjusted_pose"])
                     print(f"[{tgt['label']}] Box L×W×H = {res['L']}×{res['W']}×{res['H']} m")
                     for j, c in enumerate(res["corners_w"]):
                         print(f"  [{j}] x={c[0]:.4f}, y={c[1]:.4f}, z={c[2]:.4f}")
 
         finally:
+            # ===================== END SINGLE PAUSE WINDOW =====================
             client.simPause(False)
 
-        # (6) 2D annotation & legend
-        cv2.putText(disp, f"Camera: {Hercules2D3DDetector.CAMERA_NAME}", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
+        # (6) 2D annotation & legend (after unpause, using frozen results)
+        cv2.putText(disp, f"Camera: {CAMERA_NAME}", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
         y_off = 50
         legend_lines = []
         for res in results:
@@ -1209,7 +1120,7 @@ class Hercules2D3DDetector:
             label = res["label"]; bgr = res["box_color"]
             cv2.rectangle(disp, (10, y_off-12), (26, y_off+2), bgr, thickness=-1)
             suffix = ""
-            if (Hercules2D3DDetector.DRAW_ONLY_CORRECTED_2D or Hercules2D3DDetector.DOMINANT_COLOR_ONLY) and not res.get("drew_tight", False):
+            if (DRAW_ONLY_CORRECTED_2D or DOMINANT_COLOR_ONLY) and not res.get("drew_tight", False):
                 suffix = " (no dominant-color box)"
             cv2.putText(disp, f"{label}: {res['actor_name']}{suffix}", (34, y_off),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
@@ -1220,29 +1131,40 @@ class Hercules2D3DDetector:
             for line in legend_lines:
                 print(line)
 
-        title = "Projected 3D Bounding Box (dominant color only)" if Hercules2D3DDetector.DOMINANT_COLOR_ONLY else \
-                ("Projected 3D Bounding Box (corrected only)" if Hercules2D3DDetector.DRAW_ONLY_CORRECTED_2D else
+        title = "Projected 3D Bounding Box (dominant color only)" if DOMINANT_COLOR_ONLY else \
+                ("Projected 3D Bounding Box (corrected only)" if DRAW_ONLY_CORRECTED_2D else
                  "Projected 3D Bounding Box (auto from CSV+FOV)")
         cv2.namedWindow(title, cv2.WINDOW_NORMAL)
         cv2.imshow(title, disp)
         print("Press any key to exit (after Open3D closes if opened).")
         cv2.waitKey(1)
 
-        # (7) ROI + boxes (Open3D)
+        # (7) Open3D viz using the same frozen corners/pcds captured while PAUSED
         if o3d:
             try:
+                # ================= WORLD-FRAME WINDOW =================
                 geoms = []
-                fc = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
+
+                # camera frame (optional)
                 Tc = np.eye(4)
-                Tc[:3, :3] = Hercules2D3DDetector.quaternion_to_rotation_matrix(cam_pose.orientation)
+                Tc[:3, :3] = quaternion_to_rotation_matrix(cam_pose.orientation)
                 Tc[:3, 3]  = [cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val]
+                fc = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
                 fc.transform(Tc)
                 geoms.append(fc)
 
+                # LiDAR frame and cloud in world
+                if 'lidar_frame_mesh' in locals() and lidar_frame_mesh is not None:
+                    geoms.append(lidar_frame_mesh)
+                if 'lidar_pcd_world' in locals() and lidar_pcd_world is not None:
+                    geoms.append(lidar_pcd_world)
+
+                # Add ROI point clouds (only for kept objects)
                 for res in results:
                     if res.get("found", False) and res["roi_pcd"] is not None:
                         geoms.append(res["roi_pcd"])
 
+                # Add cuboid line sets LAST so they render on top
                 edges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]]
                 for res in results:
                     if not res.get("found", False):
@@ -1257,129 +1179,67 @@ class Hercules2D3DDetector:
                     geoms.append(ls)
 
                 if len(geoms) > 0:
-                    print("Showing 3D viz in Open3D (boxes are drawn on top of points).")
+                    print("Showing 3D viz in Open3D (world frame).")
                     vis = o3d.visualization.Visualizer()
-                    vis.create_window(window_name="Open3D: ROI + 3D Boxes")
+                    vis.create_window(window_name="Open3D: World (LiDAR + ROI + 3D Boxes)")
                     for g in geoms:
                         vis.add_geometry(g)
                     opt = vis.get_render_option()
-                    if hasattr(opt, "point_size"):
-                        opt.point_size = 3.0
+                    opt.background_color = np.asarray([1.0, 1.0, 1.0])  # white background
+                    opt.point_size = 5.0
                     if hasattr(opt, "line_width"):
                         opt.line_width = 3.0
                     vis.run()
                     vis.destroy_window()
                 else:
-                    print("Open3D: nothing to show.")
-            except Exception as e:
-                print("Open3D error:", e)
+                    print("Open3D: nothing to show in world frame.")
 
-        # (7b) LiDAR + 3D detections (WORLD)
-        if o3d and self.LIDAR_ENABLED:
-            try:
-                import numpy as _np
-                geoms_lidar = []
+                # ============ LiDAR SENSOR-FRAME WINDOW (NEW) ============
+                if ('lidar_pcd_sensor' in locals() and lidar_pcd_sensor is not None
+                        and R_sw is not None and t_ws is not None):
+                    geoms_lidar = []
+                    # sensor frame at origin for this window
+                    cf_lidar = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
+                    geoms_lidar.append(cf_lidar)
+                    geoms_lidar.append(lidar_pcd_sensor)
 
-                # Recompute LiDAR points quickly in WORLD for display if we lost scope
-                # (or reuse the one captured above if still in closure)
-                try:
-                    ptsW = lidar_pts_world_paused  # closure
-                except NameError:
-                    ptsW = None
-
-                if ptsW is not None and ptsW.shape[0] > 0:
-                    pts = ptsW.astype(_np.float64)
-
-                    # safety filter (again): drop non-finite and zeros
-                    good = _np.isfinite(pts).all(axis=1) & (_np.linalg.norm(pts, axis=1) > 1e-9)
-                    pts = pts[good]
-
-                    pcd_lidar = o3d.geometry.PointCloud()
-                    pcd_lidar.points = o3d.utility.Vector3dVector(pts)
-
-                    z = pts[:, 2]
-                    z0, z1 = _np.percentile(z, 1), _np.percentile(z, 99)
-                    denom = max(1e-6, (z1 - z0))
-                    nz = _np.clip((z - z0) / denom, 0.0, 1.0)
-                    colors = _np.stack([nz, 0.2 + 0.8*(1.0 - nz), 1.0 - nz], axis=1)
-                    pcd_lidar.colors = o3d.utility.Vector3dVector(colors)
-                    geoms_lidar.append(pcd_lidar)
-
-                    mins = pts.min(axis=0); maxs = pts.max(axis=0)
-                    print(f"[LiDAR] WORLD bbox min {mins}, max {maxs}")
-                else:
-                    print("LiDAR (paused/settings): no non-zero points to display.")
-
-                world_axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
-                geoms_lidar.append(world_axis)
-
-                edges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]]
-                for res in results:
-                    if not res.get("found", False):
-                        continue
-                    bgr = res["box_color"];  rgb = [bgr[2]/255.0, bgr[1]/255.0, bgr[0]/255.0]
-                    ls = o3d.geometry.LineSet(
-                        points=o3d.utility.Vector3dVector(res["corners_w"]),
-                        lines=o3d.utility.Vector2iVector(edges)
-                    )
-                    ls.colors = o3d.utility.Vector3dVector([rgb] * len(edges))
-                    geoms_lidar.append(ls)
-
-                if len(geoms_lidar) > 0:
-                    vis_lidar = o3d.visualization.Visualizer()
-                    vis_lidar.create_window(window_name="Open3D: LiDAR + 3D Detections")
-                    for g in geoms_lidar:
-                        vis_lidar.add_geometry(g)
-
-                    bb_min = None
-                    bb_max = None
-                    if ptsW is not None and ptsW.shape[0] > 0:
-                        pts = ptsW
-                        good = _np.isfinite(pts).all(axis=1) & (_np.linalg.norm(pts, axis=1) > 1e-9)
-                        pts = pts[good]
-                        if pts.shape[0] > 0:
-                            bb_min = pts.min(axis=0)
-                            bb_max = pts.max(axis=0)
+                    # transform each detection cuboid from world -> sensor
                     for res in results:
-                        if res.get("found", False):
-                            cmin = res["corners_w"].min(axis=0)
-                            cmax = res["corners_w"].max(axis=0)
-                            bb_min = cmin if bb_min is None else _np.minimum(bb_min, cmin)
-                            bb_max = cmax if bb_max is None else _np.maximum(bb_max, cmax)
+                        if not res.get("found", False):
+                            continue
+                        corners_w = res["corners_w"]        # (8,3)
+                        corners_s = (R_sw @ (corners_w - t_ws).T).T
+                        bgr = res["box_color"]
+                        rgb = [bgr[2]/255.0, bgr[1]/255.0, bgr[0]/255.0]
+                        ls_s = o3d.geometry.LineSet(
+                            points=o3d.utility.Vector3dVector(corners_s),
+                            lines=o3d.utility.Vector2iVector(edges)
+                        )
+                        ls_s.colors = o3d.utility.Vector3dVector([rgb] * len(edges))
+                        geoms_lidar.append(ls_s)
 
-                    if bb_min is not None:
-                        center = ((bb_min + bb_max) * 0.5).tolist()
-                        extent = (bb_max - bb_min)
-                        radius = float(_np.linalg.norm(extent)) * 0.5
-                        vc = vis_lidar.get_view_control()
-                        if hasattr(vc, "set_lookat"):
-                            vc.set_lookat(center)
-                        if hasattr(vc, "set_front"):
-                            vc.set_front([-1.0, -1.0, -0.3])
-                        if hasattr(vc, "set_up"):
-                            vc.set_up([0.0, 0.0, -1.0])
-                        if hasattr(vc, "set_zoom"):
-                            vc.set_zoom(0.7 if radius < 50.0 else 0.45)
-
-                    opt2 = vis_lidar.get_render_option()
-                    if hasattr(opt2, "point_size"):
-                        opt2.point_size = float(self.LIDAR_POINT_SIZE if self.LIDAR_POINT_SIZE > 0 else 3.0)
+                    print("Showing 3D viz in Open3D (LiDAR sensor frame).")
+                    vis2 = o3d.visualization.Visualizer()
+                    vis2.create_window(window_name="Open3D: LiDAR frame (sensor-local)")
+                    for g in geoms_lidar:
+                        vis2.add_geometry(g)
+                    opt2 = vis2.get_render_option()
+                    opt2.background_color = np.asarray([1.0, 1.0, 1.0])  # white background
+                    opt2.point_size = 5.0
                     if hasattr(opt2, "line_width"):
                         opt2.line_width = 3.0
-
-                    print("Showing LiDAR + 3D detections (same paused tick, WORLD frame).")
-                    vis_lidar.run()
-                    vis_lidar.destroy_window()
+                    vis2.run()
+                    vis2.destroy_window()
                 else:
-                    print("Open3D (LiDAR): nothing to show.")
+                    print("LiDAR sensor-frame window skipped (missing cloud or transforms).")
             except Exception as e:
-                print("Open3D (LiDAR) error:", e)
+                print("Open3D error:", e)
 
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
 
-# ---- Compatibility shims (unchanged) ----
+# --- Compatibility shims to preserve exact functionality ---
 _CONFIG_NAMES = []
 for _name, _val in vars(Hercules2D3DDetector).items():
     if _name.isupper():
@@ -1416,13 +1276,9 @@ _HELPER_NAMES = [
     'amodal_bbox_for_actor',
     'build_targets_from_csv_scene',
     '_clip_segment_to_rect',
-    'prune_small_seg_colors',
-    '_rpy_to_R',
-    '_pose_to_T',
-    '_load_T_vc_T_vl_from_settings',
-    '_R_to_quat_wxyz',
-    '_T_to_pose',
-    '_get_lidar_world_points_from_settings_during_pause'
+    'prune_small_seg_colors'
 ]
 for _fname in _HELPER_NAMES:
     globals()[_fname] = getattr(Hercules2D3DDetector, _fname)
+
+# Note: No module-level main(). Use Hercules2D3DDetector().run() instead.
