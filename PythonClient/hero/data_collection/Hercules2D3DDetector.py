@@ -126,8 +126,132 @@ class Hercules2D3DDetector:
     LIDAR_VOXEL_DOWNSAMPLE = None # meters; set to 0 or None to disable
     LIDAR_COLOR_RGB = (1.0, 0.0, 0.0)  # red
 
+    # === LiDAR config from AirSim settings.json (absolute path) ===
+    SETTINGS_JSON_PATH = "/home/sgarimella34/Documents/AirSim/settings.json"
 
     # ===================== helpers =====================
+    @staticmethod
+    def _angle_in_interval_deg(a, start, end):
+        """Return True if angle a (deg) is within [start, end] on a circular domain."""
+        a = ((a + 180.0) % 360.0) - 180.0
+        start = ((start + 180.0) % 360.0) - 180.0
+        end   = ((end   + 180.0) % 360.0) - 180.0
+        if start <= end:
+            return (a >= start) and (a <= end)
+        # wrap-around (e.g., start=170, end=-170)
+        return (a >= start) or (a <= end)
+
+
+    @staticmethod
+    def build_lidar_targets(client, id_to_label, R_sw, t_ws, lidar_cfg):
+        """
+        Selects objects of interest by LiDAR cone only (keywords + LiDAR FOV/Range).
+        Returns a list of lightweight 'res-like' dicts (same fields needed for Open3D box draw).
+        """
+        results_lidar = []
+        try:
+            scene_ids = list(client.simListSceneObjects(".*"))
+        except Exception as e:
+            print("simListSceneObjects failed:", e)
+            scene_ids = []
+
+        # Pull config pieces:
+        h0 = lidar_cfg["h_start_deg"]; h1 = lidar_cfg["h_end_deg"]
+        v0 = lidar_cfg["v_lower_deg"]; v1 = lidar_cfg["v_upper_deg"]
+        rng = lidar_cfg["range_m"]
+
+        for idx, idname in enumerate(scene_ids):
+            label = Hercules2D3DDetector.load_actor_map  # (silence lints; real call below)
+            label = id_to_label.get(idname, "")
+            if not (Hercules2D3DDetector.label_has_keyword(label, Hercules2D3DDetector.KEYWORDS) or
+                    Hercules2D3DDetector.label_has_keyword(idname, Hercules2D3DDetector.KEYWORDS)):
+                continue
+
+            pose = Hercules2D3DDetector._safe_get_pose(client, idname)
+            if pose is None:
+                continue
+
+            # Use same type/profile logic you already use:
+            obj_type = Hercules2D3DDetector.infer_object_type_from_label(label if label else idname)
+            prof = Hercules2D3DDetector.get_profile_for_idname(idname, obj_type)
+            L, W, H = prof["L"], prof["W"], prof["H"]
+            z_off   = prof.get("Z", 0.0)
+            fwd_off = prof.get("FWD_OFF_M", 0.0)
+            adj_pose = Hercules2D3DDetector.pose_with_offsets(pose, z_off_m=z_off, fwd_off_m=fwd_off)
+
+            # Cuboid corners in world, then into LiDAR sensor frame:
+            corners_w = Hercules2D3DDetector.compute_bounding_box_corners_world(adj_pose, L, W, H)
+            corners_s = (R_sw @ (corners_w - t_ws).T).T  # world -> sensor
+
+            # LiDAR cone test: any corner inside FOV/Range is enough
+            inside = False
+            for c in corners_s:
+                if Hercules2D3DDetector.point_in_lidar_fov_sensor_frame(c, h0, h1, v0, v1, rng):
+                    inside = True
+                    break
+            if not inside:
+                continue
+
+            # Assign a stable color from your palette:
+            color_bgr = Hercules2D3DDetector.BOX_COLORS_BGR[idx % len(Hercules2D3DDetector.BOX_COLORS_BGR)]
+            results_lidar.append({
+                "found": True,
+                "label": label if label else idname,
+                "actor_name": idname,
+                "actor_pose": pose,
+                "adjusted_pose": adj_pose,
+                "L": L, "W": W, "H": H,
+                "corners_w": corners_w,
+                "box_color": color_bgr,
+                "drew_tight": False  # not relevant for LiDAR-only additions
+            })
+        print(f"LiDAR-selected {len(results_lidar)} target(s) by LiDAR FOV/Range only.")
+        return results_lidar
+
+
+    @staticmethod
+    def point_in_lidar_fov_sensor_frame(p_s, h_start_deg, h_end_deg, v_lower_deg, v_upper_deg, range_m):
+        """
+        p_s: (3,) point in LiDAR sensor frame (x forward, y left, z up convention as in AirSim).
+        Checks spherical angles and range against the LiDAR viewing cone.
+        """
+        x, y, z = float(p_s[0]), float(p_s[1]), float(p_s[2])
+        r = math.sqrt(x*x + y*y + z*z)
+        if not (math.isfinite(r) and r > 0.0 and r <= range_m):
+            return False
+        # Horizontal (yaw) angle: +left
+        yaw_deg = math.degrees(math.atan2(y, x))
+        # Vertical angle: +up from the horizontal plane
+        v_deg = math.degrees(math.atan2(z, math.hypot(x, y)))
+        if not Hercules2D3DDetector._angle_in_interval_deg(yaw_deg, h_start_deg, h_end_deg):
+            return False
+        return (v_deg >= v_lower_deg) and (v_deg <= v_upper_deg)
+
+
+    @staticmethod
+    def load_lidar_fov_from_settings(settings_path, vehicle_name, lidar_name):
+        import json, os
+        # Defaults in case something is missing:
+        cfg = {
+            "range_m": float("inf"),
+            "h_start_deg": -180.0,
+            "h_end_deg":   180.0,
+            "v_lower_deg": -90.0,
+            "v_upper_deg":  90.0,
+        }
+        try:
+            with open(settings_path, "r") as f:
+                js = json.load(f)
+            sensor = js["Vehicles"][vehicle_name]["Sensors"][lidar_name]
+            cfg["range_m"]   = float(sensor.get("Range", cfg["range_m"]))
+            cfg["h_start_deg"] = float(sensor.get("HorizontalFOVStart", cfg["h_start_deg"]))
+            cfg["h_end_deg"]   = float(sensor.get("HorizontalFOVEnd",   cfg["h_end_deg"]))
+            cfg["v_lower_deg"] = float(sensor.get("VerticalFOVLower",   cfg["v_lower_deg"]))
+            cfg["v_upper_deg"] = float(sensor.get("VerticalFOVUpper",   cfg["v_upper_deg"]))
+        except Exception as e:
+            print(f"[WARN] Could not load LiDAR FOV from {settings_path}: {e} (using defaults)")
+        return cfg
+
 
     @staticmethod
     def load_actor_map(csv_path):
@@ -918,7 +1042,6 @@ class Hercules2D3DDetector:
 
         # ===================== SINGLE PAUSE WINDOW =====================
         client.simPause(True)
-        # client.simContinueForTime(0.5)
 
         try:
             # (1) Camera info and synchronized image pack
@@ -1012,6 +1135,13 @@ class Hercules2D3DDetector:
                     R_ws = R_wv @ R_vs
                     t_ws = t_wv + (R_wv @ t_vs)
                     R_sw = R_ws.T
+
+                    lidar_cfg = Hercules2D3DDetector.load_lidar_fov_from_settings(
+                        Hercules2D3DDetector.SETTINGS_JSON_PATH,
+                        Hercules2D3DDetector.VEHICLE_NAME,
+                        Hercules2D3DDetector.LIDAR_NAME
+                    )
+                    print("LiDAR FOV/Range from settings:", lidar_cfg)
 
                     # === LiDAR SENSOR-FRAME WINDOW (NEW) ===
                     # Convert world-frame points to LiDAR sensor frame
@@ -1112,6 +1242,16 @@ class Hercules2D3DDetector:
                     for j, c in enumerate(res["corners_w"]):
                         print(f"  [{j}] x={c[0]:.4f}, y={c[1]:.4f}, z={c[2]:.4f}")
 
+
+            # After building id_to_label and camera-based TARGETS/results
+            actor_names_from_camera = {r["actor_name"] for r in results if r.get("found", False)}
+
+            results_lidar_all = Hercules2D3DDetector.build_lidar_targets(
+                client, id_to_label, R_sw, t_ws, lidar_cfg
+            )
+            # Keep only those NOT already in the camera-based set (to avoid duplicate boxes)
+            results_lidar_only = [r for r in results_lidar_all if r["actor_name"] not in actor_names_from_camera]
+
         finally:
             # ===================== END SINGLE PAUSE WINDOW =====================
             client.simPause(False)
@@ -1172,7 +1312,7 @@ class Hercules2D3DDetector:
 
                 # Add cuboid line sets LAST so they render on top
                 edges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]]
-                for res in results:
+                for res in (results + results_lidar_only):
                     if not res.get("found", False):
                         continue
                     bgr = res["box_color"]
@@ -1210,7 +1350,7 @@ class Hercules2D3DDetector:
                     geoms_lidar.append(lidar_pcd_sensor)
 
                     # transform each detection cuboid from world -> sensor
-                    for res in results:
+                    for res in (results + results_lidar_only):
                         if not res.get("found", False):
                             continue
                         corners_w = res["corners_w"]        # (8,3)
@@ -1223,6 +1363,7 @@ class Hercules2D3DDetector:
                         )
                         ls_s.colors = o3d.utility.Vector3dVector([rgb] * len(edges))
                         geoms_lidar.append(ls_s)
+                        
 
                     print("Showing 3D viz in Open3D (LiDAR sensor frame).")
                     vis2 = o3d.visualization.Visualizer()
