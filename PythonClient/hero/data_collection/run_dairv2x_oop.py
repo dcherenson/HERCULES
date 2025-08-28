@@ -40,7 +40,8 @@ def dair_paths(root):
             "lidar":       f"{root}/cooperative/infrastructure-side/lidar",
             "calib":       f"{root}/cooperative/infrastructure-side/calib",
             "ts":          f"{root}/cooperative/infrastructure-side/timestamp",
-            "kitti_label": f"{root}/cooperative/infrastructure-side/kitti_label"
+            "kitti_label": f"{root}/cooperative/infrastructure-side/kitti_label",
+            "kitti_label_pp": f"{root}/cooperative/infrastructure-side/kitti_label_pp"
         },
         "veh": {
             "img":         f"{root}/cooperative/vehicle-side/image",
@@ -49,7 +50,8 @@ def dair_paths(root):
             "lidar":       f"{root}/cooperative/vehicle-side/lidar",
             "calib":       f"{root}/cooperative/vehicle-side/calib",
             "ts":          f"{root}/cooperative/vehicle-side/timestamp",
-            "kitti_label": f"{root}/cooperative/vehicle-side/kitti_label"
+            "kitti_label": f"{root}/cooperative/vehicle-side/kitti_label",
+            "kitti_label_pp": f"{root}/cooperative/vehicle-side/kitti_label_pp"
         },
         "label": {
             "veh":         f"{root}/cooperative/label/vehicle",
@@ -364,6 +366,128 @@ def kitti_json_from_result(res, cam_pose, P, img_size):
     }
 
 
+# --- PP (LiDAR) label helpers ---
+
+ABS_SETTINGS_PATH = "/home/sgarimella34/Documents/AirSim/settings.json"
+
+def lidar_fov_from_settings(vehicle_name, lidar_name, settings_path=ABS_SETTINGS_PATH):
+    js = _load_settings(settings_path)
+    try:
+        sensor = js["Vehicles"][vehicle_name]["Sensors"][lidar_name]
+    except KeyError:
+        # Fallback: permissive FOV/range if missing
+        return dict(range_m=float("inf"), h_start=-180.0, h_end=180.0, v_lower=-90.0, v_upper=90.0)
+    return dict(
+        range_m = float(sensor.get("Range", float("inf"))),
+        h_start = float(sensor.get("HorizontalFOVStart", -180.0)),
+        h_end   = float(sensor.get("HorizontalFOVEnd",   180.0)),
+        v_lower = float(sensor.get("VerticalFOVLower",   -90.0)),
+        v_upper = float(sensor.get("VerticalFOVUpper",    90.0)),
+    )
+
+def _wrap180(a):
+    a = ((a + 180.0) % 360.0) - 180.0
+    return a
+
+def _angle_in_interval_deg(a, start, end):
+    a = _wrap180(a); start = _wrap180(start); end = _wrap180(end)
+    if start <= end:
+        return (a >= start) and (a <= end)
+    return (a >= start) or (a <= end)
+
+def point_in_lidar_fov_sensor_frame(p_s, h_start, h_end, v_lower, v_upper, range_m):
+    x, y, z = float(p_s[0]), float(p_s[1]), float(p_s[2])
+    r = math.sqrt(x*x + y*y + z*z)
+    if not (math.isfinite(r) and r > 0.0 and r <= range_m):
+        return False
+    yaw = math.degrees(math.atan2(y, x))
+    v   = math.degrees(math.atan2(z, math.hypot(x, y)))
+    if not _angle_in_interval_deg(yaw, h_start, h_end):
+        return False
+    return (v >= v_lower) and (v <= v_upper)
+
+def build_lidar_candidates(client, id_to_label, vehicle_name, R_sw, t_ws, lidar_cfg):
+    """
+    Return list of simple 'res-like' dicts for all objects of interest whose 3D cuboid
+    has at least one corner inside the LiDAR FOV/range.
+    """
+    results = []
+    try:
+        scene_ids = list(client.simListSceneObjects(".*"))
+    except Exception as e:
+        print("simListSceneObjects failed:", e)
+        scene_ids = []
+    idx = 0
+    for idname in scene_ids:
+        label = id_to_label.get(idname, "")
+        if not (H.label_has_keyword(label, H.KEYWORDS) or H.label_has_keyword(idname, H.KEYWORDS)):
+            continue
+        pose = client.simGetObjectPose(idname)
+        if pose is None:
+            continue
+        obj_type = H.infer_object_type_from_label(label if label else idname)
+        prof = H.get_profile_for_idname(idname, obj_type)
+        L, W, Hdim = prof["L"], prof["W"], prof["H"]
+        z_off   = prof.get("Z", 0.0)
+        fwd_off = prof.get("FWD_OFF_M", 0.0)
+        adj_pose = H.pose_with_offsets(pose, z_off_m=z_off, fwd_off_m=fwd_off)
+        corners_w = H.compute_bounding_box_corners_world(adj_pose, L, W, Hdim)
+        # world -> sensor
+        corners_s = (R_sw @ (corners_w - t_ws).T).T
+        h0, h1 = lidar_cfg["h_start"], lidar_cfg["h_end"]
+        v0, v1 = lidar_cfg["v_lower"], lidar_cfg["v_upper"]
+        rng    = lidar_cfg["range_m"]
+        inside = any(point_in_lidar_fov_sensor_frame(c, h0, h1, v0, v1, rng) for c in corners_s)
+        if not inside:
+            continue
+        color_bgr = H.BOX_COLORS_BGR[idx % len(H.BOX_COLORS_BGR)]
+        idx += 1
+        results.append({
+            "found": True,
+            "label": label if label else idname,
+            "actor_name": idname,
+            "actor_pose": pose,
+            "adjusted_pose": adj_pose,
+            "L": L, "W": W, "H": Hdim,
+            "corners_w": corners_w,
+            "box_color": color_bgr,
+        })
+    print(f"[PP] LiDAR FOV selected {len(results)} object(s) for {vehicle_name}.")
+    return results
+
+def kitti_json_3donly_from_res(res, cam_pose, P, img_size):
+    # 3D-only KITTI/DAIR entry, 2D bbox set to [-1,-1,-1,-1].
+    if not res or not res.get("found", False):
+        return None
+    # 3D dims
+    h = float(res["H"]); w = float(res["W"]); l = float(res["L"])
+    # camera-frame location
+    R_cam = H.quaternion_to_rotation_matrix(cam_pose.orientation)
+    cam_p = np.array([cam_pose.position.x_val, cam_pose.position.y_val, cam_pose.position.z_val], dtype=float)
+    center_w = np.array([res["adjusted_pose"].position.x_val,
+                         res["adjusted_pose"].position.y_val,
+                         res["adjusted_pose"].position.z_val], dtype=float)
+    center_c = R_cam.T @ (center_w - cam_p)
+    # yaw in camera frame from box orientation
+    R_box = H.quaternion_to_rotation_matrix(res["adjusted_pose"].orientation)
+    fwd_local = np.array([1,0,0], dtype=float)
+    fwd_world = R_box @ fwd_local
+    fwd_cam   = R_cam.T @ fwd_world
+    rot_y = float(math.atan2(fwd_cam[2], fwd_cam[0]))
+    # type mapping (reuse your heuristic)
+    lbl = str(res.get("label","")).lower()
+    label_type = "Pedestrian" if (("human" in lbl) or ("pedestrian" in lbl) or H.infer_object_type_from_label(lbl)=="human") else "Car"
+    return {
+        "type": label_type,
+        "occluded_state": 0,
+        "truncated_state": 0,
+        "alpha": float(rot_y),
+        "2d_box": {"xmin": -1, "ymin": -1, "xmax": -1, "ymax": -1},
+        "3d_dimensions": {"h": h, "w": w, "l": l},
+        "3d_location": {"x": float(center_c[0]), "y": float(center_c[1]), "z": float(center_c[2])},
+        "rotation": rot_y
+    }
+
 
 # ------------------ MAIN ------------------
 def main():
@@ -474,6 +598,73 @@ def main():
                 json.dump(veh_labels, f)
             with open(os.path.join(PATHS["inf"]["kitti_label"], f"{t_ms:06d}.json"), "w") as f:
                 json.dump(inf_labels, f)
+
+
+                        # --- Build and write PointPillars (LiDAR-gated) labels ---
+            # Vehicle side
+            try:
+                ld_v = car_client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=SIDE_VEH[0])
+                pts_v = np.array(ld_v.point_cloud, dtype=np.float64).reshape(-1,3) if (ld_v and ld_v.point_cloud) else None
+                T_wl_v = _pose_to_T(ld_v.pose) if (ld_v and hasattr(ld_v, "pose") and ld_v.pose is not None) else None
+                R_wl_v = T_wl_v[:3,:3] if T_wl_v is not None else None
+                t_wl_v = T_wl_v[:3, 3] if T_wl_v is not None else None
+                world_pts_v = ((R_wl_v @ pts_v.T).T + t_wl_v) if (pts_v is not None and R_wl_v is not None) else None
+                R_sw_v = R_wl_v.T if R_wl_v is not None else None
+                t_ws_v = t_wl_v if t_wl_v is not None else None
+                cfg_v = lidar_fov_from_settings(SIDE_VEH[0], LIDAR_NAME)
+                id_to_label = H.load_actor_map(H.CSV_PATH)
+                pp_cands_v = build_lidar_candidates(car_client, id_to_label, SIDE_VEH[0], R_sw_v, t_ws_v, cfg_v) if (R_sw_v is not None) else []
+                pp_kept_v = []
+                if world_pts_v is not None:
+                    for res in pp_cands_v:
+                        inside = H.points_inside_oriented_box(world_pts_v, res["adjusted_pose"], res["L"], res["W"], res["H"])
+                        if int(inside.sum()) >= 1:
+                            res["num_lidar_points"] = int(inside.sum())
+                            pp_kept_v.append(res)
+                pp_dir_v = PATHS["veh"]["kitti_label_pp"]
+                os.makedirs(pp_dir_v, exist_ok=True)
+                out_v = []
+                for res in pp_kept_v:
+                    jj = kitti_json_3donly_from_res(res, cam_pose_veh, P_veh, (W_veh, H_veh))
+                    if jj is not None:
+                        out_v.append(jj)
+                with open(os.path.join(pp_dir_v, f"{t_ms:06d}.json"), "w") as f:
+                    json.dump(out_v, f)
+            except Exception as e:
+                print("[WARN] vehicle PP label build failed:", e)
+
+            # Infra side
+            try:
+                ld_i = drone_client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=SIDE_INF[0])
+                pts_i = np.array(ld_i.point_cloud, dtype=np.float64).reshape(-1,3) if (ld_i and ld_i.point_cloud) else None
+                T_wl_i = _pose_to_T(ld_i.pose) if (ld_i and hasattr(ld_i, "pose") and ld_i.pose is not None) else None
+                R_wl_i = T_wl_i[:3,:3] if T_wl_i is not None else None
+                t_wl_i = T_wl_i[:3, 3] if T_wl_i is not None else None
+                world_pts_i = ((R_wl_i @ pts_i.T).T + t_wl_i) if (pts_i is not None and R_wl_i is not None) else None
+                R_sw_i = R_wl_i.T if R_wl_i is not None else None
+                t_ws_i = t_wl_i if t_wl_i is not None else None
+                cfg_i = lidar_fov_from_settings(SIDE_INF[0], LIDAR_NAME)
+                id_to_label = H.load_actor_map(H.CSV_PATH)
+                pp_cands_i = build_lidar_candidates(drone_client, id_to_label, SIDE_INF[0], R_sw_i, t_ws_i, cfg_i) if (R_sw_i is not None) else []
+                pp_kept_i = []
+                if world_pts_i is not None:
+                    for res in pp_cands_i:
+                        inside = H.points_inside_oriented_box(world_pts_i, res["adjusted_pose"], res["L"], res["W"], res["H"])
+                        if int(inside.sum()) >= 1:
+                            res["num_lidar_points"] = int(inside.sum())
+                            pp_kept_i.append(res)
+                pp_dir_i = PATHS["inf"]["kitti_label_pp"]
+                os.makedirs(pp_dir_i, exist_ok=True)
+                out_i = []
+                for res in pp_kept_i:
+                    jj = kitti_json_3donly_from_res(res, cam_pose_inf, P_inf, (W_inf, H_inf))
+                    if jj is not None:
+                        out_i.append(jj)
+                with open(os.path.join(pp_dir_i, f"{t_ms:06d}.json"), "w") as f:
+                    json.dump(out_i, f)
+            except Exception as e:
+                print("[WARN] infra PP label build failed:", e)
+
             with open(os.path.join(PATHS["label"]["veh"], f"{t_ms:06d}.json"), "w") as f:
                 json.dump(veh_labels, f)
             with open(os.path.join(PATHS["label"]["inf"], f"{t_ms:06d}.json"), "w") as f:

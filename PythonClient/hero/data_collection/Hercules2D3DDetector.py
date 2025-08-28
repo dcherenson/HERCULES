@@ -28,7 +28,6 @@ except ImportError:
     o3d = None
 
 
-
 class Hercules2D3DDetector:
     """
     Class-based refactor of the original 2D & 3D object detection script.
@@ -1344,16 +1343,29 @@ class Hercules2D3DDetector:
                 if ('lidar_pcd_sensor' in locals() and lidar_pcd_sensor is not None
                         and R_sw is not None and t_ws is not None):
                     geoms_lidar = []
-                    # sensor frame at origin for this window
                     cf_lidar = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
                     geoms_lidar.append(cf_lidar)
                     geoms_lidar.append(lidar_pcd_sensor)
 
-                    # transform each detection cuboid from world -> sensor
+                    # define edges here so this block is self-contained
+                    edges = [[0,1],[1,3],[3,2],[2,0],[4,5],[5,7],[7,6],[6,4],[0,4],[1,5],[2,6],[3,7]]
+
+                    # draw both camera-selected and LiDAR-FOV-only boxes
                     for res in (results + results_lidar_only):
                         if not res.get("found", False):
                             continue
-                        corners_w = res["corners_w"]        # (8,3)
+
+                        # NEW: drop boxes that have zero LiDAR points inside
+                        if 'p_world' in locals() and p_world is not None:
+                            inside = Hercules2D3DDetector.points_inside_oriented_box(
+                                p_world, res["adjusted_pose"], res["L"], res["W"], res["H"]
+                            )
+                            if int(inside.sum()) == 0:
+                                # no LiDAR returns in this cuboid → skip drawing it in the LiDAR view
+                                continue
+
+                        # transform and draw the remaining box in LiDAR (sensor) frame
+                        corners_w = res["corners_w"]
                         corners_s = (R_sw @ (corners_w - t_ws).T).T
                         bgr = res["box_color"]
                         rgb = [bgr[2]/255.0, bgr[1]/255.0, bgr[0]/255.0]
@@ -1363,7 +1375,6 @@ class Hercules2D3DDetector:
                         )
                         ls_s.colors = o3d.utility.Vector3dVector([rgb] * len(edges))
                         geoms_lidar.append(ls_s)
-                        
 
                     print("Showing 3D viz in Open3D (LiDAR sensor frame).")
                     vis2 = o3d.visualization.Visualizer()
