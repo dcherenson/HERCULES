@@ -116,7 +116,7 @@ class Hercules2D3DDetector:
     FORCE_INCLUDE_OBJECT_TYPE = "car"
     FORCE_INCLUDE_COLOR_BGR   = (0, 0, 255)    # red, reserved for this actor
 
-    # === LiDAR: NEW ===
+    # === LiDAR: ===
     # Names align with your settings.json; change VEHICLE_NAME to "Husky1" if needed.
     VEHICLE_NAME = "Drone1"
     LIDAR_NAME   = "LidarSensor1"
@@ -1077,7 +1077,7 @@ class Hercules2D3DDetector:
             if depth_img.shape[:2] != (h, w):
                 depth_img = resize_to(depth_img, w, h, is_depth=True)
 
-            # (1b) LiDAR data — sampled inside the SAME pause window  === LiDAR: NEW ===
+            # (1b) LiDAR data — sampled inside the SAME pause window  === LiDAR: ===
             lidar_pcd_world = None
             lidar_pcd_sensor = None     # for the second window
             lidar_frame_mesh = None
@@ -1159,7 +1159,7 @@ class Hercules2D3DDetector:
                     lidar_frame_mesh.transform(T_ws)
                 else:
                     print("LiDAR: no points.")
-            # === end LiDAR: NEW ===
+            # === end LiDAR: ===
 
             # Show full-frame depth-clipped segmentation image
             if DEPTH_CLIP_ENABLE:

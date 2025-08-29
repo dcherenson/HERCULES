@@ -151,21 +151,31 @@ def extrinsics_from_settings(vehicle_name, cam_name, lidar_name, settings_path=N
     return T_cam_lidar
 
 
+# --- Pose helpers (compose vehicle ⟶ sensor into world frame) ---
 def _pose_to_T(pose):
-    # AirSim: right-handed, X=forward, Y=right, Z=down
-    q = pose.orientation
-    w, x, y, z = q.w_val, q.x_val, q.y_val, q.z_val
-    # 3x3 (world->sensor) rotation from quaternion (right-handed, same basis)
-    R = np.array([
-        [1-2*(y*y+z*z),   2*(x*y - z*w),   2*(x*z + y*w)],
-        [  2*(x*y + z*w), 1-2*(x*x+z*z),   2*(y*z - x*w)],
-        [  2*(x*z - y*w),   2*(y*z + x*w), 1-2*(x*x+y*y)]
-    ], dtype=float)
+    """AirSim Pose -> 4x4 world transform (R|t)."""
+    R = H.quaternion_to_rotation_matrix(pose.orientation)
     t = np.array([pose.position.x_val, pose.position.y_val, pose.position.z_val], dtype=float)
     T = np.eye(4, dtype=float)
     T[:3,:3] = R
     T[:3, 3] = t
     return T
+
+
+def _compose_world_from_vehicle_and_sensor(veh_pose, sensor_pose):
+    """
+    Return (R_ws, t_ws) for world->sensor by composing
+    world->vehicle with vehicle->sensor.
+    Works whether sensor_pose is given in vehicle or world frame.
+    """
+    R_wv = H.quaternion_to_rotation_matrix(veh_pose.orientation)
+    t_wv = np.array([veh_pose.position.x_val, veh_pose.position.y_val, veh_pose.position.z_val], dtype=float)
+    R_vs = H.quaternion_to_rotation_matrix(sensor_pose.orientation)
+    t_vs = np.array([sensor_pose.position.x_val, sensor_pose.position.y_val, sensor_pose.position.z_val], dtype=float)
+    R_ws = R_wv @ R_vs
+    t_ws = t_wv + R_wv @ t_vs
+    return R_ws, t_ws
+
 
 def get_images(client, vehicle_name):
     """Return (BGR uint8), (depth_m float32), (seg BGR uint8) with matching WxH."""
@@ -229,14 +239,22 @@ def build_calib_json(client, side_name):
     # --- Build T_cam_lidar ---
     T_cam_lidar = None
 
-    # 1) Try runtime (preferred)
+    # 1) # 1) Try runtime (preferred) – compose via vehicle pose so both camera & lidar are in world
     try:
-        T_wc = _pose_to_T(info.pose)                        # world→camera
+        veh_pose = client.simGetVehiclePose(vehicle_name=side_name)
+        # camera: compose world←vehicle←camera_local
+        R_wc, t_wc = _compose_world_from_vehicle_and_sensor(veh_pose, info.pose)
+        T_wc = np.eye(4, dtype=float); T_wc[:3,:3] = R_wc; T_wc[:3,3] = t_wc
+
         ld = client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=side_name)
         if hasattr(ld, "pose") and ld.pose is not None:
-            T_wl = _pose_to_T(ld.pose)                      # world→lidar
+            # lidar: compose world←vehicle←lidar_local
+            R_wl, t_wl = _compose_world_from_vehicle_and_sensor(veh_pose, ld.pose)
+            T_wl = np.eye(4, dtype=float); T_wl[:3,:3] = R_wl; T_wl[:3,3] = t_wl
+
             T_cw = np.linalg.inv(T_wc)
-            T_cam_lidar = T_cw @ T_wl                       # lidar→camera
+            T_cam_lidar = T_cw @ T_wl  # lidar→camera
+
     except Exception:
         T_cam_lidar = None
 
@@ -377,23 +395,40 @@ def lidar_fov_from_settings(vehicle_name, lidar_name, settings_path=ABS_SETTINGS
     except KeyError:
         # Fallback: permissive FOV/range if missing
         return dict(range_m=float("inf"), h_start=-180.0, h_end=180.0, v_lower=-90.0, v_upper=90.0)
-    return dict(
+    cfg = dict(
         range_m = float(sensor.get("Range", float("inf"))),
         h_start = float(sensor.get("HorizontalFOVStart", -180.0)),
         h_end   = float(sensor.get("HorizontalFOVEnd",   180.0)),
         v_lower = float(sensor.get("VerticalFOVLower",   -90.0)),
         v_upper = float(sensor.get("VerticalFOVUpper",    90.0)),
     )
+    # --- Normalize config robustly ---
+    # Range: non-positive or non-finite => infinite
+    if not math.isfinite(cfg["range_m"]) or cfg["range_m"] <= 0.0:
+        cfg["range_m"] = float("inf")
+    # Vertical: some configs swap lower/upper; make it increasing and clamp to [-90,90]
+    v0, v1 = cfg["v_lower"], cfg["v_upper"]
+    if v0 > v1:
+        v0, v1 = v1, v0
+    cfg["v_lower"] = max(-90.0, min(90.0, v0))
+    cfg["v_upper"] = max(-90.0, min(90.0, v1))
+    return cfg
+
 
 def _wrap180(a):
     a = ((a + 180.0) % 360.0) - 180.0
     return a
 
 def _angle_in_interval_deg(a, start, end):
+    # Treat nearly-360° spans as always-true
+    span = ((end - start) % 360.0 + 360.0) % 360.0
+    if span >= 359.999:
+        return True
     a = _wrap180(a); start = _wrap180(start); end = _wrap180(end)
     if start <= end:
         return (a >= start) and (a <= end)
     return (a >= start) or (a <= end)
+
 
 def point_in_lidar_fov_sensor_frame(p_s, h_start, h_end, v_lower, v_upper, range_m):
     x, y, z = float(p_s[0]), float(p_s[1]), float(p_s[2])
@@ -402,9 +437,15 @@ def point_in_lidar_fov_sensor_frame(p_s, h_start, h_end, v_lower, v_upper, range
         return False
     yaw = math.degrees(math.atan2(y, x))
     v   = math.degrees(math.atan2(z, math.hypot(x, y)))
-    if not _angle_in_interval_deg(yaw, h_start, h_end):
+
+    # Treat start==end as full 360° (common AirSim shorthand)
+    delta = (h_end - h_start) % 360.0
+    full360 = (abs(delta) < 1e-6)
+    if (not full360) and (not _angle_in_interval_deg(yaw, h_start, h_end)):
         return False
+    
     return (v >= v_lower) and (v <= v_upper)
+
 
 def build_lidar_candidates(client, id_to_label, vehicle_name, R_sw, t_ws, lidar_cfg):
     """
@@ -412,7 +453,7 @@ def build_lidar_candidates(client, id_to_label, vehicle_name, R_sw, t_ws, lidar_
     has at least one corner inside the LiDAR FOV/range.
     """
     results = []
-    try:
+    try: 
         scene_ids = list(client.simListSceneObjects(".*"))
     except Exception as e:
         print("simListSceneObjects failed:", e)
@@ -431,15 +472,30 @@ def build_lidar_candidates(client, id_to_label, vehicle_name, R_sw, t_ws, lidar_
         z_off   = prof.get("Z", 0.0)
         fwd_off = prof.get("FWD_OFF_M", 0.0)
         adj_pose = H.pose_with_offsets(pose, z_off_m=z_off, fwd_off_m=fwd_off)
+
         corners_w = H.compute_bounding_box_corners_world(adj_pose, L, W, Hdim)
-        # world -> sensor
+
+        # world -> sensor for corners
         corners_s = (R_sw @ (corners_w - t_ws).T).T
+
+        # also check the box center — many valid boxes will have interior points in-FOV while all corners are out
+        center_w = np.array([
+            adj_pose.position.x_val,
+            adj_pose.position.y_val,
+            adj_pose.position.z_val
+        ], dtype=float)
+        center_s = R_sw @ (center_w - t_ws)
+
         h0, h1 = lidar_cfg["h_start"], lidar_cfg["h_end"]
         v0, v1 = lidar_cfg["v_lower"], lidar_cfg["v_upper"]
         rng    = lidar_cfg["range_m"]
-        inside = any(point_in_lidar_fov_sensor_frame(c, h0, h1, v0, v1, rng) for c in corners_s)
-        if not inside:
+
+        corner_ok = any(point_in_lidar_fov_sensor_frame(c, h0, h1, v0, v1, rng) for c in corners_s)
+        center_ok = point_in_lidar_fov_sensor_frame(center_s, h0, h1, v0, v1, rng)
+
+        if not (corner_ok or center_ok):
             continue
+
         color_bgr = H.BOX_COLORS_BGR[idx % len(H.BOX_COLORS_BGR)]
         idx += 1
         results.append({
@@ -605,12 +661,16 @@ def main():
             try:
                 ld_v = car_client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=SIDE_VEH[0])
                 pts_v = np.array(ld_v.point_cloud, dtype=np.float64).reshape(-1,3) if (ld_v and ld_v.point_cloud) else None
-                T_wl_v = _pose_to_T(ld_v.pose) if (ld_v and hasattr(ld_v, "pose") and ld_v.pose is not None) else None
-                R_wl_v = T_wl_v[:3,:3] if T_wl_v is not None else None
-                t_wl_v = T_wl_v[:3, 3] if T_wl_v is not None else None
+                veh_pose_v = car_client.simGetVehiclePose(vehicle_name=SIDE_VEH[0])
+                # Compose world←vehicle←lidar_local
+                R_wl_v = t_wl_v = None
+                if ld_v and hasattr(ld_v, "pose") and ld_v.pose is not None:
+                    R_wl_v, t_wl_v = _compose_world_from_vehicle_and_sensor(veh_pose_v, ld_v.pose)
                 world_pts_v = ((R_wl_v @ pts_v.T).T + t_wl_v) if (pts_v is not None and R_wl_v is not None) else None
+                # sensor←world for corner/FOV tests
                 R_sw_v = R_wl_v.T if R_wl_v is not None else None
                 t_ws_v = t_wl_v if t_wl_v is not None else None
+                
                 cfg_v = lidar_fov_from_settings(SIDE_VEH[0], LIDAR_NAME)
                 id_to_label = H.load_actor_map(H.CSV_PATH)
                 pp_cands_v = build_lidar_candidates(car_client, id_to_label, SIDE_VEH[0], R_sw_v, t_ws_v, cfg_v) if (R_sw_v is not None) else []
@@ -637,12 +697,16 @@ def main():
             try:
                 ld_i = drone_client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=SIDE_INF[0])
                 pts_i = np.array(ld_i.point_cloud, dtype=np.float64).reshape(-1,3) if (ld_i and ld_i.point_cloud) else None
-                T_wl_i = _pose_to_T(ld_i.pose) if (ld_i and hasattr(ld_i, "pose") and ld_i.pose is not None) else None
-                R_wl_i = T_wl_i[:3,:3] if T_wl_i is not None else None
-                t_wl_i = T_wl_i[:3, 3] if T_wl_i is not None else None
+                veh_pose_i = drone_client.simGetVehiclePose(vehicle_name=SIDE_INF[0])
+                # Compose world←vehicle←lidar_local
+                R_wl_i = t_wl_i = None
+                if ld_i and hasattr(ld_i, "pose") and ld_i.pose is not None:
+                    R_wl_i, t_wl_i = _compose_world_from_vehicle_and_sensor(veh_pose_i, ld_i.pose)
                 world_pts_i = ((R_wl_i @ pts_i.T).T + t_wl_i) if (pts_i is not None and R_wl_i is not None) else None
+                # sensor←world for corner/FOV tests
                 R_sw_i = R_wl_i.T if R_wl_i is not None else None
                 t_ws_i = t_wl_i if t_wl_i is not None else None
+
                 cfg_i = lidar_fov_from_settings(SIDE_INF[0], LIDAR_NAME)
                 id_to_label = H.load_actor_map(H.CSV_PATH)
                 pp_cands_i = build_lidar_candidates(drone_client, id_to_label, SIDE_INF[0], R_sw_i, t_ws_i, cfg_i) if (R_sw_i is not None) else []
