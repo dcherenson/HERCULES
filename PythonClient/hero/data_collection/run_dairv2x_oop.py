@@ -388,6 +388,36 @@ def kitti_json_from_result(res, cam_pose, P, img_size):
 
 ABS_SETTINGS_PATH = "/home/sgarimella34/Documents/AirSim/settings.json"
 
+
+def lidar_world_from_settings(client, vehicle_name, lidar_name, settings_path=None):
+    """
+    Robust world←vehicle←lidar composition using LiDAR mount extrinsics
+    from settings.json plus the live vehicle pose. This avoids ambiguity
+    in LidarData.pose (which can be vehicle-local or world).
+    Returns (R_wl, t_wl).
+    """
+    js = _load_settings(settings_path)
+    v = js.get("Vehicles", {}).get(vehicle_name, {})
+    sens = v.get("Sensors", {})
+    l = sens.get(lidar_name, {})
+    lx, ly, lz = l.get("X", 0.0), l.get("Y", 0.0), l.get("Z", 0.0)
+    lroll, lpitch, lyaw = l.get("Roll", 0.0), l.get("Pitch", 0.0), l.get("Yaw", 0.0)
+    T_v_to_l = _T_from_xyzrpy(lx, ly, lz, lroll, lpitch, lyaw)   # vehicle→lidar
+
+    veh_pose = client.simGetVehiclePose(vehicle_name=vehicle_name)
+    R_wv = H.quaternion_to_rotation_matrix(veh_pose.orientation)
+    t_wv = np.array([veh_pose.position.x_val,
+                     veh_pose.position.y_val,
+                     veh_pose.position.z_val], dtype=float)
+    T_wv = np.eye(4, dtype=float); T_wv[:3,:3] = R_wv; T_wv[:3,3] = t_wv
+
+    T_wl = T_wv @ T_v_to_l
+    R_wl = T_wl[:3,:3].copy()
+    t_wl = T_wl[:3, 3].copy()
+    return R_wl, t_wl
+
+
+
 def lidar_fov_from_settings(vehicle_name, lidar_name, settings_path=ABS_SETTINGS_PATH):
     js = _load_settings(settings_path)
     try:
@@ -447,12 +477,19 @@ def point_in_lidar_fov_sensor_frame(p_s, h_start, h_end, v_lower, v_upper, range
     return (v >= v_lower) and (v <= v_upper)
 
 
-def build_lidar_candidates(client, id_to_label, vehicle_name, R_sw, t_ws, lidar_cfg):
+def build_lidar_candidates(client, id_to_label, vehicle_name, R_sw, t_ws, lidar_cfg, strict_fov=True):
     """
     Return list of simple 'res-like' dicts for all objects of interest whose 3D cuboid
-    has at least one corner inside the LiDAR FOV/range.
+    has at least one corner (or center) inside the LiDAR FOV/range (when strict_fov=True).
+    When strict_fov=False, skip the angular pre-gate and rely on the later
+    'points-inside-cuboid' test to keep only physically supported boxes.
     """
     results = []
+
+    # Types we consider for PP labels (ensure pedestrians aren't dropped)
+    TYPES_OK = {"human","pedestrian","person","cyclist","bicycle","motorcycle",
+                "car","van","truck","bus"}
+    
     try: 
         scene_ids = list(client.simListSceneObjects(".*"))
     except Exception as e:
@@ -461,13 +498,26 @@ def build_lidar_candidates(client, id_to_label, vehicle_name, R_sw, t_ws, lidar_
     idx = 0
     for idname in scene_ids:
         label = id_to_label.get(idname, "")
-        if not (H.label_has_keyword(label, H.KEYWORDS) or H.label_has_keyword(idname, H.KEYWORDS)):
+        # Robust type inference; don't depend on brittle keywords alone.
+        obj_type = H.infer_object_type_from_label(label if label else idname)
+        obj_type_l = (obj_type or "").lower()
+        # Fallback: if we can't infer a type, keep common classes via keyword match.
+        if not obj_type_l:
+            if H.label_has_keyword(label, H.KEYWORDS) or H.label_has_keyword(idname, H.KEYWORDS):
+                obj_type_l = "car"  # default bucket so it passes TYPES_OK
+        # Final gate on types-of-interest (keeps pedestrians/cyclists/cars/trucks/buses)
+        if obj_type_l not in TYPES_OK:
             continue
+
+
+        
         pose = client.simGetObjectPose(idname)
         if pose is None:
             continue
-        obj_type = H.infer_object_type_from_label(label if label else idname)
-        prof = H.get_profile_for_idname(idname, obj_type)
+
+        # Use the already-resolved type string (may be empty)
+        prof = H.get_profile_for_idname(idname, obj_type if obj_type else None)
+        
         L, W, Hdim = prof["L"], prof["W"], prof["H"]
         z_off   = prof.get("Z", 0.0)
         fwd_off = prof.get("FWD_OFF_M", 0.0)
@@ -475,26 +525,20 @@ def build_lidar_candidates(client, id_to_label, vehicle_name, R_sw, t_ws, lidar_
 
         corners_w = H.compute_bounding_box_corners_world(adj_pose, L, W, Hdim)
 
-        # world -> sensor for corners
-        corners_s = (R_sw @ (corners_w - t_ws).T).T
-
-        # also check the box center — many valid boxes will have interior points in-FOV while all corners are out
-        center_w = np.array([
-            adj_pose.position.x_val,
-            adj_pose.position.y_val,
-            adj_pose.position.z_val
-        ], dtype=float)
-        center_s = R_sw @ (center_w - t_ws)
-
-        h0, h1 = lidar_cfg["h_start"], lidar_cfg["h_end"]
-        v0, v1 = lidar_cfg["v_lower"], lidar_cfg["v_upper"]
-        rng    = lidar_cfg["range_m"]
-
-        corner_ok = any(point_in_lidar_fov_sensor_frame(c, h0, h1, v0, v1, rng) for c in corners_s)
-        center_ok = point_in_lidar_fov_sensor_frame(center_s, h0, h1, v0, v1, rng)
-
-        if not (corner_ok or center_ok):
-            continue
+        if strict_fov:
+            # world -> sensor for corners/center
+            corners_s = (R_sw @ (corners_w - t_ws).T).T
+            center_w = np.array([adj_pose.position.x_val,
+                                 adj_pose.position.y_val,
+                                 adj_pose.position.z_val], dtype=float)
+            center_s = R_sw @ (center_w - t_ws)
+            h0, h1 = lidar_cfg["h_start"], lidar_cfg["h_end"]
+            v0, v1 = lidar_cfg["v_lower"], lidar_cfg["v_upper"]
+            rng    = lidar_cfg["range_m"]
+            corner_ok = any(point_in_lidar_fov_sensor_frame(c, h0, h1, v0, v1, rng) for c in corners_s)
+            center_ok = point_in_lidar_fov_sensor_frame(center_s, h0, h1, v0, v1, rng)
+            if not (corner_ok or center_ok):
+                continue
 
         color_bgr = H.BOX_COLORS_BGR[idx % len(H.BOX_COLORS_BGR)]
         idx += 1
@@ -659,13 +703,11 @@ def main():
                         # --- Build and write PointPillars (LiDAR-gated) labels ---
             # Vehicle side
             try:
-                ld_v = car_client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=SIDE_VEH[0])
+                ld_v  = car_client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=SIDE_VEH[0])
                 pts_v = np.array(ld_v.point_cloud, dtype=np.float64).reshape(-1,3) if (ld_v and ld_v.point_cloud) else None
-                veh_pose_v = car_client.simGetVehiclePose(vehicle_name=SIDE_VEH[0])
-                # Compose world←vehicle←lidar_local
-                R_wl_v = t_wl_v = None
-                if ld_v and hasattr(ld_v, "pose") and ld_v.pose is not None:
-                    R_wl_v, t_wl_v = _compose_world_from_vehicle_and_sensor(veh_pose_v, ld_v.pose)
+                # Stable world transform from settings extrinsics × live vehicle pose
+                R_wl_v, t_wl_v = lidar_world_from_settings(car_client, SIDE_VEH[0], LIDAR_NAME, settings_path=ABS_SETTINGS_PATH)
+                
                 world_pts_v = ((R_wl_v @ pts_v.T).T + t_wl_v) if (pts_v is not None and R_wl_v is not None) else None
                 # sensor←world for corner/FOV tests
                 R_sw_v = R_wl_v.T if R_wl_v is not None else None
@@ -673,7 +715,11 @@ def main():
                 
                 cfg_v = lidar_fov_from_settings(SIDE_VEH[0], LIDAR_NAME)
                 id_to_label = H.load_actor_map(H.CSV_PATH)
-                pp_cands_v = build_lidar_candidates(car_client, id_to_label, SIDE_VEH[0], R_sw_v, t_ws_v, cfg_v) if (R_sw_v is not None) else []
+
+                # UGV: skip FOV pre-gate; trust points-in-box (handles tall/thin pedestrians)
+                pp_cands_v = build_lidar_candidates(car_client, id_to_label, SIDE_VEH[0],
+                                                    R_sw_v, t_ws_v, cfg_v, strict_fov=False) if (R_sw_v is not None) else []                
+                
                 pp_kept_v = []
                 if world_pts_v is not None:
                     for res in pp_cands_v:
@@ -695,13 +741,11 @@ def main():
 
             # Infra side
             try:
-                ld_i = drone_client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=SIDE_INF[0])
+                ld_i  = drone_client.getLidarData(lidar_name=LIDAR_NAME, vehicle_name=SIDE_INF[0])
                 pts_i = np.array(ld_i.point_cloud, dtype=np.float64).reshape(-1,3) if (ld_i and ld_i.point_cloud) else None
-                veh_pose_i = drone_client.simGetVehiclePose(vehicle_name=SIDE_INF[0])
-                # Compose world←vehicle←lidar_local
-                R_wl_i = t_wl_i = None
-                if ld_i and hasattr(ld_i, "pose") and ld_i.pose is not None:
-                    R_wl_i, t_wl_i = _compose_world_from_vehicle_and_sensor(veh_pose_i, ld_i.pose)
+                # Keep infra path stable as well (settings extrinsics × live vehicle pose)
+                R_wl_i, t_wl_i = lidar_world_from_settings(drone_client, SIDE_INF[0], LIDAR_NAME, settings_path=ABS_SETTINGS_PATH)
+
                 world_pts_i = ((R_wl_i @ pts_i.T).T + t_wl_i) if (pts_i is not None and R_wl_i is not None) else None
                 # sensor←world for corner/FOV tests
                 R_sw_i = R_wl_i.T if R_wl_i is not None else None
@@ -709,7 +753,11 @@ def main():
 
                 cfg_i = lidar_fov_from_settings(SIDE_INF[0], LIDAR_NAME)
                 id_to_label = H.load_actor_map(H.CSV_PATH)
-                pp_cands_i = build_lidar_candidates(drone_client, id_to_label, SIDE_INF[0], R_sw_i, t_ws_i, cfg_i) if (R_sw_i is not None) else []
+                
+                # Infra already behaves well; keep the angular pre-gate
+                pp_cands_i = build_lidar_candidates(drone_client, id_to_label, SIDE_INF[0],
+                                                    R_sw_i, t_ws_i, cfg_i, strict_fov=True) if (R_sw_i is not None) else []
+
                 pp_kept_i = []
                 if world_pts_i is not None:
                     for res in pp_cands_i:
