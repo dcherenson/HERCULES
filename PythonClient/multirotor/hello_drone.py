@@ -8,7 +8,7 @@ import pprint
 import cv2
 
 # connect to the AirSim simulator
-client = airsim.MultirotorClient()
+client = airsim.MultirotorClient(port=41451)
 client.confirmConnection()
 client.enableApiControl(True)
 
@@ -28,9 +28,9 @@ magnetometer_data = client.getMagnetometerData()
 s = pprint.pformat(magnetometer_data)
 print("magnetometer_data: %s" % s)
 
-gps_data = client.getGpsData()
-s = pprint.pformat(gps_data)
-print("gps_data: %s" % s)
+# gps_data = client.getGpsData()
+# s = pprint.pformat(gps_data)
+# print("gps_data: %s" % s)
 
 airsim.wait_key('Press any key to takeoff')
 print("Taking off...")
@@ -41,7 +41,7 @@ state = client.getMultirotorState()
 print("state: %s" % pprint.pformat(state))
 
 airsim.wait_key('Press any key to move vehicle to (-10, 10, -10) at 5 m/s')
-client.moveToPositionAsync(-10, 10, -10, 5).join()
+client.moveToPositionAsync(0, 0, -6.5, 5).join()
 
 client.hoverAsync().join()
 

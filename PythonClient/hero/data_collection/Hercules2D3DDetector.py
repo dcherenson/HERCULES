@@ -20,6 +20,7 @@ import cosysairsim as airsim
 import cv2
 import csv
 from collections import defaultdict
+from typing import Tuple
 
 # optional visualization
 try:
@@ -130,6 +131,41 @@ class Hercules2D3DDetector:
 
     # ===================== helpers =====================
     @staticmethod
+    def load_vehicle_spawn_translation(settings_path, vehicle_name):
+        """
+        Read the vehicle's starting translation (X,Y,Z) from AirSim settings.json.
+        Returns a tuple (x0, y0, z0) in meters (NED: +x forward, +y right, +z down).
+        Fallback to (0,0,0) if not found or file not available.
+        """
+        import json
+        try:
+            with open(settings_path, "r") as f:
+                js = json.load(f)
+            v = js["Vehicles"][vehicle_name]
+            return (
+                float(v.get("X", 0.0)),
+                float(v.get("Y", 0.0)),
+                float(v.get("Z", 0.0)),
+            )
+        except Exception as e:
+            print(f"[WARN] Could not load spawn translation for '{vehicle_name}' "
+                  f"from {settings_path}: {e} (using 0,0,0)")
+            return (0.0, 0.0, 0.0)
+
+    @staticmethod
+    def pose_add_translation(base_pose, delta_xyz):
+        """
+        Return a new Pose with base_pose's orientation and base_pose.position + delta_xyz.
+        """
+        dx, dy, dz = (float(delta_xyz[0]), float(delta_xyz[1]), float(delta_xyz[2]))
+        p = base_pose.position
+        return airsim.Pose(
+            position_val=airsim.Vector3r(p.x_val + dx, p.y_val + dy, p.z_val + dz),
+            orientation_val=base_pose.orientation
+        )
+
+
+    @staticmethod
     def _angle_in_interval_deg(a, start, end):
         """Return True if angle a (deg) is within [start, end] on a circular domain."""
         a = ((a + 180.0) % 360.0) - 180.0
@@ -211,17 +247,22 @@ class Hercules2D3DDetector:
     @staticmethod
     def point_in_lidar_fov_sensor_frame(p_s, h_start_deg, h_end_deg, v_lower_deg, v_upper_deg, range_m):
         """
-        p_s: (3,) point in LiDAR sensor frame (x forward, y left, z up convention as in AirSim).
+        p_s: (3,) point in LiDAR sensor frame.
+        AirSim sensor/body frames follow NED: x forward, y right, z down.
+        We flip signs on y and z when computing angles to align with a +left/+up convention.
         Checks spherical angles and range against the LiDAR viewing cone.
         """
+
         x, y, z = float(p_s[0]), float(p_s[1]), float(p_s[2])
         r = math.sqrt(x*x + y*y + z*z)
         if not (math.isfinite(r) and r > 0.0 and r <= range_m):
             return False
-        # Horizontal (yaw) angle: +left
-        yaw_deg = math.degrees(math.atan2(y, x))
-        # Vertical angle: +up from the horizontal plane
-        v_deg = math.degrees(math.atan2(z, math.hypot(x, y)))
+
+        # Horizontal (yaw) angle: +left   (AirSim has y to the RIGHT -> flip y)
+        yaw_deg = math.degrees(math.atan2(-y, x))
+        # Vertical angle: +up from the horizontal plane   (AirSim has z DOWN -> flip z)
+        v_deg = math.degrees(math.atan2(-z, math.hypot(x, y)))
+
         if not Hercules2D3DDetector._angle_in_interval_deg(yaw_deg, h_start_deg, h_end_deg):
             return False
         return (v_deg >= v_lower_deg) and (v_deg <= v_upper_deg)
@@ -1025,16 +1066,20 @@ class Hercules2D3DDetector:
 
     def run(self):
         np.set_printoptions(precision=4, suppress=True)
-        client = CLIENT_CLASS(port=PORT)
+        client = self.CLIENT_CLASS(port=self.PORT)
         client.confirmConnection()
         print("Connected!\n")
 
         # Zero lens distortion if any
-        dparams = client.simGetDistortionParams(CAMERA_NAME)
+        dparams = client.simGetDistortionParams(self.CAMERA_NAME, vehicle_name=self.VEHICLE_NAME)
         print("Distortion params:", dparams)
         if any(abs(d)>1e-9 for d in dparams):
             print(" Zeroing distortion.")
-            client.simSetDistortionParams(CAMERA_NAME, {"K1":0.0, "K2":0.0, "K3":0.0, "P1":0.0, "P2":0.0})
+            client.simSetDistortionParams(
+                self.CAMERA_NAME,
+                {"K1":0.0, "K2":0.0, "K3":0.0, "P1":0.0, "P2":0.0},
+                vehicle_name=self.VEHICLE_NAME
+            )
         else:
             print(" No distortion active.")
         print()
@@ -1044,15 +1089,17 @@ class Hercules2D3DDetector:
 
         try:
             # (1) Camera info and synchronized image pack
-            cam_info = client.simGetCameraInfo(CAMERA_NAME)
+            cam_info = client.simGetCameraInfo(self.CAMERA_NAME, vehicle_name=self.VEHICLE_NAME)
             cam_pose = cam_info.pose if cam_info else None
 
+            # IMPORTANT: pass vehicle_name on the simGetImages() call, not per request.
             reqs = [
-                airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Scene,         False, True),
-                airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Segmentation,  False, True),
-                airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.DepthPerspective, True,  False),
+                airsim.ImageRequest(self.CAMERA_NAME, airsim.ImageType.Scene,        False, True),
+                airsim.ImageRequest(self.CAMERA_NAME, airsim.ImageType.Segmentation, False, True),
+                airsim.ImageRequest(self.CAMERA_NAME, airsim.ImageType.DepthPerspective, True, False),
             ]
-            scene_resp, seg_resp, depth_resp = client.simGetImages(reqs)
+            scene_resp, seg_resp, depth_resp = client.simGetImages(reqs, vehicle_name=self.VEHICLE_NAME)
+
             print("IMAGE DATA TS: ", scene_resp.time_stamp, seg_resp.time_stamp, depth_resp.time_stamp)
 
             img = cv2.imdecode(np.frombuffer(scene_resp.image_data_uint8, np.uint8), cv2.IMREAD_COLOR)
@@ -1105,10 +1152,39 @@ class Hercules2D3DDetector:
                         pts = pts[::self.LIDAR_STRIDE]
 
                     # Compose world transform: world <- vehicle <- sensor
+                    # Get pose in a way that ALWAYS respects vehicle_name
+                    veh_pose = None
                     try:
-                        veh_pose = client.simGetVehiclePose(self.VEHICLE_NAME)
-                    except TypeError:
-                        veh_pose = client.simGetVehiclePose()
+                        if hasattr(client, "getCarState"):
+                            st = client.getCarState(vehicle_name=self.VEHICLE_NAME)
+                            veh_pose = airsim.Pose(st.kinematics_estimated.position,
+                                                    st.kinematics_estimated.orientation)
+                        elif hasattr(client, "getMultirotorState"):
+                            st = client.getMultirotorState(vehicle_name=self.VEHICLE_NAME)
+                            veh_pose = airsim.Pose(st.kinematics_estimated.position,
+                                                    st.kinematics_estimated.orientation)
+                    except Exception:
+                        pass
+                    if veh_pose is None:
+                        try:
+                            # newer RPCs take vehicle_name as kwarg
+                            veh_pose = client.simGetVehiclePose(vehicle_name=self.VEHICLE_NAME)
+                        except TypeError:
+                            # last resort: may return "default vehicle" on some builds
+                            veh_pose = client.simGetVehiclePose()
+
+
+                    # --- apply world spawn translation from settings.json ---
+                    # AirSim's simGetVehiclePose() translation is relative to the vehicle's spawn.
+                    # We add the configured spawn (X,Y,Z) so pose.translation becomes world-aligned.
+                    try:
+                        spawn_xyz = Hercules2D3DDetector.load_vehicle_spawn_translation(
+                            Hercules2D3DDetector.SETTINGS_JSON_PATH,
+                            self.VEHICLE_NAME
+                        )
+                        veh_pose = Hercules2D3DDetector.pose_add_translation(veh_pose, spawn_xyz)
+                    except Exception as e:
+                        print(f"[WARN] spawn translation not applied: {e}")
 
                     R_vs = quaternion_to_rotation_matrix(lidar_data.pose.orientation)
                     t_vs = np.array([lidar_data.pose.position.x_val,
@@ -1256,7 +1332,7 @@ class Hercules2D3DDetector:
             client.simPause(False)
 
         # (6) 2D annotation & legend (after unpause, using frozen results)
-        cv2.putText(disp, f"Camera: {CAMERA_NAME}", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
+        cv2.putText(disp, f"Camera: {self.CAMERA_NAME}", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
         y_off = 50
         legend_lines = []
         for res in results:
