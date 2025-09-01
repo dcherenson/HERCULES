@@ -1092,6 +1092,20 @@ class Hercules2D3DDetector:
             cam_info = client.simGetCameraInfo(self.CAMERA_NAME, vehicle_name=self.VEHICLE_NAME)
             cam_pose = cam_info.pose if cam_info else None
 
+            # Make camera pose "true world": add per-vehicle spawn translation (like veh_pose above).
+            # AirSim often reports camera translation relative to the vehicle's spawn origin.
+            # We keep orientation as-is and shift the translation by (X,Y,Z) from settings.json.
+            try:
+                if cam_pose is not None:
+                    spawn_xyz = Hercules2D3DDetector.load_vehicle_spawn_translation(
+                        Hercules2D3DDetector.SETTINGS_JSON_PATH,
+                        self.VEHICLE_NAME
+                    )
+                    cam_pose = Hercules2D3DDetector.pose_add_translation(cam_pose, spawn_xyz)
+            except Exception as e:
+                print(f"[WARN] camera spawn translation not applied: {e}")
+
+
             # IMPORTANT: pass vehicle_name on the simGetImages() call, not per request.
             reqs = [
                 airsim.ImageRequest(self.CAMERA_NAME, airsim.ImageType.Scene,        False, True),

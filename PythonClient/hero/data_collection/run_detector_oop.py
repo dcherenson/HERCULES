@@ -9,8 +9,8 @@ from Hercules2D3DDetector import Hercules2D3DDetector as H
 # Inline configuration
 # =========================
 # Default remains the drone. To run the Husky UGV, set SELECTED_VEHICLE = "Husky1".
-# SELECTED_VEHICLE = "Husky1"   # "Drone1" (default) or "Husky1"
-SELECTED_VEHICLE = "Drone1"
+SELECTED_VEHICLE = "Husky1"   # "Drone1" (default) or "Husky1"
+# SELECTED_VEHICLE = "Drone1"
 
 # Optional: leave as None to use the detector's default camera name.
 CAMERA_NAME_OVERRIDE = None   # e.g., "front_center" or None
