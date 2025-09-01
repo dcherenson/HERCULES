@@ -167,14 +167,19 @@ class Hercules2D3DDetector:
 
     @staticmethod
     def _angle_in_interval_deg(a, start, end):
-        """Return True if angle a (deg) is within [start, end] on a circular domain."""
-        a = ((a + 180.0) % 360.0) - 180.0
-        start = ((start + 180.0) % 360.0) - 180.0
-        end   = ((end   + 180.0) % 360.0) - 180.0
-        if start <= end:
-            return (a >= start) and (a <= end)
-        # wrap-around (e.g., start=170, end=-170)
-        return (a >= start) or (a <= end)
+        """
+        Return True if angle a (deg) is within [start, end] on a circular domain.
+        Robust to wrap-around AND full-360° intervals (e.g., 0..360).
+        """
+        # Span in degrees keeping original difference to detect 360 exactly.
+        span_raw = end - start
+        span = (span_raw % 360.0 + 360.0) % 360.0  # [0, 360)
+        # If the raw interval is exactly (or numerically) 360°, accept all angles.
+        if math.isclose(span, 0.0, abs_tol=1e-6) and not math.isclose(span_raw, 0.0, abs_tol=1e-6):
+            return True
+        # Reduce to a relative test from 'start'
+        rel = ((a - start) % 360.0 + 360.0) % 360.0  # [0, 360)
+        return rel <= span
 
 
     @staticmethod
