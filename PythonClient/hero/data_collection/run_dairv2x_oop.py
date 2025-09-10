@@ -220,9 +220,20 @@ def get_lidar_points(client, vehicle_name):
     return None
 
 def save_lidar_bin(path, xyz):
-    """KITTI .bin with x,y,z,1.0 float32."""
-    N = xyz.shape[0]
-    arr = np.hstack([xyz.astype(np.float32), np.ones((N,1), dtype=np.float32)])
+    """
+    Save KITTI .bin with x,y,z,1.0 float32 in **DAIR-V2X Virtual LiDAR** coords.
+    AirSim LiDAR returns points in a body/sensor frame where:
+      X forward, Y right, Z down. DAIR requires: X forward, Y left, Z up.
+    Convert by flipping Y and Z.
+    """
+    if xyz is None or not len(xyz):
+        return
+    pts = xyz.astype(np.float32).copy()
+    # AirSim (x,+y right,+z down) -> DAIR (x,+y left,+z up)
+    pts[:, 1] = -pts[:, 1]
+    pts[:, 2] = -pts[:, 2]
+    N = pts.shape[0]
+    arr = np.hstack([pts, np.ones((N, 1), dtype=np.float32)])
     arr.astype(np.float32).tofile(path)
 
 
@@ -231,12 +242,15 @@ def build_calib_json(client, side_name):
     h, w = img.shape[:2]
 
     info = client.simGetCameraInfo(CAM_NAME, vehicle_name=side_name)
-    K, _vfov = H.compute_intrinsics_from_horizontal_fov(info.fov, w, h)
+    # Prefer intrinsics from AirSim projection matrix when it looks valid
     P = np.array(info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
-    if not np.isfinite(P).all() or np.allclose(P, 0):
+    if np.isfinite(P).all() and not np.allclose(P, 0):
+        K = P[:3, :3].copy()
+    else:
+        # Fallback: derive from horizontal FOV
+        K, _vfov = H.compute_intrinsics_from_horizontal_fov(info.fov, w, h)
         P = np.eye(4, dtype=float); P[:3,:3] = K
-
-    # --- Build T_cam_lidar ---
+    # --- Build T_cam_lidar (lidar -> camera) ---
     T_cam_lidar = None
 
     # 1) # 1) Try runtime (preferred) – compose via vehicle pose so both camera & lidar are in world
@@ -266,6 +280,16 @@ def build_calib_json(client, side_name):
         except Exception:
             T_cam_lidar = None  # last resort
 
+    # IMPORTANT: your .bin is saved in DAIR Virtual LiDAR (x fwd, y left, z up),
+    # but AirSim extrinsics above are in LiDAR's native NED (x fwd, y right, z down).
+    # Convert the lidar *basis* on the right by post-multiplying with diag(1,-1,-1).
+    if T_cam_lidar is not None:
+        M4 = np.eye(4, dtype=float)
+        M4[1,1] = -1.0
+        M4[2,2] = -1.0
+        # Now T_cam_lidar maps *Virtual LiDAR* -> camera, matching your saved .bin basis.
+        T_cam_lidar = T_cam_lidar @ M4
+
     out = {
         "K": K, "P": P, "image_size": (w, h),
         "camera_name": CAM_NAME, "lidar_name": LIDAR_NAME
@@ -273,7 +297,6 @@ def build_calib_json(client, side_name):
     if T_cam_lidar is not None:
         out["T_cam_lidar"] = T_cam_lidar.tolist()
     return out
-
 
 def write_calib_json(path, calib):
     out = {
@@ -283,6 +306,10 @@ def write_calib_json(path, calib):
         "camera_name": CAM_NAME,
         "lidar_name":  LIDAR_NAME,
     }
+    # Preserve lidar→camera extrinsics when available (needed by validator & training)
+    if "T_cam_lidar" in calib and calib["T_cam_lidar"] is not None:
+        T = calib["T_cam_lidar"]
+        out["T_cam_lidar"] = T.tolist() if hasattr(T, "tolist") else T
     with open(path, "w") as f:
         json.dump(out, f, indent=2)
 
@@ -363,8 +390,10 @@ def kitti_json_from_result(res, cam_pose, P, img_size):
 
     R_obj = H.quaternion_to_rotation_matrix(adj.orientation)
     heading_cam = R_cam.T @ R_obj @ np.array([1, 0, 0], dtype=float)
-    rot_yaw = math.atan2(heading_cam[1], heading_cam[0])
-
+    # IMPORTANT: With your AirSim camera axes (X fwd, Y right, Z down) and the
+    # KITTI-style rotation_y convention, rotation_y corresponds to a rotation
+    # around +Z in AirSim camera axes. Use atan2(Y, X).
+    rot_yaw = math.atan2(heading_cam[1], heading_cam[0])    
     # label mapping (robust)
     lbl = str(res.get("label", "")).lower()
     if ("human" in lbl) or ("pedestrian" in lbl):
@@ -465,15 +494,16 @@ def point_in_lidar_fov_sensor_frame(p_s, h_start, h_end, v_lower, v_upper, range
     r = math.sqrt(x*x + y*y + z*z)
     if not (math.isfinite(r) and r > 0.0 and r <= range_m):
         return False
-    yaw = math.degrees(math.atan2(y, x))
-    v   = math.degrees(math.atan2(z, math.hypot(x, y)))
 
-    # Treat start==end as full 360° (common AirSim shorthand)
+    # Match detector: +left/+up angles (AirSim has y RIGHT, z DOWN → flip both)
+    yaw = math.degrees(math.atan2(-y, x))
+    v   = math.degrees(math.atan2(-z, math.hypot(x, y)))
+
+    # Keep your robust 360°/wrap handling
     delta = (h_end - h_start) % 360.0
     full360 = (abs(delta) < 1e-6)
     if (not full360) and (not _angle_in_interval_deg(yaw, h_start, h_end)):
         return False
-    
     return (v >= v_lower) and (v <= v_upper)
 
 
@@ -555,6 +585,52 @@ def build_lidar_candidates(client, id_to_label, vehicle_name, R_sw, t_ws, lidar_
     print(f"[PP] LiDAR FOV selected {len(results)} object(s) for {vehicle_name}.")
     return results
 
+
+def kitti_json_pp_from_res(res, R_sw, t_ws):
+    """
+    Build a DAIR-V2X PointPillars-style label in **LiDAR frame**.
+    - Location: LiDAR coords (x forward, y left, z up).
+    - Rotation: yaw around +Z of LiDAR (i.e., BEV heading).
+    """
+    if not res or not res.get("found", False):
+        return None
+    # Dimensions
+    h = float(res["H"]); w = float(res["W"]); l = float(res["L"])
+
+    # World -> LiDAR sensor (AirSim frame first)
+    center_w = np.array([res["adjusted_pose"].position.x_val,
+                         res["adjusted_pose"].position.y_val,
+                         res["adjusted_pose"].position.z_val], dtype=float)
+    center_s_air = R_sw @ (center_w - t_ws)
+    # AirSim (x,y,z) with y right, z down -> DAIR LiDAR (y left, z up)
+    center_s = center_s_air.copy()
+    center_s[1] = -center_s[1]
+    center_s[2] = -center_s[2]
+
+    # --- Yaw in LiDAR: compute in AirSim sensor frame, then flip to Virtual LiDAR ---
+    # p_s is center in AirSim LiDAR (x fwd, y right, z down)
+    p_s = R_sw @ (center_w - t_ws)
+    yaw_lid = math.atan2(p_s[1], p_s[0])  # AirSim sensor-frame yaw
+    # Flip to DAIR Virtual LiDAR: y←−y, z←−z ⇒ yaw changes sign
+    xv, yv, zv = p_s[0], -p_s[1], -p_s[2]
+    rot_z = -yaw_lid
+
+    # Type mapping (consistent with your KITTI writer)
+    lbl = str(res.get("label","")).lower()
+    tname = "Pedestrian" if (("human" in lbl) or ("pedestrian" in lbl) or H.infer_object_type_from_label(lbl)=="human") else "Car"
+
+    return {
+        "type": tname,
+        "occluded_state": 0,
+        "truncated_state": 0,
+        "alpha": -1.0,  # not used for PP; keep a placeholder
+        "2d_box": {"xmin": -1, "ymin": -1, "xmax": -1, "ymax": -1},
+        "3d_dimensions": {"h": h, "w": w, "l": l},
+        "3d_location": {"x": float(center_s[0]), "y": float(center_s[1]), "z": float(center_s[2])},
+        "rotation": rot_z
+    }
+
+
 def kitti_json_3donly_from_res(res, cam_pose, P, img_size):
     # 3D-only KITTI/DAIR entry, 2D bbox set to [-1,-1,-1,-1].
     if not res or not res.get("found", False):
@@ -573,8 +649,8 @@ def kitti_json_3donly_from_res(res, cam_pose, P, img_size):
     fwd_local = np.array([1,0,0], dtype=float)
     fwd_world = R_box @ fwd_local
     fwd_cam   = R_cam.T @ fwd_world
-    rot_y = float(math.atan2(fwd_cam[2], fwd_cam[0]))
-    # type mapping (reuse your heuristic)
+    # Consistent with KITTI rotation_y ↔ AirSim Z-yaw: use atan2(Y, X)
+    rot_y = float(math.atan2(fwd_cam[1], fwd_cam[0]))    # type mapping (reuse your heuristic)
     lbl = str(res.get("label","")).lower()
     label_type = "Pedestrian" if (("human" in lbl) or ("pedestrian" in lbl) or H.infer_object_type_from_label(lbl)=="human") else "Car"
     return {
@@ -668,12 +744,20 @@ def main():
             cam_pose_veh = veh_info.pose
             cam_pose_inf = inf_info.pose
 
-            # Pull P & sizes from our earlier calibs
-            P_veh = veh_calib["P"]; W_veh, H_veh = veh_calib["image_size"]
-            P_inf = inf_calib["P"]; W_inf, H_inf = inf_calib["image_size"]
+            # Always use the *live* AirSim projection matrix and actual image size
+            P_veh = np.array(veh_info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
+            if not (np.isfinite(P_veh).all() and not np.allclose(P_veh, 0)):
+                P_veh = np.array(veh_calib["P"], dtype=np.float64)
+            W_veh, H_veh = (veh_img.shape[1], veh_img.shape[0]) if veh_img is not None else tuple(veh_calib["image_size"])
+
+            P_inf = np.array(inf_info.proj_mat.matrix, dtype=np.float64).reshape((4,4))
+            if not (np.isfinite(P_inf).all() and not np.allclose(P_inf, 0)):
+                P_inf = np.array(inf_calib["P"], dtype=np.float64)
+            W_inf, H_inf = (inf_img.shape[1], inf_img.shape[0]) if inf_img is not None else tuple(inf_calib["image_size"])
 
             # Build targets via your class (CSV + scene + FOV/range gating)
             veh_targets = H.build_targets_from_csv_scene(car_client,   id_to_label, cam_pose_veh, P_veh, W_veh, H_veh)
+            # For infra: use the same *live* matrices; this fixes pedestrians being pre-gated by a stale P
             inf_targets = H.build_targets_from_csv_scene(drone_client, id_to_label, cam_pose_inf, P_inf, W_inf, H_inf)
 
             # Process each target using your per-target pipeline
@@ -729,9 +813,10 @@ def main():
                             pp_kept_v.append(res)
                 pp_dir_v = PATHS["veh"]["kitti_label_pp"]
                 os.makedirs(pp_dir_v, exist_ok=True)
+                # Write LiDAR-frame labels for PointPillars (kitti_label_pp)
                 out_v = []
                 for res in pp_kept_v:
-                    jj = kitti_json_3donly_from_res(res, cam_pose_veh, P_veh, (W_veh, H_veh))
+                    jj = kitti_json_pp_from_res(res, R_sw_v, t_ws_v)
                     if jj is not None:
                         out_v.append(jj)
                 with open(os.path.join(pp_dir_v, f"{t_ms:06d}.json"), "w") as f:
@@ -767,9 +852,10 @@ def main():
                             pp_kept_i.append(res)
                 pp_dir_i = PATHS["inf"]["kitti_label_pp"]
                 os.makedirs(pp_dir_i, exist_ok=True)
+                # Write LiDAR-frame labels for PointPillars (kitti_label_pp)
                 out_i = []
                 for res in pp_kept_i:
-                    jj = kitti_json_3donly_from_res(res, cam_pose_inf, P_inf, (W_inf, H_inf))
+                    jj = kitti_json_pp_from_res(res, R_sw_i, t_ws_i)
                     if jj is not None:
                         out_i.append(jj)
                 with open(os.path.join(pp_dir_i, f"{t_ms:06d}.json"), "w") as f:
