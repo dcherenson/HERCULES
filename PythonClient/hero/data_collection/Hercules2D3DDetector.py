@@ -21,6 +21,7 @@ import cv2
 import csv
 from collections import defaultdict
 from typing import Tuple
+import os, json, math
 
 # optional visualization
 try:
@@ -94,6 +95,13 @@ class Hercules2D3DDetector:
     # --- visible-objects print controls ---
     VISIBLE_EPS_METERS = 1.0
     MAX_VISIBLE_PRINT  = 200
+
+    # === LABEL IO (defaults off) ===
+    SAVE_LABELS: bool = False                 # enable/disable writing
+    LABEL_CAMERA_DIR: str | None = None       # .../vehicle-side/label/camera   or .../infrastructure-side/label/camera
+    LABEL_LIDAR_DIR: str | None = None        # .../vehicle-side/label/lidar    or .../infrastructure-side/label/lidar
+    FRAME_ID: str | None = None               # "%06d" from the caller
+    LIDAR_LABEL_REQUIRE_POINTS: bool = True   # keep only boxes with >=1 LiDAR point inside in LiDAR label
     
     # --- mapping csv + filters ---
     CSV_PATH      = "/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/csv_data/ue_label_vs_name.csv"
@@ -683,6 +691,10 @@ class Hercules2D3DDetector:
     # ================================================================================
     @staticmethod
     def process_target(target_cfg, client, cam_info, cam_pose, img, seg_img, depth_img, P):
+
+        amodal_box = None
+        tight_box  = None
+
         label = target_cfg["label"]
         pattern = target_cfg["ACTOR_PATTERN"]
         obj_type = target_cfg["OBJECT_TYPE"]
@@ -728,6 +740,7 @@ class Hercules2D3DDetector:
                 y1 = int(min(h - 1, math.ceil(v[use].max())))
                 if x1 > x0 and y1 > y0:
                     disp_bbox = (x0, y0, x1, y1)
+                    amodal_box = disp_bbox
                     if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
                         cv2.rectangle(disp_img, (x0, y0), (x1, y1), box_color, 2)
             if disp_bbox is None:
@@ -750,6 +763,7 @@ class Hercules2D3DDetector:
                     y1 = int(min(h - 1, math.ceil(cps[:,1].max())))
                     if x1 > x0 and y1 > y0:
                         disp_bbox = (x0, y0, x1, y1)
+                        amodal_box = disp_bbox
                         if not (DOMINANT_COLOR_ONLY or DRAW_ONLY_CORRECTED_2D):
                             cv2.rectangle(disp_img, (x0, y0), (x1, y1), box_color, 2)
 
@@ -760,7 +774,7 @@ class Hercules2D3DDetector:
                 )
                 if in_front and in_bounds_c:
                     cv2.drawMarker(disp_img, (int(round(u_c)), int(round(v_c))), box_color,
-                                   markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
+                                markerType=cv2.MARKER_CROSS, markerSize=10, thickness=2)
         else:
             print(f"[{label}] Skipping projection.")
 
@@ -850,6 +864,8 @@ class Hercules2D3DDetector:
                                 cv2.putText(disp_img, f"{label}: dominant color box", (tx0, max(0,ty0-6)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, TIGHT_BOX_COLOR_BGR, 1)
                                 print(f"[{label}] Dominant-color tight 2D box: ({tx0},{ty0})-({tx1},{ty1})")
+                                # keep the exact tight rect we drew
+                                tight_box = (tx0, ty0, tx1, ty1)
                                 drew_tight = True
                         else:
                             print(f"[{label}] Dominant color present but tight 2D box not found (min_pixels={REFIT_MIN_PIXELS}).")
@@ -880,8 +896,12 @@ class Hercules2D3DDetector:
             "corners_w": corners_w,
             "roi_pcd": roi_pcd,
             "box_color": box_color,
-            "drew_tight": drew_tight
+            "drew_tight": drew_tight,
+            "amodal_bbox_xyxy": amodal_box,
+            "tight_bbox_xyxy":  tight_box,
         }
+    
+
     @staticmethod
     def obb_from_points(world_pts):
         import numpy as _np
@@ -1047,7 +1067,8 @@ class Hercules2D3DDetector:
                 if t0 > t1:
                     return None
         cx0, cy0 = x0 + t0 * dx, y0 + t0 * dy
-        cx1, cy1 = x0 + t1 * dx, y1 + t1 * dy
+        # cx1, cy1 = x0 + t1 * dx, y1 + t1 * dy
+        cx1, cy1 = x0 + t1 * dx, y0 + t1 * dy
         return (cx0, cy0), (cx1, cy1)
 
     # --- full-frame segmentation color pruning (after depth-clip) ---
@@ -1066,14 +1087,80 @@ class Hercules2D3DDetector:
             m = (seg_img_bgr[:,:,0] == c[0]) & (seg_img_bgr[:,:,1] == c[1]) & (seg_img_bgr[:,:,2] == c[2])
             out[m] = c
         return out
+    
+    
+    def _write_dair_lite_labels(self, frame_id, results, cam_dir, lidar_dir):
+        """
+        Write DAIR-lite style labels.
+        - Camera JSON: list of {"type": Car|Pedestrian, "bbox":[x0,y0,x1,y1], "box_src": "..."}
+        - LiDAR  JSON: list of {"type": Car|Pedestrian, "center":[x,y,z], "size":[L,W,H], "yaw": rad}
+        """
+        os.makedirs(cam_dir,  exist_ok=True)
+        os.makedirs(lidar_dir, exist_ok=True)
+
+        cam_out = []
+        lidar_out = []
+
+        # world->sensor (LiDAR) transform saved in run()
+        R_sw = getattr(self, "_R_sw", None)
+        t_ws = getattr(self, "_t_ws", None)
+
+        for r in results:
+            if not r.get("found"):
+                continue
+
+            # --- Map to coarse class names for DAIR-lite
+            coarse = r.get("OBJECT_TYPE") or Hercules2D3DDetector.infer_object_type_from_label(r.get("label", ""))
+            typ = "Car" if coarse == "car" else ("Pedestrian" if coarse == "human" else (coarse.title() if coarse else ""))
+
+            # --- 2D camera label (exact box shown in UI)
+            box2d = r.get("final_camera_bbox_xyxy")
+            if box2d is not None:
+                x0, y0, x1, y1 = map(int, box2d)
+                cam_out.append({
+                    "type": typ,
+                    "bbox": [x0, y0, x1, y1],
+                    "box_src": r.get("final_camera_box_type")
+                })
+
+            # --- 3D LiDAR label (center/size/yaw in sensor frame)
+            # Require points-inside only if the count was computed upstream.
+            if self.LIDAR_LABEL_REQUIRE_POINTS and int(r.get("lidar_points_inside_n", 0)) <= 0:
+                continue
+            if R_sw is None or t_ws is None:
+                continue  # cannot map to sensor frame this frame
+
+            ap = r["adjusted_pose"]
+            c_w = np.array([ap.position.x_val, ap.position.y_val, ap.position.z_val], dtype=float)
+            c_s = R_sw @ (c_w - t_ws)
+
+            R_wb = Hercules2D3DDetector.quaternion_to_rotation_matrix(ap.orientation)
+            R_sb = R_sw @ R_wb
+            yaw = float(math.atan2(R_sb[1, 0], R_sb[0, 0]))  # yaw around +z in sensor frame
+
+            lidar_out.append({
+                "type":   typ,
+                "center": [float(c_s[0]), float(c_s[1]), float(c_s[2])],      # sensor frame (x fwd, y right, z down)
+                "size":   [float(r["L"]), float(r["W"]), float(r["H"])],      # L, W, H (m)
+                "yaw":    yaw
+            })
+
+        with open(os.path.join(cam_dir,   f"{frame_id}.json"), "w") as f:
+            json.dump(cam_out, f, indent=2)
+        with open(os.path.join(lidar_dir, f"{frame_id}.json"), "w") as f:
+            json.dump(lidar_out, f, indent=2)
+
+        print(f"[label] wrote {len(cam_out)} 2D and {len(lidar_out)} 3D labels for frame {frame_id}")
+
 
     # ===================== main =====================
-
     def run(self):
         np.set_printoptions(precision=4, suppress=True)
         client = self.CLIENT_CLASS(port=self.PORT)
         client.confirmConnection()
         print("Connected!\n")
+
+        results_lidar_only = []
 
         # Zero lens distortion if any
         dparams = client.simGetDistortionParams(self.CAMERA_NAME, vehicle_name=self.VEHICLE_NAME)
@@ -1097,9 +1184,7 @@ class Hercules2D3DDetector:
             cam_info = client.simGetCameraInfo(self.CAMERA_NAME, vehicle_name=self.VEHICLE_NAME)
             cam_pose = cam_info.pose if cam_info else None
 
-            # Make camera pose "true world": add per-vehicle spawn translation (like veh_pose above).
-            # AirSim often reports camera translation relative to the vehicle's spawn origin.
-            # We keep orientation as-is and shift the translation by (X,Y,Z) from settings.json.
+            # Make camera pose "true world": add per-vehicle spawn translation.
             try:
                 if cam_pose is not None:
                     spawn_xyz = Hercules2D3DDetector.load_vehicle_spawn_translation(
@@ -1109,7 +1194,6 @@ class Hercules2D3DDetector:
                     cam_pose = Hercules2D3DDetector.pose_add_translation(cam_pose, spawn_xyz)
             except Exception as e:
                 print(f"[WARN] camera spawn translation not applied: {e}")
-
 
             # IMPORTANT: pass vehicle_name on the simGetImages() call, not per request.
             reqs = [
@@ -1157,7 +1241,6 @@ class Hercules2D3DDetector:
                     lidar_data = client.getLidarData(self.LIDAR_NAME, self.VEHICLE_NAME)
                     print("LIDAR DATA TS: ", lidar_data.time_stamp)
                     print("TIME DIFFERENCE: ", (scene_resp.time_stamp - lidar_data.time_stamp)/(10**9))
-
                 except TypeError:
                     # Older signature may omit vehicle name
                     lidar_data = client.getLidarData(self.LIDAR_NAME)
@@ -1192,10 +1275,7 @@ class Hercules2D3DDetector:
                             # last resort: may return "default vehicle" on some builds
                             veh_pose = client.simGetVehiclePose()
 
-
                     # --- apply world spawn translation from settings.json ---
-                    # AirSim's simGetVehiclePose() translation is relative to the vehicle's spawn.
-                    # We add the configured spawn (X,Y,Z) so pose.translation becomes world-aligned.
                     try:
                         spawn_xyz = Hercules2D3DDetector.load_vehicle_spawn_translation(
                             Hercules2D3DDetector.SETTINGS_JSON_PATH,
@@ -1207,12 +1287,12 @@ class Hercules2D3DDetector:
 
                     R_vs = quaternion_to_rotation_matrix(lidar_data.pose.orientation)
                     t_vs = np.array([lidar_data.pose.position.x_val,
-                                     lidar_data.pose.position.y_val,
-                                     lidar_data.pose.position.z_val], dtype=float)
+                                    lidar_data.pose.position.y_val,
+                                    lidar_data.pose.position.z_val], dtype=float)
                     R_wv = quaternion_to_rotation_matrix(veh_pose.orientation)
                     t_wv = np.array([veh_pose.position.x_val,
-                                     veh_pose.position.y_val,
-                                     veh_pose.position.z_val], dtype=float)
+                                    veh_pose.position.y_val,
+                                    veh_pose.position.z_val], dtype=float)
 
                     # World points
                     p_world = (R_wv @ (R_vs @ pts.T + t_vs.reshape(3,1))).T + t_wv
@@ -1230,6 +1310,9 @@ class Hercules2D3DDetector:
                     t_ws = t_wv + (R_wv @ t_vs)
                     R_sw = R_ws.T
 
+                    self._R_sw = R_sw
+                    self._t_ws = t_ws
+
                     lidar_cfg = Hercules2D3DDetector.load_lidar_fov_from_settings(
                         Hercules2D3DDetector.SETTINGS_JSON_PATH,
                         Hercules2D3DDetector.VEHICLE_NAME,
@@ -1238,7 +1321,6 @@ class Hercules2D3DDetector:
                     print("LiDAR FOV/Range from settings:", lidar_cfg)
 
                     # === LiDAR SENSOR-FRAME WINDOW (NEW) ===
-                    # Convert world-frame points to LiDAR sensor frame
                     p_sensor = (R_sw @ (p_world.T - t_ws.reshape(3,1))).T
                     lidar_pcd_sensor = o3d.geometry.PointCloud()
                     lidar_pcd_sensor.points = o3d.utility.Vector3dVector(p_sensor)
@@ -1336,19 +1418,63 @@ class Hercules2D3DDetector:
                     for j, c in enumerate(res["corners_w"]):
                         print(f"  [{j}] x={c[0]:.4f}, y={c[1]:.4f}, z={c[2]:.4f}")
 
-
             # After building id_to_label and camera-based TARGETS/results
             actor_names_from_camera = {r["actor_name"] for r in results if r.get("found", False)}
 
-            results_lidar_all = Hercules2D3DDetector.build_lidar_targets(
-                client, id_to_label, R_sw, t_ws, lidar_cfg
-            )
-            # Keep only those NOT already in the camera-based set (to avoid duplicate boxes)
-            results_lidar_only = [r for r in results_lidar_all if r["actor_name"] not in actor_names_from_camera]
+            if (R_sw is not None) and (t_ws is not None) and ('lidar_cfg' in locals()):
+                results_lidar_all = Hercules2D3DDetector.build_lidar_targets(
+                    client, id_to_label, R_sw, t_ws, lidar_cfg
+                )
+                # Keep only those NOT already in the camera-based set (to avoid duplicate boxes)
+                results_lidar_only = [r for r in results_lidar_all if r["actor_name"] not in actor_names_from_camera]
+            else:
+                results_lidar_only = []
 
         finally:
             # ===================== END SINGLE PAUSE WINDOW =====================
             client.simPause(False)
+
+        # ============ (1c) Decide & store the EXACT 2D box that was shown ============
+        # This ensures the label writer can save the same rectangle the UI displayed.
+        for res in results:
+            if not res.get("found", False):
+                continue
+            if (DRAW_ONLY_CORRECTED_2D or DOMINANT_COLOR_ONLY):
+                # UI policy: show tight boxes only (skip if none found)
+                final_2d = res.get("tight_bbox_xyxy")
+                final_src = "tight" if final_2d is not None else None
+            else:
+                # UI policy: show tight when available, else fall back to amodal
+                final_2d = res.get("tight_bbox_xyxy") or res.get("amodal_bbox_xyxy")
+                final_src = "tight" if res.get("tight_bbox_xyxy") is not None else ("amodal" if final_2d is not None else None)
+
+            res["final_camera_bbox_xyxy"] = final_2d
+            res["final_camera_box_type"]  = final_src
+            if final_src is None:
+                print(f"[{res.get('label','?')}] No 2D box to save under current UI policy.")
+            else:
+                x0,y0,x1,y1 = final_2d
+                print(f"[{res.get('label','?')}] final 2D box ({final_src}) = ({x0},{y0})–({x1},{y1})")
+
+            # Combine camera-selected and LiDAR-FOV-only results for labeling
+            results_all = results + results_lidar_only
+
+            # Count LiDAR points inside each 3D cuboid (for gating)
+            if 'p_world' in locals() and p_world is not None:
+                for r in results_all:
+                    if not r.get("found"): 
+                        continue
+                    inside = Hercules2D3DDetector.points_inside_oriented_box(
+                        p_world, r["adjusted_pose"], r["L"], r["W"], r["H"]
+                    )
+                    r["lidar_points_inside_n"] = int(inside.sum())
+            else:
+                for r in results_all:
+                    r["lidar_points_inside_n"] = 0
+
+            # Now write BOTH 2D and 3D labels for the combined set
+            if self.SAVE_LABELS and self.FRAME_ID and self.LABEL_CAMERA_DIR and self.LABEL_LIDAR_DIR:
+                self._write_dair_lite_labels(self.FRAME_ID, results_all, self.LABEL_CAMERA_DIR, self.LABEL_LIDAR_DIR)
 
         # (6) 2D annotation & legend (after unpause, using frozen results)
         cv2.putText(disp, f"Camera: {self.CAMERA_NAME}", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
@@ -1373,7 +1499,7 @@ class Hercules2D3DDetector:
 
         title = "Projected 3D Bounding Box (dominant color only)" if DOMINANT_COLOR_ONLY else \
                 ("Projected 3D Bounding Box (corrected only)" if DRAW_ONLY_CORRECTED_2D else
-                 "Projected 3D Bounding Box (auto from CSV+FOV)")
+                "Projected 3D Bounding Box (auto from CSV+FOV)")
         cv2.namedWindow(title, cv2.WINDOW_NORMAL)
         cv2.imshow(title, disp)
         print("Press any key to exit (after Open3D closes if opened).")
@@ -1450,13 +1576,12 @@ class Hercules2D3DDetector:
                         if not res.get("found", False):
                             continue
 
-                        # NEW: drop boxes that have zero LiDAR points inside
+                        # Drop boxes that have zero LiDAR points inside
                         if 'p_world' in locals() and p_world is not None:
                             inside = Hercules2D3DDetector.points_inside_oriented_box(
                                 p_world, res["adjusted_pose"], res["L"], res["W"], res["H"]
                             )
                             if int(inside.sum()) == 0:
-                                # no LiDAR returns in this cuboid → skip drawing it in the LiDAR view
                                 continue
 
                         # transform and draw the remaining box in LiDAR (sensor) frame

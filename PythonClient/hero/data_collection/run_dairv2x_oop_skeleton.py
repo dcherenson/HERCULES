@@ -394,6 +394,10 @@ def _ensure_dirs():
         os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "image"),
         os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "velodyne"),
         os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "calib", "camera_intrinsic"),
+        os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "label", "camera"),
+        os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "label", "lidar"),
+        os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "label", "camera"),
+        os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "label", "lidar"),
     ]
     for p in paths:
         os.makedirs(p, exist_ok=True)
@@ -510,6 +514,16 @@ def main():
         H.CLIENT_CLASS = FrozenVeh
         if CAMERA_NAME_OVERRIDE:
             H.CAMERA_NAME = CAMERA_NAME_OVERRIDE
+
+        veh_cam_dir = os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "label", "camera")
+        veh_lid_dir = os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "label", "lidar")
+
+        detector.SAVE_LABELS = True
+        detector.FRAME_ID = frame_id
+        detector.LABEL_CAMERA_DIR = veh_cam_dir
+        detector.LABEL_LIDAR_DIR  = veh_lid_dir
+        detector.LIDAR_LABEL_REQUIRE_POINTS = True  # only keep boxes with ≥1 LiDAR return
+
         detector.run()  # blocks until you close all VEHICLE windows
 
         # Still paused
@@ -522,6 +536,16 @@ def main():
         H.CLIENT_CLASS = FrozenInf
         if CAMERA_NAME_OVERRIDE:
             H.CAMERA_NAME = CAMERA_NAME_OVERRIDE
+
+        inf_cam_dir = os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "label", "camera")
+        inf_lid_dir = os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "label", "lidar")
+
+        detector.SAVE_LABELS = True
+        detector.FRAME_ID = frame_id
+        detector.LABEL_CAMERA_DIR = inf_cam_dir
+        detector.LABEL_LIDAR_DIR  = inf_lid_dir
+        detector.LIDAR_LABEL_REQUIRE_POINTS = True
+
         detector.run()  # blocks until you close all INFRA windows
 
         # Ensure paused after both sides
