@@ -74,7 +74,7 @@ def _client_for_vehicle(vehicle_name: str):
     return cli
 
 # =========================
-# Calib from settings.json only (DAIR format)
+# Linear algebra helpers
 # =========================
 def _deg2rad(d): return d * math.pi / 180.0
 
@@ -83,15 +83,9 @@ def _R_from_rpy_deg(roll_deg, pitch_deg, yaw_deg):
     cr, sr = math.cos(r), math.sin(r)
     cp, sp = math.cos(p), math.sin(p)
     cy, sy = math.cos(y), math.sin(y)
-    Rx = np.array([[1, 0, 0],
-                   [0, cr, -sr],
-                   [0, sr,  cr]], dtype=float)
-    Ry = np.array([[ cp, 0, sp],
-                   [  0, 1,  0],
-                   [-sp, 0, cp]], dtype=float)
-    Rz = np.array([[cy, -sy, 0],
-                   [sy,  cy, 0],
-                   [ 0,   0, 1]], dtype=float)
+    Rx = np.array([[1, 0, 0],[0, cr, -sr],[0, sr,  cr]], dtype=float)
+    Ry = np.array([[ cp, 0, sp],[  0, 1,  0],[-sp, 0, cp]], dtype=float)
+    Rz = np.array([[cy, -sy, 0],[sy,  cy, 0],[ 0,   0, 1]], dtype=float)
     return Rz @ Ry @ Rx  # AirSim NED: roll X, pitch Y, yaw Z
 
 def _T_from_xyzrpy(x, y, z, roll_deg, pitch_deg, yaw_deg):
@@ -100,15 +94,74 @@ def _T_from_xyzrpy(x, y, z, roll_deg, pitch_deg, yaw_deg):
     T[:3,  3] = np.array([x, y, z], dtype=float)
     return T
 
+def _quat_to_R(w, x, y, z):
+    # AirSim uses (w,x,y,z)
+    R = np.array([
+        [1-2*(y*y+z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
+        [2*(x*y + z*w), 1-2*(x*x+z*z), 2*(y*z - x*w)],
+        [2*(x*z - y*w), 2*(y*z + x*w), 1-2*(x*x+y*y)]
+    ], dtype=float)
+    return R
+
+def _hat4(R, t):
+    T = np.eye(4, dtype=float)
+    T[:3,:3] = R
+    T[:3, 3] = t
+    return T
+
+# AirSim↔DAIR basis change (x same, flip y & z)
+_B = np.eye(4, dtype=float)
+_B[1,1] = -1.0
+_B[2,2] = -1.0
+
+# =========================
+# Settings readers
+# =========================
 def _load_settings(path):
     with open(path, "r") as f:
         return json.load(f)
 
+def _vehicle_spawn_xyz_from_settings(settings_path, vehicle_name):
+    try:
+        js = _load_settings(settings_path)
+        v = js["Vehicles"][vehicle_name]
+        return np.array([v.get("X", 0.0), v.get("Y", 0.0), v.get("Z", 0.0)], dtype=float)
+    except Exception:
+        return np.zeros(3, dtype=float)
+
+def _cam_size_hfov_from_settings(settings_path, vehicle_name, cam_name):
+    """
+    Return (width, height, hfov_deg) for the Scene image type from settings.json.
+    If you prefer the live value from AirSim, you can query:
+        info = ctrl.simGetCameraInfo(cam_name, vehicle_name)
+        hfov_deg = float(getattr(info, 'fov', hfov_deg))
+    """
+    js = _load_settings(settings_path)
+    v = js["Vehicles"][vehicle_name]
+    c = v["Cameras"][cam_name]
+    width = height = None
+    hfov_deg = None
+    for cap in c.get("CaptureSettings", []):
+        if int(cap.get("ImageType", 0)) == int(airsim.ImageType.Scene):
+            width = int(cap.get("Width", 1920))
+            height = int(cap.get("Height", 1080))
+            hfov_deg = float(cap.get("FOV_Degrees", 90.0))
+            break
+    if width is None or height is None:
+        width, height = 1920, 1080
+    if hfov_deg is None:
+        hfov_deg = 90.0
+    return width, height, hfov_deg
+
+# =========================
+# Extrinsics from settings.json (LiDAR mounts)
+# =========================
 def T_cam_lidar_from_settings(vehicle_name, cam_name, lidar_name, settings_path):
     """
     Build lidar→camera extrinsics purely from settings.json (vehicle->sensor mounts).
     AirSim stores sensor poses as vehicle→sensor. So:
       T_cam_lidar = inv(T_vehicle→camera) @ T_vehicle→lidar
+    (all in AirSim basis; caller can basis-flip to DAIR)
     """
     js = _load_settings(settings_path)
     v = js["Vehicles"][vehicle_name]
@@ -127,7 +180,7 @@ def T_cam_lidar_from_settings(vehicle_name, cam_name, lidar_name, settings_path)
         l.get("Roll", 0.0), l.get("Pitch", 0.0), l.get("Yaw", 0.0)
     )
 
-    # lidar→camera in AirSim’s native frames (x fwd, y right, z down)
+    # lidar→camera (AirSim basis)
     T_c_l = np.linalg.inv(T_v_c) @ T_v_l
     return T_c_l
 
@@ -142,10 +195,8 @@ def _save_dair_lidar2cam_json(path, T_cam_lidar):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     R = T_cam_lidar[:3, :3]
     t = T_cam_lidar[:3, 3]
-    obj = {
-        "rotation": R.tolist(),
-        "translation": [float(t[0]), float(t[1]), float(t[2])]
-    }
+    obj = {"rotation": R.tolist(),
+           "translation": [float(t[0]), float(t[1]), float(t[2])]}
     with open(path, "w") as f:
         json.dump(obj, f, indent=2)
     print(f"[calib] Wrote {path}")
@@ -161,35 +212,188 @@ def _compute_static_lidar2cam_mats():
 
     # Basis change on the LiDAR side only: AirSim (x fwd, y right, z down)
     # -> DAIR Virtual LiDAR (x fwd, y left, z up)
-    B = np.eye(4, dtype=float)
-    B[1,1] = -1.0  # flip Y
-    B[2,2] = -1.0  # flip Z
-
-    # Map from **DAIR Virtual LiDAR** → camera frame
-    T_c_vl_veh = T_c_l_veh @ B
-    T_c_vl_inf = T_c_l_inf @ B
+    # T_cam←vl = T_cam←l_AS * B
+    T_c_vl_veh = T_c_l_veh @ _B
+    T_c_vl_inf = T_c_l_inf @ _B
     return T_c_vl_veh, T_c_vl_inf
 
-def _write_per_frame_calib(frame_id: str, T_c_vl_veh: np.ndarray, T_c_vl_inf: np.ndarray):
+def _write_per_frame_lidar_to_camera(frame_id: str, T_c_vl_veh: np.ndarray, T_c_vl_inf: np.ndarray):
     """
     Write DAIR-style lidar->camera JSONs for BOTH sides using the provided frame_id.
     """
     veh_dir = os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "calib", "lidar_to_camera")
     inf_dir = os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "calib", "virtuallidar_to_camera")
-    veh_json = os.path.join(veh_dir, f"{frame_id}.json")
-    inf_json = os.path.join(inf_dir, f"{frame_id}.json")
-    _save_dair_lidar2cam_json(veh_json, T_c_vl_veh)
-    _save_dair_lidar2cam_json(inf_json, T_c_vl_inf)
+    _save_dair_lidar2cam_json(os.path.join(veh_dir, f"{frame_id}.json"), T_c_vl_veh)
+    _save_dair_lidar2cam_json(os.path.join(inf_dir, f"{frame_id}.json"), T_c_vl_inf)
 
 # =========================
-# NEW: Save RGB & LiDAR (DAIR/KitTI style)
+# NEW: world extrinsics (DAIR basis)
+# =========================
+def _airsim_vehicle_pose_T_world_vehicle(ctrl, vehicle_name):
+    """
+    Return T_world<-vehicle in AirSim basis (x fwd, y right, z down).
+    We use kinematics_estimated and then add spawn translation offset
+    so translation is absolute (not just relative to start).
+    """
+    R_wv = np.eye(3, dtype=float)
+    t_wv = np.zeros(3, dtype=float)
+    try:
+        if hasattr(ctrl, "getCarState"):
+            st = ctrl.getCarState(vehicle_name=vehicle_name)
+            pos = st.kinematics_estimated.position
+            ori = st.kinematics_estimated.orientation
+        else:
+            st = ctrl.getMultirotorState(vehicle_name=vehicle_name)
+            pos = st.kinematics_estimated.position
+            ori = st.kinematics_estimated.orientation
+        R_wv = _quat_to_R(ori.w_val, ori.x_val, ori.y_val, ori.z_val)
+        t_wv = np.array([pos.x_val, pos.y_val, pos.z_val], dtype=float)
+    except Exception:
+        # last resort: simGetVehiclePose
+        try:
+            vp = ctrl.simGetVehiclePose(vehicle_name=vehicle_name)
+            R_wv = _quat_to_R(vp.orientation.w_val, vp.orientation.x_val, vp.orientation.y_val, vp.orientation.z_val)
+            t_wv = np.array([vp.position.x_val, vp.position.y_val, vp.position.z_val], dtype=float)
+        except Exception:
+            pass
+
+    # Add spawn translation from settings.json (if any)
+    t_spawn = _vehicle_spawn_xyz_from_settings(SETTINGS_JSON_PATH, vehicle_name)
+    t_wv = t_wv + t_spawn
+    return _hat4(R_wv, t_wv)
+
+def _T_vehicle_lidar_from_settings(vehicle_name, lidar_name, settings_path):
+    js = _load_settings(settings_path)
+    v = js["Vehicles"][vehicle_name]
+    l = v["Sensors"][lidar_name]
+    return _T_from_xyzrpy(
+        l.get("X", 0.0), l.get("Y", 0.0), l.get("Z", 0.0),
+        l.get("Roll", 0.0), l.get("Pitch", 0.0), l.get("Yaw", 0.0)
+    )  # AirSim basis
+
+def _save_RT_json(path, T_dest_src_DAIR):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    R = T_dest_src_DAIR[:3,:3]
+    t = T_dest_src_DAIR[:3, 3]
+    obj = {"rotation": R.tolist(),
+           "translation": [float(t[0]), float(t[1]), float(t[2])]}
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+    print(f"[calib] Wrote {path}")
+
+def _write_world_extrinsics_for_frame(frame_id, ctrl_veh, ctrl_inf):
+    """
+    Writes:
+      - infrastructure-side/calib/virtuallidar_to_world/{frame}.json   (T_world<-vl)
+      - vehicle-side/calib/lidar_to_novatel/{frame}.json               (T_novatel<-lidar), NovAtel≡vehicle
+      - vehicle-side/calib/novatel_to_world/{frame}.json               (T_world<-novatel)
+    All in DAIR basis (x fwd, y left, z up).
+    """
+    # === Infrastructure (assume "infrastructure vehicle" = INFRA_SIDE_NAME) ===
+    T_w_v_AS_inf = _airsim_vehicle_pose_T_world_vehicle(ctrl_inf, INFRA_SIDE_NAME)  # AirSim basis
+    T_v_l_AS_inf = _T_vehicle_lidar_from_settings(INFRA_SIDE_NAME, LIDAR_NAME, SETTINGS_JSON_PATH)
+    T_w_l_AS_inf = T_w_v_AS_inf @ T_v_l_AS_inf
+
+    # Basis change: DAIR = B * AirSim * B  (since B == B^{-1})
+    T_w_l_DAIR_inf = _B @ T_w_l_AS_inf @ _B
+
+    inf_dir_w = os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "calib", "virtuallidar_to_world")
+    _save_RT_json(os.path.join(inf_dir_w, f"{frame_id}.json"), T_w_l_DAIR_inf)
+
+    # === Vehicle side (NovAtel ≡ vehicle body) ===
+    T_w_v_AS_veh = _airsim_vehicle_pose_T_world_vehicle(ctrl_veh, VEHICLE_SIDE_NAME)  # AirSim basis
+    T_v_l_AS_veh = _T_vehicle_lidar_from_settings(VEHICLE_SIDE_NAME, LIDAR_NAME, SETTINGS_JSON_PATH)
+
+    # lidar -> novatel (vehicle): T_novatel<-lidar = T_vehicle<-lidar (basis-converted)
+    T_n_l_AS_veh = T_v_l_AS_veh
+    T_n_l_DAIR_veh = _B @ T_n_l_AS_veh @ _B
+
+    # novatel -> world: T_world<-novatel = T_world<-vehicle (basis-converted)
+    T_w_n_AS_veh = T_w_v_AS_veh
+    T_w_n_DAIR_veh = _B @ T_w_n_AS_veh @ _B
+
+    veh_dir_nl = os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "calib", "lidar_to_novatel")
+    veh_dir_nw = os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "calib", "novatel_to_world")
+    _save_RT_json(os.path.join(veh_dir_nl, f"{frame_id}.json"), T_n_l_DAIR_veh)
+    _save_RT_json(os.path.join(veh_dir_nw, f"{frame_id}.json"), T_w_n_DAIR_veh)
+
+# =========================
+# NEW: intrinsics (DAIR/ROS CameraInfo-style)
+# =========================
+def _K_from_hfov(width, height, hfov_deg):
+    """Rectilinear pinhole, square pixels: fx=fy=(W/2)/tan(hfov/2)."""
+    fx = (width / 2.0) / math.tan(_deg2rad(hfov_deg) / 2.0)
+    fy = fx  # with square pixels and rectilinear lens
+    cx = width  / 2.0
+    cy = height / 2.0
+    K = np.array([[fx, 0.0, cx],
+                  [0.0, fy, cy],
+                  [0.0, 0.0, 1.0]], dtype=float)
+    return K
+
+def _camera_info_json(width, height, K):
+    """
+    Build a DAIR/ROS-like CameraInfo JSON.
+    Includes both cam_K/K, cam_D/D, R, P, width, height, etc.
+    """
+    # Distortion disabled in your pipeline
+    D = [0.0, 0.0, 0.0, 0.0, 0.0]
+    R = np.eye(3, dtype=float)
+    # Projection (no baseline)
+    P = np.zeros((3,4), dtype=float)
+    P[0,0] = K[0,0]; P[0,2] = K[0,2]
+    P[1,1] = K[1,1]; P[1,2] = K[1,2]
+    P[2,2] = 1.0
+
+    # Flatten helpers
+    def fl3x3(m): return [float(x) for x in m.reshape(-1).tolist()]
+    def fl3x4(m): return [float(x) for x in m.reshape(-1).tolist()]
+
+    obj = {
+        # Minimal DAIR fields many loaders look for:
+        "cam_K": fl3x3(K),
+        "cam_D": D,
+        # Full ROS-style fields (mirroring real DAIR JSONs):
+        "width": int(width),
+        "height": int(height),
+        "distortion_model": "plumb_bob",
+        "K": fl3x3(K),
+        "D": D,
+        "R": fl3x3(R),
+        "P": fl3x4(P),
+        "binning_x": 0,
+        "binning_y": 0,
+        "roi": {"x_offset": 0, "y_offset": 0, "height": 0, "width": 0, "do_rectify": False},
+        "header": {
+            "seq": 0,
+            "stamp": {"secs": 0, "nsecs": 0},
+            "frame_id": ""
+        }
+    }
+    return obj
+
+def _write_intrinsics_for_frame(frame_id: str, vehicle_name: str, cam_name: str, side_dir: str):
+    width, height, hfov_deg = _cam_size_hfov_from_settings(SETTINGS_JSON_PATH, vehicle_name, cam_name)
+    K = _K_from_hfov(width, height, hfov_deg)
+    obj = _camera_info_json(width, height, K)
+    out_dir = os.path.join(DAIRV2X_C_ROOT, side_dir, "calib", "camera_intrinsic")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{frame_id}.json")
+    with open(out_path, "w") as f:
+        json.dump(obj, f, indent=2)
+    print(f"[intrinsics] Wrote {out_path} (HFOV={hfov_deg:.4f}°, {width}x{height})")
+
+# =========================
+# RGB & LiDAR saving (DAIR/KITTI style)
 # =========================
 def _ensure_dirs():
     paths = [
         os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "image"),
         os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "velodyne"),
+        os.path.join(DAIRV2X_C_ROOT, "vehicle-side", "calib", "camera_intrinsic"),
         os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "image"),
         os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "velodyne"),
+        os.path.join(DAIRV2X_C_ROOT, "infrastructure-side", "calib", "camera_intrinsic"),
     ]
     for p in paths:
         os.makedirs(p, exist_ok=True)
@@ -220,9 +424,8 @@ def _capture_lidar_bin(ctrl, vehicle_name: str, lidar_name: str, path_bin: str):
     pts = np.array(ld.point_cloud, dtype=np.float32).reshape(-1, 3) if ld and len(ld.point_cloud) >= 3 else np.zeros((0,3), dtype=np.float32)
 
     if pts.shape[0] > 0:
-        # AirSim -> DAIR/KITTI basis: flip Y and Z
-        pts[:, 1] *= -1.0
-        pts[:, 2] *= -1.0
+        pts[:, 1] *= -1.0  # flip Y
+        pts[:, 2] *= -1.0  # flip Z
         intensity = np.ones((pts.shape[0], 1), dtype=np.float32)
         out = np.hstack([pts.astype(np.float32), intensity])
     else:
@@ -283,11 +486,16 @@ def main():
     ctrl_inf.simPause(True)
 
     for t in range(N_STEPS):
-        # KITTI-style frame id: zero-padded counter starting at 0
-        frame_id = f"{t:06d}"
+        frame_id = f"{t:06d}"  # KITTI-style zero-padded
 
-        # Write DAIR-style per-frame calib JSONs (same rigid transform each time)
-        _write_per_frame_calib(frame_id, T_c_vl_veh, T_c_vl_inf)
+        # Write DAIR-style per-frame extrinsics:
+        #   lidar->camera (both sides)
+        _write_per_frame_lidar_to_camera(frame_id, T_c_vl_veh, T_c_vl_inf)
+        #   virtuallidar->world (infra) and vehicle's novatel chain
+        _write_world_extrinsics_for_frame(frame_id, ctrl_veh, ctrl_inf)
+        #   camera intrinsics (both sides)
+        _write_intrinsics_for_frame(frame_id, VEHICLE_SIDE_NAME, CAM_NAME, "vehicle-side")
+        _write_intrinsics_for_frame(frame_id, INFRA_SIDE_NAME,  CAM_NAME, "infrastructure-side")
 
         # Save RGB and LiDAR for BOTH sides at the SAME paused instant
         _save_rgb_and_lidar_for_frame(frame_id, ctrl_veh, ctrl_inf)
@@ -319,11 +527,10 @@ def main():
         # Ensure paused after both sides
         ctrl_veh.simPause(True); ctrl_inf.simPause(True)
 
-        # Advance exactly one step using ONLY the DRONE (infrastructure) client,
-        # then pause again, unless last timestep
+        # Advance exactly one step using ONLY the DRONE (infrastructure) client
         if t < N_STEPS - 1:
-            _advance_sim_once(ctrl_inf, ADVANCE_DT_SECONDS)  # step via DRONE client only
-            ctrl_veh.simPause(True)  # keep both explicitly paused
+            _advance_sim_once(ctrl_inf, ADVANCE_DT_SECONDS)
+            ctrl_veh.simPause(True)
         else:
             ctrl_veh.simPause(True); ctrl_inf.simPause(True)
             print("Completed all timesteps.")
