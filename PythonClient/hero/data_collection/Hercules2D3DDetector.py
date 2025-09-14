@@ -133,6 +133,8 @@ class Hercules2D3DDetector:
     LIDAR_STRIDE = 1              # 1 = keep all points; >1 to subsample
     LIDAR_VOXEL_DOWNSAMPLE = None # meters; set to 0 or None to disable
     LIDAR_COLOR_RGB = (1.0, 0.0, 0.0)  # red
+    CAMERA_LABEL_REQUIRE_POINTS: bool = False  # set True to match LiDAR counts
+
 
     # === LiDAR config from AirSim settings.json (absolute path) ===
     SETTINGS_JSON_PATH = "/home/sgarimella34/Documents/AirSim/settings.json"
@@ -1087,71 +1089,129 @@ class Hercules2D3DDetector:
             m = (seg_img_bgr[:,:,0] == c[0]) & (seg_img_bgr[:,:,1] == c[1]) & (seg_img_bgr[:,:,2] == c[2])
             out[m] = c
         return out
-    
-    
+
+
     def _write_dair_lite_labels(self, frame_id, results, cam_dir, lidar_dir):
-        """
-        Write DAIR-lite style labels.
-        - Camera JSON: list of {"type": Car|Pedestrian, "bbox":[x0,y0,x1,y1], "box_src": "..."}
-        - LiDAR  JSON: list of {"type": Car|Pedestrian, "center":[x,y,z], "size":[L,W,H], "yaw": rad}
-        """
         os.makedirs(cam_dir,  exist_ok=True)
         os.makedirs(lidar_dir, exist_ok=True)
 
-        cam_out = []
+        cam_out  = []
         lidar_out = []
 
-        # world->sensor (LiDAR) transform saved in run()
-        R_sw = getattr(self, "_R_sw", None)
-        t_ws = getattr(self, "_t_ws", None)
+        # cached transforms from run()
+        R_sw = getattr(self, "_R_sw", None)  # world->sensor (LiDAR)
+        t_ws = getattr(self, "_t_ws", None)  # sensor origin in world
+        cam_pose = getattr(self, "_cam_pose", None)
 
         for r in results:
             if not r.get("found"):
                 continue
 
-            # --- Map to coarse class names for DAIR-lite
-            coarse = r.get("OBJECT_TYPE") or Hercules2D3DDetector.infer_object_type_from_label(r.get("label", ""))
-            typ = "Car" if coarse == "car" else ("Pedestrian" if coarse == "human" else (coarse.title() if coarse else ""))
-
-            # --- 2D camera label (exact box shown in UI)
-            box2d = r.get("final_camera_bbox_xyxy")
-            if box2d is not None:
-                x0, y0, x1, y1 = map(int, box2d)
-                cam_out.append({
-                    "type": typ,
-                    "bbox": [x0, y0, x1, y1],
-                    "box_src": r.get("final_camera_box_type")
-                })
-
-            # --- 3D LiDAR label (center/size/yaw in sensor frame)
-            # Require points-inside only if the count was computed upstream.
-            if self.LIDAR_LABEL_REQUIRE_POINTS and int(r.get("lidar_points_inside_n", 0)) <= 0:
+            # ---------- keep camera & lidar sets identical ----------
+            # require at least one LiDAR point inside if flag(s) say so
+            lidar_pts = int(r.get("lidar_points_inside_n", 0))
+            if getattr(self, "CAMERA_LABEL_REQUIRE_LIDAR_POINTS", False) and lidar_pts <= 0:
                 continue
-            if R_sw is None or t_ws is None:
-                continue  # cannot map to sensor frame this frame
+            if getattr(self, "LIDAR_LABEL_REQUIRE_POINTS", False) and lidar_pts <= 0:
+                continue
 
+            # ---------- standardize class names ----------
+            obj_type = Hercules2D3DDetector.infer_object_type_from_label(r.get("label", ""))
+            dair_type = "Pedestrian" if obj_type == "human" else "Car"
+
+            # ---------- 2D box ----------
+            box2d = r.get("final_camera_bbox_xyxy")
+            if box2d is None:
+                xmin = ymin = xmax = ymax = -1.0
+            else:
+                xmin, ymin, xmax, ymax = [float(v) for v in box2d]
+
+            # ---------- 3D size (H,W,L) from your profile dims ----------
+            L = float(r["L"]); W = float(r["W"]); H = float(r["H"])
+
+            # ---------- world-center of the oriented box ----------
             ap = r["adjusted_pose"]
-            c_w = np.array([ap.position.x_val, ap.position.y_val, ap.position.z_val], dtype=float)
-            c_s = R_sw @ (c_w - t_ws)
+            c_w = np.array(
+                [ap.position.x_val, ap.position.y_val, ap.position.z_val],
+                dtype=float
+            )
 
-            R_wb = Hercules2D3DDetector.quaternion_to_rotation_matrix(ap.orientation)
-            R_sb = R_sw @ R_wb
-            yaw = float(math.atan2(R_sb[1, 0], R_sb[0, 0]))  # yaw around +z in sensor frame
+            # ---------- CAMERA JSON ----------
+            # location & yaw in the *camera* frame; string 3d_location per DAIR camera files
+            if cam_pose is not None:
+                R_cam = Hercules2D3DDetector.quaternion_to_rotation_matrix(cam_pose.orientation)  # camera->world
+                cam_p = np.array([cam_pose.position.x_val,
+                                cam_pose.position.y_val,
+                                cam_pose.position.z_val], dtype=float)
+                ap = r["adjusted_pose"]
+                c_w = np.array([ap.position.x_val, ap.position.y_val, ap.position.z_val], dtype=float)
+                c_c = R_cam.T @ (c_w - cam_p)  # world -> camera
 
-            lidar_out.append({
-                "type":   typ,
-                "center": [float(c_s[0]), float(c_s[1]), float(c_s[2])],      # sensor frame (x fwd, y right, z down)
-                "size":   [float(r["L"]), float(r["W"]), float(r["H"])],      # L, W, H (m)
-                "yaw":    yaw
-            })
+                # rotation_y (yaw around camera vertical) — forward axis of the box, expressed in camera frame
+                R_box   = Hercules2D3DDetector.quaternion_to_rotation_matrix(ap.orientation)
+                fwd_cam = R_cam.T @ (R_box @ np.array([1.0, 0.0, 0.0], dtype=float))
+                rot_cam = float(math.atan2(fwd_cam[2], fwd_cam[0]))
+            else:
+                c_c = c_w
+                rot_cam = 0.0
+
+            cam_rec = {
+                "type": dair_type,
+                "truncated_state": "0",
+                "occluded_state": "0",
+                "alpha": "0",
+                "2d_box": {
+                    "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax
+                },
+                "3d_dimensions": {  # DAIR uses h,w,l
+                    "h": H, "w": W, "l": L
+                },
+                "3d_location": {    # strings in CAMERA json (matches DAIR sample you pasted)
+                    "x": f"{c_c[0]:.6f}",
+                    "y": f"{c_c[1]:.6f}",
+                    "z": f"{c_c[2]:.6f}"
+                },
+                "rotation": rot_cam
+            }
+            cam_out.append(cam_rec)
+
+            # ---------- LiDAR JSON ----------
+            # location & yaw in the *sensor* (LiDAR) frame; numeric 3d_location per DAIR LiDAR files
+            if R_sw is not None and t_ws is not None:
+                c_s  = R_sw @ (c_w - t_ws)               # world->sensor
+                R_wb = Hercules2D3DDetector.quaternion_to_rotation_matrix(ap.orientation)
+                R_sb = R_sw @ R_wb
+                yaw  = float(math.atan2(R_sb[1,0], R_sb[0,0]))
+            else:
+                c_s  = c_w
+                yaw  = 0.0
+
+            lidar_rec = {
+                "type": dair_type,
+                "truncated_state": "0",
+                "occluded_state": "0",
+                "alpha": "0",
+                "2d_box": {
+                    "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax
+                },
+                "3d_dimensions": {  # DAIR uses h,w,l
+                    "h": H, "w": W, "l": L
+                },
+                "3d_location": {    # numerics in LIDAR json (matches DAIR sample you pasted)
+                    "x": float(c_s[0]),
+                    "y": float(c_s[1]),
+                    "z": float(c_s[2])
+                },
+                "rotation": yaw
+            }
+            lidar_out.append(lidar_rec)
 
         with open(os.path.join(cam_dir,   f"{frame_id}.json"), "w") as f:
             json.dump(cam_out, f, indent=2)
         with open(os.path.join(lidar_dir, f"{frame_id}.json"), "w") as f:
             json.dump(lidar_out, f, indent=2)
 
-        print(f"[label] wrote {len(cam_out)} 2D and {len(lidar_out)} 3D labels for frame {frame_id}")
-
+        print(f"[label] wrote {len(cam_out)} camera and {len(lidar_out)} lidar labels for frame {frame_id}")
 
     # ===================== main =====================
     def run(self):
@@ -1192,6 +1252,8 @@ class Hercules2D3DDetector:
                         self.VEHICLE_NAME
                     )
                     cam_pose = Hercules2D3DDetector.pose_add_translation(cam_pose, spawn_xyz)
+                    self._cam_pose = cam_pose
+
             except Exception as e:
                 print(f"[WARN] camera spawn translation not applied: {e}")
 
@@ -1429,6 +1491,20 @@ class Hercules2D3DDetector:
                 results_lidar_only = [r for r in results_lidar_all if r["actor_name"] not in actor_names_from_camera]
             else:
                 results_lidar_only = []
+
+            # Compute LiDAR points-in-box counts for the CAMERA-selected objects
+            if 'p_world' in locals() and p_world is not None:
+                for r in results:
+                    if not r.get("found", False):
+                        continue
+                    inside_mask = Hercules2D3DDetector.points_inside_oriented_box(
+                        p_world, r["adjusted_pose"], r["L"], r["W"], r["H"]
+                    )
+                    r["lidar_points_inside_n"] = int(inside_mask.sum())
+            else:
+                for r in results:
+                    if r.get("found", False):
+                        r["lidar_points_inside_n"] = 0
 
         finally:
             # ===================== END SINGLE PAUSE WINDOW =====================
