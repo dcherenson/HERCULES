@@ -1,454 +1,390 @@
 #!/usr/bin/env python3
-
 """
-Visualize DAIR-V2X-style outputs:
-- 2D image with labeled 2D boxes and reprojected 3D wireframes (from labels)
-- 3D view (Open3D, if available) with LiDAR point cloud and 3D boxes in LiDAR frame
-  (requires T_cam_lidar in calib.json). Falls back to BEV with Matplotlib if Open3D
-  is not installed; if extrinsics are missing, shows boxes without fusing LiDAR.
+DAIR-V2X-C viewer (infra/veh) for 2D GT (OpenCV) and 3D GT (Open3D)
 
-Usage examples:
-  python3 visualize_dairv2x.py --root /path/to/_dair_v2x_out --side veh --step 5
-  python3 visualize_dairv2x.py --root /path/to/_dair_v2x_out --side inf --limit 100 --show_3d
+What it does
+------------
+- Shows the camera image with KITTI-format 2D GT boxes from label_2/*.txt.
+- Shows the LiDAR point cloud (.bin) with 3D GT boxes drawn in the LiDAR frame.
+- Works for either 'infra' (infrastructure-side) or 'veh' (vehicle-side).
+- No CLI args; set variables below.
+
+Controls
+--------
+- Press any key in the OpenCV window to advance to the next frame.
+- Open3D window opens per frame; close it to continue (or set SHOW_OPEN3D=False).
+- Set SAVE_OUTPUTS=True to also save image overlays and exported Open3D snapshots.
+
+Notes
+-----
+- For infrastructure-side, calibrations may use "virtuallidar_to_camera" internally.
+  This script automatically picks Tr_* line from the calib txt file:
+  one of {'Tr_velo_to_cam', 'Tr_lidar_to_cam', 'Tr_lidar_to_camera',
+          'Tr_virtuallidar_to_camera'} plus R0_rect and P2.
+- The 3D KITTI box is defined in CAMERA coordinates (rect), so we:
+    1) build 3D box corners in camera-rect coords using (h,w,l), center (x,y,z), ry
+    2) transform to LiDAR coords via inv(Tr_velo_to_cam) * inv(R0_rect)
+- If you are running headless (no X), set SHOW_OPENCV=False, SHOW_OPEN3D=False and use SAVE_OUTPUTS=True.
 """
 
 import os
-import json
-import argparse
-import math
 import glob
-import warnings
-import numpy as np
+import math
 import cv2
+import numpy as np
+import open3d as o3d
+from pathlib import Path
 
-# Optional 3D backends
-try:
-    import open3d as o3d
-    HAS_O3D = True
-except Exception:
-    HAS_O3D = False
+# ===================== User-configurable variables =====================
 
-try:
-    import matplotlib.pyplot as plt
-    HAS_MPL = True
-except Exception:
-    HAS_MPL = False
+# Path to your DAIR-V2X-C cooperative-vehicle-infrastructure folder
+DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C/cooperative-vehicle-infrastructure"
 
+# Choose side: 'infra' or 'veh'
+# SIDE = "infra"     # "infra" -> infrastructure-side, "veh" -> vehicle-side
+SIDE = "veh"
 
-# ---------------------------- Paths helpers ----------------------------
-def dair_paths(root):
-    return {
-        "inf": {
-            "img":         f"{root}/cooperative/infrastructure-side/image",
-            "lidar":       f"{root}/cooperative/infrastructure-side/lidar",
-            "calib":       f"{root}/cooperative/infrastructure-side/calib",
-            "kitti_label": f"{root}/cooperative/infrastructure-side/kitti_label",
-            "kitti_label_pp": f"{root}/cooperative/infrastructure-side/kitti_label_pp",
-            "ts":          f"{root}/cooperative/infrastructure-side/timestamp",
-        },
-        "veh": {
-            "img":         f"{root}/cooperative/vehicle-side/image",
-            "lidar":       f"{root}/cooperative/vehicle-side/lidar",
-            "calib":       f"{root}/cooperative/vehicle-side/calib",
-            "kitti_label": f"{root}/cooperative/vehicle-side/kitti_label",
-            "kitti_label_pp": f"{root}/cooperative/vehicle-side/kitti_label_pp",
-            "ts":          f"{root}/cooperative/vehicle-side/timestamp",
-        },
-    }
+# Split to visualize
+SPLIT = "training"  # "training" or "testing" (2D labels exist typically for training)
+
+# Start index and how many frames to show
+START_IDX = 0
+MAX_FRAMES = 20
+
+# Visualization toggles
+SHOW_OPENCV  = True
+SHOW_OPEN3D  = True
+SAVE_OUTPUTS = False
+OUTPUT_DIR = "/home/sgarimella34/vis_custom_viewer"
+
+# Point size in Open3D and box line width
+O3D_POINT_SIZE = 1.0
+
+# =======================================================================
 
 
-# ---------------------------- Geometry utils ----------------------------
-_EDGES = [(0,1),(1,3),(3,2),(2,0),(4,5),(5,7),(7,6),(6,4),(0,4),(1,5),(2,6),(3,7)]
+def side_dir_name(side: str) -> str:
+    if side.lower() in ("infra", "infrastructure", "infrastructure-side"):
+        return "infrastructure-side"
+    elif side.lower() in ("veh", "vehicle", "vehicle-side"):
+        return "vehicle-side"
+    else:
+        raise ValueError("SIDE must be 'infra' or 'veh'")
 
-def rotz(theta):
-    c, s = math.cos(theta), math.sin(theta)
-    return np.array([[ c,-s,0],
-                     [ s, c,0],
-                     [ 0, 0,1]], dtype=float)
 
-def box3d_corners_cam_airshim(length, width, height, center_cam, yaw_cam):
+def get_split_dirs(root: str, side: str, split: str):
+    sd = side_dir_name(side)
+    base = Path(root) / sd / split
+    img_dir   = base / "image_2"
+    lbl2_dir  = base / "label_2"
+    velo_dir  = base / "velodyne"
+    calib_dir = base / "calib"
+    for p in [img_dir, lbl2_dir, velo_dir, calib_dir]:
+        if not p.exists():
+            raise FileNotFoundError(f"Expected path missing: {p}")
+    return img_dir, lbl2_dir, velo_dir, calib_dir
+
+
+def read_calib(calib_file: str):
     """
-    Build 8 corners in the AirSim CAMERA frame:
-      X forward, Y right, Z down. yaw_cam is rotation about +Z (down) axis.
+    Reads KITTI-like calib file. Returns:
+      P2 (3x4), R0_rect (3x3), Tr_velo_to_cam (4x4)
+    Works for DAIR-V2X-C by accepting several possible line keys for the lidar->cam extrinsic.
     """
-    l, w, h = float(length), float(width), float(height)
-    # local box corners (X forward, Y right, Z down)
-    x = l/2.0; y = w/2.0; z = h/2.0
-    corners_local = np.array([
-        [ x,  y,  z], [ x,  y, -z],
-        [ x, -y,  z], [ x, -y, -z],
-        [-x,  y,  z], [-x,  y, -z],
-        [-x, -y,  z], [-x, -y, -z],
-    ], dtype=float)
-    R = rotz(yaw_cam)
-    corners_cam = (R @ corners_local.T).T + np.asarray(center_cam, dtype=float)
-    return corners_cam  # (8,3) in camera coords
+    P2 = None
+    R0_rect = None
+    Tr = None
 
-def project_cam_airshim_to_image(K, pts_cam, img_w, img_h):
-    """
-    Project AirSim CAMERA-frame points to pixels with pinhole intrinsics K.
-    AirSim camera axes: X forward, Y right, Z down
-    Image pinhole expects: X_img right, Y_img down, Z_img forward
-        => X_img = Y_cam,  Y_img = Z_cam,  Z_img = X_cam
-    Pixel: u = fx * X_img/Z_img + cx; v = fy * Y_img/Z_img + cy
-    Returns (uv Nx2), valid mask (in front and inside image).
-    """
-    Xf = pts_cam[:,0]; Yr = pts_cam[:,1]; Zd = pts_cam[:,2]
-    Zi = Xf
-    valid_z = Zi > 1e-6
-    u = K[0,0]*(Yr/Zi) + K[0,2]
-    v = K[1,1]*(Zd/Zi) + K[1,2]
-    uv = np.stack([u, v], axis=1)
-    in_img = (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
-    valid = valid_z & np.isfinite(u) & np.isfinite(v) & in_img
-    return uv, valid
+    # possible keys in DAIR / KITTI-style files
+    lidar_to_cam_keys = [
+        "Tr_velo_to_cam", "Tr_velo_to_camera",
+        "Tr_lidar_to_cam", "Tr_lidar_to_camera",
+        "Tr_virtuallidar_to_camera"
+    ]
 
-def rect_from_points(uv, mask, w, h):
-    if not np.any(mask):
-        return None
-    u = uv[mask,0]; v = uv[mask,1]
-    x0 = int(max(0, np.floor(u.min())))
-    y0 = int(max(0, np.floor(v.min())))
-    x1 = int(min(w-1, np.ceil(u.max())))
-    y1 = int(min(h-1, np.ceil(v.max())))
-    if x1 <= x0 or y1 <= y0:
-        return None
-    return (x0, y0, x1, y1)
+    with open(calib_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if len(line) == 0 or ":" not in line:
+                continue
+            key, val = line.split(":", 1)
+            val = val.strip()
+            nums = np.array([float(x) for x in val.split()], dtype=np.float64)
 
-def iou(a, b):
-    if a is None or b is None:
-        return 0.0
-    ax0, ay0, ax1, ay1 = a
-    bx0, by0, bx1, by1 = b
-    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
-    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
-    iw, ih = max(0, ix1 - ix0), max(0, iy1 - iy0)
-    inter = iw * ih
-    area_a = (ax1 - ax0) * (ay1 - ay0)
-    area_b = (bx1 - bx0) * (by1 - by0)
-    union = area_a + area_b - inter + 1e-9
-    return inter / union
+            if key == "P2":
+                P2 = nums.reshape(3, 4)
+            elif key in ("R0_rect", "R_rect"):
+                # Sometimes listed as 9 nums
+                if nums.size == 9:
+                    R0_rect = nums.reshape(3, 3)
+                elif nums.size == 12:
+                    # edge case: 3x4, take first 3x3
+                    R0_rect = nums.reshape(3, 4)[:, :3]
+                else:
+                    raise ValueError("Unexpected R0_rect size")
+            elif key in lidar_to_cam_keys:
+                if nums.size == 12:
+                    Tr = nums.reshape(3, 4)
+                    # convert to 4x4
+                    Tr = np.vstack([Tr, np.array([0, 0, 0, 1.0])])
+                elif nums.size == 16:
+                    Tr = nums.reshape(4, 4)
+                else:
+                    raise ValueError("Unexpected Tr_* size")
+
+    if P2 is None:
+        raise ValueError(f"P2 not found in {calib_file}")
+    if R0_rect is None:
+        # If absent, assume identity (rare)
+        R0_rect = np.eye(3, dtype=np.float64)
+    if Tr is None:
+        raise ValueError(f"No lidar->cam extrinsic found in {calib_file}")
+
+    # Build 4x4 rectified rotation
+    R_rect_4x4 = np.eye(4, dtype=np.float64)
+    R_rect_4x4[:3, :3] = R0_rect
+
+    return P2, R0_rect, R_rect_4x4, Tr
 
 
-# ---------------------------- LiDAR utils ----------------------------
-def load_lidar_bin(bin_path):
-    """KITTI-like .bin: float32 [x, y, z, reflectance]; we keep Nx3."""
-    pts = np.fromfile(bin_path, dtype=np.float32)
-    if pts.size == 0:
-        return np.empty((0, 3), dtype=np.float32)
-    pts = pts.reshape(-1, 4)[:, :3]
+def load_point_cloud(bin_file: str) -> np.ndarray:
+    pts = np.fromfile(bin_file, dtype=np.float32).reshape(-1, 4)  # x,y,z,intensity
     return pts
 
-def transform_points(T, pts):
-    """Apply 4x4 homogeneous transform to Nx3 points."""
-    if pts.size == 0:
-        return pts.reshape(0, 3)
-    pts_h = np.hstack([pts, np.ones((pts.shape[0], 1), dtype=float)])
-    out = (T @ pts_h.T).T[:, :3]
-    return out
+
+def parse_label2(label_file: str):
+    """
+    Parse KITTI label_2 file.
+    Returns a list of dict:
+      {
+        'type': str, 'truncated': float, 'occluded': int, 'alpha': float,
+        'bbox': [l,t,r,b],
+        'dims': [h,w,l],
+        'loc':  [x,y,z],  (in camera rect coords)
+        'ry':   float      (rotation around Y in camera coords)
+      }
+    """
+    objs = []
+    if not os.path.exists(label_file):
+        return objs  # might be test split
+    with open(label_file, "r") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            parts = ln.split()
+            # KITTI format has at least 15 fields
+            if len(parts) < 15:
+                continue
+            obj_type = parts[0]
+            truncated = float(parts[1])
+            occluded = int(float(parts[2]))
+            alpha = float(parts[3])
+            bbox = [float(parts[4]), float(parts[5]),
+                    float(parts[6]), float(parts[7])]
+            h = float(parts[8]); w = float(parts[9]); l = float(parts[10])
+            x = float(parts[11]); y = float(parts[12]); z = float(parts[13])
+            ry = float(parts[14])
+            objs.append({
+                "type": obj_type,
+                "truncated": truncated,
+                "occluded": occluded,
+                "alpha": alpha,
+                "bbox": bbox,
+                "dims": [h, w, l],
+                "loc":  [x, y, z],
+                "ry":   ry
+            })
+    return objs
 
 
-# ---------------------------- 3D viz helpers ----------------------------
-def corners3d_from_label_cam(obj):
-    """Return (8,3) box corners in CAMERA frame using AirSim camera axes."""
-    dims = obj["3d_dimensions"]
-    Hh, Wd, Ld = float(dims["h"]), float(dims["w"]), float(dims["l"])
-    loc = obj["3d_location"]
-    Xf, Yr, Zd = float(loc["x"]), float(loc["y"]), float(loc["z"])
-    yaw = float(obj["rotation"])
-    return box3d_corners_cam_airshim(Ld, Wd, Hh, (Xf, Yr, Zd), yaw)
+def kitti_3d_box_corners_in_cam(dims, loc, ry):
+    """
+    Computes 8 corners of a KITTI 3D box in CAMERA (rect) coords.
+    dims = [h,w,l], loc = [x,y,z] (bottom-centered in KITTI), ry: rotation around +Y.
+    Returns (8,3) array.
+    """
+    h, w, l = dims
+    x, y, z = loc
 
-def lineset_from_corners_o3d(corners_xyz, color=(1.0, 0.0, 0.0)):
-    """Open3D LineSet for one box (corners in same frame as point cloud)."""
-    ls = o3d.geometry.LineSet()
-    ls.points = o3d.utility.Vector3dVector(corners_xyz.astype(float))
-    ls.lines  = o3d.utility.Vector2iVector(_EDGES)
-    col = np.array([color], dtype=float).repeat(len(_EDGES), axis=0)
-    ls.colors = o3d.utility.Vector3dVector(col)
+    # in the object's local coord system (camera coords)
+    # KITTI uses bottom center as (x,y,z), y is down in camera coords
+    x_corners = [ l/2,  l/2, -l/2, -l/2,  l/2,  l/2, -l/2, -l/2 ]
+    y_corners = [   0,    0,    0,    0, -h,  -h,   -h,   -h  ]  # top = -h
+    z_corners = [ w/2, -w/2, -w/2,  w/2, w/2, -w/2, -w/2,  w/2 ]
+
+    corners = np.vstack([x_corners, y_corners, z_corners])  # (3,8)
+
+    # rotation around Y
+    c = math.cos(ry)
+    s = math.sin(ry)
+    R = np.array([[ c, 0, s],
+                  [ 0, 1, 0],
+                  [-s, 0, c]], dtype=np.float64)
+
+    corners_rot = R @ corners  # (3,8)
+    corners_trans = corners_rot + np.array([[x],[y],[z]])
+    return corners_trans.T  # (8,3)
+
+
+def cam_to_lidar_points(X_cam: np.ndarray, R_rect_4x4: np.ndarray, Tr_velo_to_cam_4x4: np.ndarray):
+    """
+    Transform Nx3 (camera rect) -> Nx3 (LiDAR) using:
+      X_cam_h = [X_cam, 1]
+      X_lidar = inv(Tr_velo_to_cam) * inv(R_rect) * X_cam_h
+    """
+    N = X_cam.shape[0]
+    X_cam_h = np.hstack([X_cam, np.ones((N,1), dtype=np.float64)])
+    M = np.linalg.inv(Tr_velo_to_cam_4x4) @ np.linalg.inv(R_rect_4x4)
+    X_lidar_h = (M @ X_cam_h.T).T
+    return X_lidar_h[:, :3]
+
+
+def make_open3d_box(corners_lidar: np.ndarray, color=(1.0, 0.0, 0.0)):
+    """
+    corners_lidar: (8,3) in a standard corner order (same as we built).
+    Build Open3D LineSet to render as edges.
+    """
+    # 12 edges by index pairs for a cuboid with our corner ordering:
+    # (0-1-2-3) top face, (4-5-6-7) bottom face, and verticals (0-4,1-5,2-6,3-7)
+    lines = [
+        [0,1],[1,2],[2,3],[3,0],   # top
+        [4,5],[5,6],[6,7],[7,4],   # bottom
+        [0,4],[1,5],[2,6],[3,7]    # sides
+    ]
+    # Some viewers prefer (0..3) as top, but our y axis has top at indices 4..7.
+    # We'll keep this consistent with kitti_3d_box_corners_in_cam definition.
+    # Reorder to put the actual "top" at indices 4..7 for prettier edges:
+    # Swap top/bottom if needed:
+    # Here we assume indices 0..3 were y=0, 4..7 were y=-h; treat 0..3 as "roof".
+    # This is fine visually.
+
+    colors = [color for _ in lines]
+    ls = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(corners_lidar),
+        lines=o3d.utility.Vector2iVector(lines)
+    )
+    ls.colors = o3d.utility.Vector3dVector(colors)
     return ls
 
-def plot_bev(ax, pts_xy, boxes_xy_list, pts_stride=2):
-    """Matplotlib BEV plot (X forward, Y right)."""
-    ax.cla()
-    if pts_xy.size:
-        ax.scatter(pts_xy[::pts_stride, 0], pts_xy[::pts_stride, 1], s=0.2, c="k", alpha=0.5)
-    for B in boxes_xy_list:
-        for a, b in _EDGES:
-            ax.plot([B[a, 0], B[b, 0]], [B[a, 1], B[b, 1]], linewidth=1.0)
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xlabel("X forward (m)")
-    ax.set_ylabel("Y right (m)")
-    ax.grid(True)
+
+def visualize_frame(img_path: Path, lbl_path: Path, velo_path: Path, calib_path: Path,
+                    side: str, save_prefix: Path = None):
+    # -------- 2D IMAGE + 2D BOXES --------
+    img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+    if img is None:
+        raise RuntimeError(f"Failed to read image: {img_path}")
+
+    objs = parse_label2(str(lbl_path))
+    # draw 2D GT boxes
+    img_vis = img.copy()
+    for o in objs:
+        l,t,r,b = [int(round(v)) for v in o["bbox"]]
+        color = (0, 255, 0)  # green
+        cv2.rectangle(img_vis, (l,t), (r,b), color, 2)
+        cv2.putText(img_vis, o["type"], (l, max(0, t-5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+    # -------- 3D LIDAR + 3D BOXES --------
+    P2, R0_rect, R_rect_4x4, Tr = read_calib(str(calib_path))
+
+    # Load points (N,4) -> (N,3)
+    pts = load_point_cloud(str(velo_path))[:, :3]
+
+    # build Open3D point cloud
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+    # optional: set uniform color
+    pcd.colors = o3d.utility.Vector3dVector(np.ones_like(pts) * 0.5)
+
+    # Build Open3D geometries for all boxes
+    boxes = []
+    for o in objs:
+        corners_cam = kitti_3d_box_corners_in_cam(o["dims"], o["loc"], o["ry"])
+        corners_lidar = cam_to_lidar_points(corners_cam, R_rect_4x4, Tr)
+        boxes.append(make_open3d_box(corners_lidar, color=(1.0, 0.0, 0.0)))
+
+    # -------- Display / Save --------
+    # OpenCV image
+    if SAVE_OUTPUTS:
+        save_prefix.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(save_prefix.with_suffix(".jpg")), img_vis)
+
+    if SHOW_OPENCV:
+        cv2.imshow(f"{side.upper()} 2D (GT boxes)", img_vis)
+        cv2.waitKey(1)  # a brief pause so window updates
+
+    # Open3D window
+    if SHOW_OPEN3D:
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(window_name=f"{side.upper()} LiDAR (GT 3D boxes)", width=1280, height=720, visible=True)
+        opt = vis.get_render_option()
+        if opt:
+            opt.point_size = O3D_POINT_SIZE
+            opt.background_color = np.array([0,0,0])
+
+        vis.add_geometry(pcd)
+        for b in boxes:
+            vis.add_geometry(b)
+        vis.poll_events()
+        vis.update_renderer()
+
+        if SAVE_OUTPUTS:
+            # Save a snapshot of the Open3D view
+            vis.capture_screen_image(str(save_prefix.with_suffix(".o3d.png")), do_render=True)
+
+        print("Close the Open3D window to proceed to next frame...")
+        vis.run()
+        vis.destroy_window()
 
 
-# ---------------------------- Main ----------------------------
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root", required=True, help="OUT_ROOT used in run_dairv2x_oop.py")
-    ap.add_argument("--side", required=True, choices=["veh", "inf"])
-    ap.add_argument("--limit", type=int, default=100, help="max number of images to visualize")
-    ap.add_argument("--step", type=int, default=1, help="sample every Nth image")
-    ap.add_argument("--show_3d", action="store_true", help="Open 3D/BEV viewer (Open3D preferred, else Matplotlib)")
-    ap.add_argument("--max_lidar_pts", type=int, default=250000, help="downsample LiDAR if more than this many points")
-    ap.add_argument("--pp", action="store_true",
-                    help="Read LiDAR-frame labels from kitti_label_pp instead of camera-frame kitti_label")
-    ap.add_argument("--delay_ms", type=int, default=0,
-                    help="Per-frame delay for the 2D window (0 = wait for key press)")
-    ap.add_argument("--hold_last", action="store_true",
-                    help="After processing, keep the last 2D/3D window open until you close it")
-    ap.add_argument("--overlay_3d_on_2d", action="store_true",
-                    help="(Optional) also draw 3D wireframes on the 2D image; OFF by default")
-    args = ap.parse_args()
+    side = SIDE
+    img_dir, lbl2_dir, velo_dir, calib_dir = get_split_dirs(DATA_ROOT, side, SPLIT)
 
-    P = dair_paths(args.root)[args.side]
-    label_dir_key = "kitti_label_pp" if args.pp else "kitti_label"
-    calib_path = os.path.join(P["calib"], "calib.json")
-    if not os.path.isfile(calib_path):
-        raise FileNotFoundError(f"Missing calib: {calib_path}")
+    # Gather frame IDs from images (assumes KITTI-style naming *.png or *.jpg)
+    img_list = sorted(glob.glob(str(img_dir / "*.png")) + glob.glob(str(img_dir / "*.jpg")))
+    if len(img_list) == 0:
+        raise RuntimeError(f"No images found in {img_dir}")
 
-    calib = json.load(open(calib_path, "r"))
-    # Prefer K derived from saved 4x4 projection if present (matches labeling-time math)
-    P_cal = np.asarray(calib.get("P", np.eye(4)), dtype=float)
-    if P_cal.shape == (4, 4) and np.isfinite(P_cal).all() and not np.allclose(P_cal, 0):
-        K = P_cal[:3, :3].copy()
-    else:
-        K = np.asarray(calib["K"], dtype=float)
+    end_idx = min(len(img_list), START_IDX + MAX_FRAMES)
+    print(f"[INFO] Showing frames {START_IDX}..{end_idx-1} ({end_idx-START_IDX} total) for side='{side}', split='{SPLIT}'")
 
-    img_size = calib["image_size"]
-    # support [w,h] or [h,w]
-    if len(img_size) == 2:
-        # Most of your scripts store as (w, h)
-        img_w, img_h = int(img_size[0]), int(img_size[1])
-    else:
-        raise ValueError("Unexpected image_size format in calib.json")
+    if SAVE_OUTPUTS:
+        out_img_dir = Path(OUTPUT_DIR) / f"{side}_{SPLIT}_2d"
+        out_3d_dir  = Path(OUTPUT_DIR) / f"{side}_{SPLIT}_3d"
+        out_img_dir.mkdir(parents=True, exist_ok=True)
+        out_3d_dir.mkdir(parents=True, exist_ok=True)
 
-    # Extrinsics: lidar -> camera (already in Virtual-LiDAR basis in your collector)
-    T_cam_lidar = None
-    if "T_cam_lidar" in calib:
-        T_cam_lidar = np.asarray(calib["T_cam_lidar"], dtype=float)
-        if T_cam_lidar.shape != (4, 4):
-            warnings.warn("T_cam_lidar found but not 4x4; ignoring.")
-            T_cam_lidar = None
+    for idx in range(START_IDX, end_idx):
+        img_path = Path(img_list[idx])
+        stem = img_path.stem  # KITTI id (e.g., 000123)
+        lbl_path  = lbl2_dir / f"{stem}.txt"
+        velo_path = velo_dir / f"{stem}.bin"
+        calib_path = calib_dir / f"{stem}.txt"
 
-    # If we have lidar->camera, we can make camera->lidar transform
-    T_lidar_cam = None
-    if T_cam_lidar is not None:
-        try:
-            T_lidar_cam = np.linalg.inv(T_cam_lidar)
-        except np.linalg.LinAlgError:
-            warnings.warn("T_cam_lidar not invertible; 3D fusion disabled.")
-            T_lidar_cam = None
-
-    imgs = sorted(glob.glob(os.path.join(P["img"], "*.png")))
-    if not imgs:
-        print(f"[INFO] No images found in {P['img']}")
-        return
-    print(f"[INFO] Found {len(imgs)} images.")
-
-    # 3D/BEV viewers (created lazily)
-    o3d_vis = None
-    bev_fig = bev_ax = None
-    warned_no_extrinsics = False
-    last_lidar = np.empty((0, 3), dtype=np.float32)
-    last_boxes_lidar = []
-
-    bad_iou = 0
-    total_iou = 0
-
-    # Iterate frames
-    for impath in imgs[::max(1, args.step)][:args.limit]:
-        base = os.path.splitext(os.path.basename(impath))[0]
-        # Labels: prefer zero-padded numeric filename if applicable
-        if base.isdigit():
-            lbl_path = os.path.join(P[label_dir_key], f"{int(base):06d}.json")
-            lidar_path = os.path.join(P["lidar"], f"{int(base):06d}.bin")
-        else:
-            lbl_path = os.path.join(P[label_dir_key], f"{base}.json")
-            lidar_path = os.path.join(P["lidar"], f"{base}.bin")
-
-        if not os.path.isfile(lbl_path):
-            # try mirror name (non-padded)
-            alt = os.path.join(P[label_dir_key], f"{base}.json")            
-            if os.path.isfile(alt):
-                lbl_path = alt
-            else:
-                print(f"[WARN] Missing label for {base}")
-                continue
-
-        # Make LiDAR path robust to your non-padded naming (e.g., 100.bin)
-        if args.show_3d and not os.path.isfile(lidar_path):
-            alt_lidar = os.path.join(P["lidar"], f"{base}.bin")
-            if os.path.isfile(alt_lidar):
-                lidar_path = alt_lidar
-            else:
-                print(f"[WARN] Missing LiDAR for {base} (looked for {os.path.basename(lidar_path)} and {os.path.basename(alt_lidar)})")
-
-
-        # Load image + labels
-        img = cv2.imread(impath, cv2.IMREAD_COLOR)
-        if img is None:
-            print(f"[WARN] Failed to read image {impath}")
+        if not lbl_path.exists():
+            print(f"[WARN] Missing label_2 for {stem}; skipping 2D/3D boxes.")
+        if not velo_path.exists():
+            print(f"[WARN] Missing velodyne for {stem}; skipping point cloud.")
             continue
-        h, w = img.shape[:2]
+        if not calib_path.exists():
+            print(f"[WARN] Missing calib for {stem}; cannot draw 3D boxes.")
+            continue
 
-        labels = json.load(open(lbl_path, "r"))
-        if not isinstance(labels, list):
-            print(f"[WARN] Label file not a list: {lbl_path}")
-            labels = []
+        print(f"[INFO] Frame {idx}  id={stem}")
+        save_prefix = None
+        if SAVE_OUTPUTS:
+            save_prefix = Path(OUTPUT_DIR) / ("{}_{}".format(side, stem))
 
-        # Optional: load LiDAR
-        lidar = np.empty((0, 3), dtype=np.float32)
-        if args.show_3d and os.path.isfile(lidar_path):
-            lidar = load_lidar_bin(lidar_path)
-            if lidar.shape[0] > args.max_lidar_pts:
-                # simple voxel-ish downsample: stride based on count
-                stride = int(math.ceil(lidar.shape[0] / args.max_lidar_pts))
-                lidar = lidar[::max(1, stride)]
+        try:
+            visualize_frame(img_path, lbl_path, velo_path, calib_path, side, save_prefix)
+        except Exception as e:
+            print(f"[ERROR] Frame {stem} failed: {e}")
 
-        # Prepare per-frame 3D box list in LiDAR frame (for 3D viewer)
-        boxes_lidar_this_frame = []
-
-        # 2D draw loop
-        for obj in labels:
-            typ = obj.get("type", "Object")
-            bx = obj.get("2d_box", {})
-            box2d = (
-                int(bx.get("xmin", 0)),
-                int(bx.get("ymin", 0)),
-                int(bx.get("xmax", 0)),
-                int(bx.get("ymax", 0)),
-            )
-            color2d = (0, 255, 0) if typ == "Car" else (0, 128, 255)
-            cv2.rectangle(img, (box2d[0], box2d[1]), (box2d[2], box2d[3]), color2d, 2)
-            cv2.putText(img, typ, (box2d[0], max(0, box2d[1] - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color2d, 2, cv2.LINE_AA)
-
-            # Reproject 3D box (from label 3D in camera frame) for IoU check only
-            try:
-                corners_cam = corners3d_from_label_cam(obj)
-            except Exception as e:
-                print(f"[WARN] Bad 3D label in {lbl_path}: {e}")
-                continue
-
-            uv, valid = project_cam_airshim_to_image(K, corners_cam, w, h)
-            # (No 3D overlay on 2D by default; enable with --overlay_3d_on_2d)
-            if args.overlay_3d_on_2d:
-                for a, b in _EDGES:
-                    if valid[a] and valid[b]:
-                        p0 = (int(uv[a, 0]), int(uv[a, 1]))
-                        p1 = (int(uv[b, 0]), int(uv[b, 1]))
-                        cv2.line(img, p0, p1, (255, 0, 0), 2)
-
-            # IoU between labeled 2D rect and projected 3D rect hull
-            proj_rect = rect_from_points(uv, valid, w, h)
-            if proj_rect is not None:
-                i = iou(box2d, proj_rect)
-                total_iou += 1
-                if i < 0.25:
-                    bad_iou += 1
-                    cv2.putText(img, f"IoU:{i:.2f}", (box2d[0], min(h - 5, box2d[1] + 18)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
-
-            # For 3D viewer: transform camera-frame box corners into LiDAR frame
-            if args.show_3d and lidar.size and (T_lidar_cam is not None):
-                corners_cam_h = np.hstack([corners_cam, np.ones((8, 1))])
-                corners_lid_h = (T_lidar_cam @ corners_cam_h.T).T
-                boxes_lidar_this_frame.append(corners_lid_h[:, :3])
-
-        # Show 2D overlay (blocking by default unless delay>0)
-        cv2.imshow(f"{args.side} image overlay", img)
-        delay = args.delay_ms
-        key = cv2.waitKey(0 if delay <= 0 else delay) & 0xFF
-        if key in (27, ord('q')):
-            break
-
-        # 3D / BEV visualization
-        if args.show_3d:
-            if lidar.size and (T_lidar_cam is not None):
-                # Fused 3D: LiDAR frame + boxes transformed into LiDAR frame
-                if HAS_O3D:
-                    if o3d_vis is None:
-                        o3d_vis = o3d.visualization.Visualizer()
-                        o3d_vis.create_window(window_name=f"{args.side} LiDAR 3D", width=960, height=720)
-
-                    # Rebuild simple scene each frame (keeps code straightforward)
-                    o3d_vis.clear_geometries()
-                    o3d_vis.add_geometry(o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0))
-
-                    # Point cloud
-                    pcd = o3d.geometry.PointCloud()
-                    pcd.points = o3d.utility.Vector3dVector(lidar.astype(float))
-                    # neutral gray
-                    if len(lidar):
-                        col = np.full((lidar.shape[0], 3), 0.5, dtype=float)
-                        pcd.colors = o3d.utility.Vector3dVector(col)
-                    o3d_vis.add_geometry(pcd)
-
-                    # Boxes
-                    for B in boxes_lidar_this_frame:
-                        ls = lineset_from_corners_o3d(B, color=(1.0, 0.0, 0.0))
-                        o3d_vis.add_geometry(ls)
-
-                    o3d_vis.poll_events()
-                    o3d_vis.update_renderer()
-
-                    # remember last visuals (for optional hold)
-                    last_lidar = lidar.copy()
-                    last_boxes_lidar = [B.copy() for B in boxes_lidar_this_frame]
-
-                elif HAS_MPL:
-                    if bev_fig is None:
-                        bev_fig, bev_ax = plt.subplots(figsize=(6, 6))
-                        plt.ion()
-                        plt.show()
-                    pts_xy = lidar[:, :2]
-                    plot_bev(bev_ax, pts_xy, boxes_lidar_this_frame, pts_stride=2)
-                    plt.pause(0.001)
-                else:
-                    if not warned_no_extrinsics:
-                        print("[INFO] Open3D/Matplotlib not available; skipping 3D/BEV.")
-                        warned_no_extrinsics = True
-
-            else:
-                # Missing LiDAR or extrinsics: we cannot fuse; warn once
-                if not warned_no_extrinsics:
-                    if not lidar.size:
-                        print("[WARN] No LiDAR for this frame; 3D fusion disabled for now.")
-                    if T_lidar_cam is None and T_cam_lidar is None:
-                        print("[WARN] calib.json missing T_cam_lidar → cannot fuse camera/ LiDAR. "
-                              "Add T_cam_lidar to calib.json to enable.")
-                    warned_no_extrinsics = True
-
-    cv2.destroyAllWindows()
-
-    if HAS_O3D and o3d_vis is not None:
-        o3d_vis.destroy_window()
-    if HAS_MPL and plt.get_fignums():
-        plt.close('all')
-
-    # Optionally hold last frame(s) open (blocking) until user closes
-    if args.hold_last:
-        # 2D window: block until key press (if still open)
-        cv2.imshow(f"{args.side} image overlay", np.zeros((1,1,3), dtype=np.uint8))  # ensure exists
+    if SHOW_OPENCV:
+        print("[INFO] Done. Press a key to close the OpenCV window.")
         cv2.waitKey(0)
-        # 3D window: rebuild a static Open3D scene and block
-        if args.show_3d and HAS_O3D and last_lidar.size:
-            geoms = []
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(last_lidar.astype(float))
-            col = np.full((last_lidar.shape[0], 3), 0.5, dtype=float)
-            pcd.colors = o3d.utility.Vector3dVector(col)
-            geoms.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0))
-            geoms.append(pcd)
-            for B in last_boxes_lidar:
-                geoms.append(lineset_from_corners_o3d(B, color=(1.0, 0.0, 0.0)))
-            o3d.visualization.draw_geometries(geoms, window_name=f"{args.side} LiDAR 3D (hold)")
-
-    if total_iou > 0:
-        frac = 100.0 * bad_iou / total_iou
-        print(f"[CHECK] Projected-vs-labeled IoU: bad {bad_iou}/{total_iou} ({frac:.1f}% with IoU<0.25)")
-    else:
-        print("[CHECK] No comparable boxes encountered.")
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
