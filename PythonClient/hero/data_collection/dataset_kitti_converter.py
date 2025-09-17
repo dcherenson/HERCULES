@@ -307,12 +307,17 @@ def write_kitti_label2(out_txt: Path, objs, K, T_cam_l, im_w, im_h):
         yaw = float(yaw)
         if abs(yaw) > 2*math.pi: yaw = math.radians(yaw)
 
+        # --- remap dimensions: L' <- H_orig,  H' <- W_orig,  W' <- L_orig ---
         if isinstance(dims, dict):
-            h = float(dims["h"]); w = float(dims["w"]); l3 = float(dims["l"])
-            size_lwh = [l3, w, h]
+            h_o = float(dims["h"])
+            w_o = float(dims["w"])
+            l_o = float(dims["l"])
+            # size_lwh is expected as [length, width, height] in the LiDAR frame
+            size_lwh = [h_o, l_o, w_o]   # L' = H,  W' = L,  H' = W
         else:
-            a,b2,c = [float(v) for v in dims]
-            size_lwh = [c,b2,a] if a < b2 and a < c else [a,b2,c]
+            # If an array is ever encountered, assume order [h, w, l] and apply the same remap.
+            h_o, w_o, l_o = [float(v) for v in dims]
+            size_lwh = [h_o, l_o, w_o]   # L' = H,  W' = L,  H' = W
 
         if isinstance(loc, dict):
             center_l = [float(loc["x"]), float(loc["y"]), float(loc["z"])]
