@@ -139,6 +139,9 @@ class Hercules2D3DDetector:
     # === LiDAR config from AirSim settings.json (absolute path) ===
     SETTINGS_JSON_PATH = "/home/sgarimella34/Documents/AirSim/settings.json"
 
+    # Global toggle to show any UI (OpenCV windows, Open3D visualizers)
+    SHOW_VISUALS = False
+
     # ===================== helpers =====================
     @staticmethod
     def load_vehicle_spawn_translation(settings_path, vehicle_name):
@@ -816,10 +819,12 @@ class Hercules2D3DDetector:
                         if SHOW_ORIGINAL_SEG_ROI:
                             cv2.namedWindow(f"{label} Seg ROI (raw)", cv2.WINDOW_NORMAL)
                             cv2.imshow(f"{label} Seg ROI (raw)", seg_roi)
-                        cv2.namedWindow(f"{label} Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", cv2.WINDOW_NORMAL)
-                        cv2.imshow(f"{label} Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", seg_roi_clipped)
-                        cv2.namedWindow(f"{label} Depth ROI", cv2.WINDOW_NORMAL)
-                        cv2.imshow(f"{label} Depth ROI", depth_vis)
+
+                        if Hercules2D3DDetector.SHOW_VISUALS:
+                            cv2.namedWindow(f"{label} Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", cv2.WINDOW_NORMAL)
+                            cv2.imshow(f"{label} Seg ROI (depth <= {DEPTH_CLIP_MAX_M:.1f} m)", seg_roi_clipped)
+                            cv2.namedWindow(f"{label} Depth ROI", cv2.WINDOW_NORMAL)
+                            cv2.imshow(f"{label} Depth ROI", depth_vis)
                 else:
                     seg_roi_clipped = seg_roi
 
@@ -1407,8 +1412,9 @@ class Hercules2D3DDetector:
                     print(f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m): nonzero pixels = {nz}")
                     win_title = f"Segmentation (depth <= {DEPTH_CLIP_MAX_M:.1f} m)"
 
-                cv2.namedWindow(win_title, cv2.WINDOW_NORMAL)
-                cv2.imshow(win_title, seg_full_display)
+                if Hercules2D3DDetector.SHOW_VISUALS:
+                    cv2.namedWindow(win_title, cv2.WINDOW_NORMAL)
+                    cv2.imshow(win_title, seg_full_display)
 
             # (2) Intrinsics & projection (frozen)
             K, vfov = compute_intrinsics_from_horizontal_fov(cam_info.fov, w, h)
@@ -1566,10 +1572,12 @@ class Hercules2D3DDetector:
         title = "Projected 3D Bounding Box (dominant color only)" if DOMINANT_COLOR_ONLY else \
                 ("Projected 3D Bounding Box (corrected only)" if DRAW_ONLY_CORRECTED_2D else
                 "Projected 3D Bounding Box (auto from CSV+FOV)")
-        cv2.namedWindow(title, cv2.WINDOW_NORMAL)
-        cv2.imshow(title, disp)
-        print("Press any key to exit (after Open3D closes if opened).")
-        cv2.waitKey(1)
+        
+        if Hercules2D3DDetector.SHOW_VISUALS:
+            cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+            cv2.imshow(title, disp)
+            print("Press any key to exit (after Open3D closes if opened).")
+            cv2.waitKey(1)
 
         # (7) Open3D viz using the same frozen corners/pcds captured while PAUSED
         if o3d:
@@ -1612,17 +1620,18 @@ class Hercules2D3DDetector:
 
                 if len(geoms) > 0:
                     print("Showing 3D viz in Open3D (world frame).")
-                    vis = o3d.visualization.Visualizer()
-                    vis.create_window(window_name="Open3D: World (LiDAR + ROI + 3D Boxes)")
-                    for g in geoms:
-                        vis.add_geometry(g)
-                    opt = vis.get_render_option()
-                    opt.background_color = np.asarray([1.0, 1.0, 1.0])  # white background
-                    opt.point_size = 5.0
-                    if hasattr(opt, "line_width"):
-                        opt.line_width = 3.0
-                    vis.run()
-                    vis.destroy_window()
+                    if Hercules2D3DDetector.SHOW_VISUALS:
+                        vis = o3d.visualization.Visualizer()
+                        vis.create_window(window_name="Open3D: World (LiDAR + ROI + 3D Boxes)")
+                        for g in geoms:
+                            vis.add_geometry(g)
+                        opt = vis.get_render_option()
+                        opt.background_color = np.asarray([1.0, 1.0, 1.0])  # white background
+                        opt.point_size = 5.0
+                        if hasattr(opt, "line_width"):
+                            opt.line_width = 3.0
+                        vis.run()
+                        vis.destroy_window()
                 else:
                     print("Open3D: nothing to show in world frame.")
 
@@ -1663,17 +1672,18 @@ class Hercules2D3DDetector:
                         geoms_lidar.append(ls_s)
 
                     print("Showing 3D viz in Open3D (LiDAR sensor frame).")
-                    vis2 = o3d.visualization.Visualizer()
-                    vis2.create_window(window_name="Open3D: LiDAR frame (sensor-local)")
-                    for g in geoms_lidar:
-                        vis2.add_geometry(g)
-                    opt2 = vis2.get_render_option()
-                    opt2.background_color = np.asarray([1.0, 1.0, 1.0])  # white background
-                    opt2.point_size = 5.0
-                    if hasattr(opt2, "line_width"):
-                        opt2.line_width = 3.0
-                    vis2.run()
-                    vis2.destroy_window()
+                    if Hercules2D3DDetector.SHOW_VISUALS:
+                        vis2 = o3d.visualization.Visualizer()
+                        vis2.create_window(window_name="Open3D: LiDAR frame (sensor-local)")
+                        for g in geoms_lidar:
+                            vis2.add_geometry(g)
+                        opt2 = vis2.get_render_option()
+                        opt2.background_color = np.asarray([1.0, 1.0, 1.0])  # white background
+                        opt2.point_size = 5.0
+                        if hasattr(opt2, "line_width"):
+                            opt2.line_width = 3.0
+                        vis2.run()
+                        vis2.destroy_window()
                 else:
                     print("LiDAR sensor-frame window skipped (missing cloud or transforms).")
             except Exception as e:
