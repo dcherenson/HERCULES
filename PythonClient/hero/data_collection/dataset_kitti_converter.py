@@ -282,9 +282,10 @@ def write_kitti_calib(out_txt: Path, K: np.ndarray, T_cam_l: np.ndarray):
             Pi = P2 if i == 2 else np.zeros((3,4))
             f.write(f"P{i}: {row(Pi)}\n")
         f.write(f"R0_rect: {row(R0)}\n")
-        f.write(f"Tr_velo_to_cam: {row(Tr)}\n")
-        # add a dummy IMU->velo so MMDet3D's parser has lines[6]
-        f.write("Tr_imu_to_velo: 1 0 0 0 0 1 0 0 0 0 1 0\n")
+        line = f"Tr_velo_to_cam: {row(Tr)}\n"
+        f.write(line)   # normal occurrence
+        f.write(line)   # duplicate as final line
+
 
 def write_kitti_label2(out_txt: Path, objs, K, T_cam_l, im_w, im_h):
     out_txt.parent.mkdir(parents=True, exist_ok=True)
