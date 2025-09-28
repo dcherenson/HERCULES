@@ -24,8 +24,11 @@ import numpy as np
 import cv2
 
 # -------- EDIT THESE --------
-SRC_ROOT = Path("/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure/")
-OUT_ROOT = Path("/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth_kitti")
+# SRC_ROOT = Path("/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure/")
+# OUT_ROOT = Path("/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth_kitti")
+
+SRC_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure/")
+OUT_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth_kitti")
 SIDES = ["vehicle-side", "infrastructure-side"]  # or pick one
 MAKE_VAL_SPLIT = False   # hold out 20% to val if True
 # ---------------------------
