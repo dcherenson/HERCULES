@@ -102,6 +102,7 @@ class Hercules2D3DDetector:
     LABEL_LIDAR_DIR: str | None = None        # .../vehicle-side/label/lidar    or .../infrastructure-side/label/lidar
     FRAME_ID: str | None = None               # "%06d" from the caller
     LIDAR_LABEL_REQUIRE_POINTS: bool = True   # keep only boxes with >=1 LiDAR point inside in LiDAR label
+    MIN_LIDAR_POINTS_IN_BOX = 10 # Minimum LiDAR points required inside a 3D box to keep/save the label
     
     # --- mapping csv + filters ---
     CSV_PATH      = "/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/csv_data/ue_label_vs_name.csv"
@@ -1114,9 +1115,10 @@ class Hercules2D3DDetector:
 
             # keep camera & lidar sets identical if you require LiDAR points
             lidar_pts = int(r.get("lidar_points_inside_n", 0))
-            if getattr(self, "CAMERA_LABEL_REQUIRE_LIDAR_POINTS", False) and lidar_pts <= 0:
+            min_pts   = int(getattr(self, "MIN_LIDAR_POINTS_IN_BOX", 1))
+            if getattr(self, "CAMERA_LABEL_REQUIRE_LIDAR_POINTS", False) and lidar_pts < min_pts:
                 continue
-            if getattr(self, "LIDAR_LABEL_REQUIRE_POINTS", False) and lidar_pts <= 0:
+            if getattr(self, "LIDAR_LABEL_REQUIRE_POINTS", False) and lidar_pts < min_pts:
                 continue
 
             # class mapping

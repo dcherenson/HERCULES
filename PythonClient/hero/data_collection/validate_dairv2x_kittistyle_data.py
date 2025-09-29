@@ -43,8 +43,8 @@ from pathlib import Path
 DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth_kitti"
 
 # Choose side: 'infra' or 'veh'
-SIDE = "infra"     # "infra" -> infrastructure-side, "veh" -> vehicle-side
-# SIDE = "veh"
+# SIDE = "infra"     # "infra" -> infrastructure-side, "veh" -> vehicle-side
+SIDE = "veh"
 
 # Split to visualize
 SPLIT = "training"  # "training" or "testing" (2D labels exist typically for training)

@@ -53,7 +53,9 @@ except ImportError:
 DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure"
 
 # Choose side: 'veh' or 'infra' (or 'vehicle-side' / 'infrastructure-side')
-SIDE = "veh"
+# SIDE = "veh"
+SIDE = "infra"
+
 
 # How many frames to show
 START_IDX = 0
