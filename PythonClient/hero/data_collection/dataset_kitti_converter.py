@@ -50,8 +50,8 @@ MAKE_VAL_SPLIT = False
 
 # Keep your original dimension mapping AND rotate yaw accordingly.
 # If headings are 90° the other way, change to -math.pi/2 or pass --yaw_offset_deg -90.
-# YAW_OFFSET_RAD = math.pi / 2.0
-YAW_OFFSET_RAD = 0.0
+YAW_OFFSET_RAD = math.pi / 2.0
+# YAW_OFFSET_RAD = 0.0
 # ===============================================================
 
 
@@ -265,9 +265,11 @@ def lidar_box_cam_fields(center_l: Iterable[float], dims_lwh: Iterable[float],
     Xc = R @ center_l + t
 
     # heading: LiDAR +Z yaw -> direction vector in LiDAR, then rotate to camera
-    v_l = np.array([math.cos(yaw_l), math.sin(yaw_l), 0.0], dtype=float)
-    v_c = R @ v_l
-    ry = math.atan2(v_c[0], v_c[2])  # KITTI yaw is about +Y in camera
+    # v_l = np.array([math.cos(yaw_l), math.sin(yaw_l), 0.0], dtype=float)
+    # v_c = R @ v_l
+    # ry = math.atan2(v_c[0], v_c[2])  # KITTI yaw is about +Y in camera
+
+    ry=yaw_l
 
     # bottom-center shift in camera coords (y down)
     loc_cam = Xc.copy()
@@ -352,13 +354,15 @@ def write_kitti_label2(out_txt: Path, objs: List[Dict[str,Any]], K: np.ndarray,
             yaw = math.radians(yaw)
 
         # ---- YOUR ORIGINAL MAPPING (unchanged) ----
-        # DAIR provides {"h","w","l"}. Feed LiDAR size_lwh = [H, L, W].
+        # Pass LiDAR size as [l, w, h] with no remapping
         if isinstance(dims, dict):
             h_o = float(dims["h"]); w_o = float(dims["w"]); l_o = float(dims["l"])
-            size_lwh = [h_o, l_o, w_o]   # L' = H,  W' = L,  H' = W
+            # size_lwh = [h_o, l_o, w_o]   # L' = H,  W' = L,  H' = W
+            size_lwh = [l_o, w_o, h_o] 
         else:
             h_o, w_o, l_o = [float(v) for v in dims]  # [h,w,l]
-            size_lwh = [h_o, l_o, w_o]
+            # size_lwh = [h_o, l_o, w_o]
+            size_lwh = [l_o, w_o, h_o] 
         # -------------------------------------------
 
         if isinstance(loc, dict):
@@ -367,7 +371,7 @@ def write_kitti_label2(out_txt: Path, objs: List[Dict[str,Any]], K: np.ndarray,
             center_l = [float(loc[0]), float(loc[1]), float(loc[2])]
 
         # YAW COMPENSATION so that heading matches the remapped local axes
-        yaw_corr = yaw + YAW_OFFSET_RAD
+        yaw_corr = yaw+YAW_OFFSET_RAD
 
         dims_cam, loc_cam, ry = lidar_box_cam_fields(center_l, size_lwh, yaw_corr, T_cam_l)
         alpha = ry - math.atan2(loc_cam[0], loc_cam[2])
@@ -465,6 +469,15 @@ def convert_side(side: str, src_root: Path, out_root: Path) -> None:
         # load intrinsics/extrinsics
         K = parse_intrinsic(Kin)
         T_cam_l = parse_extrinsic(Tin)
+
+        # Normalize to KITTI camera basis: x right, y down, z forward
+        # Mapping we want: LiDAR X->Cam Z, LiDAR Y->Cam -X, LiDAR Z->Cam -Y
+        S = np.array([[ 0, -1,  0, 0],
+                    [ 0,  0, -1, 0],
+                    [ 1,  0,  0, 0],
+                    [ 0,  0,  0, 1]], dtype=float)
+        T_cam_l = S @ T_cam_l
+
 
         # write calib
         write_kitti_calib(calib_out / f"{sid}.txt", K, T_cam_l)

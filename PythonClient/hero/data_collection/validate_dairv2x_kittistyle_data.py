@@ -38,9 +38,9 @@ from pathlib import Path
 # ===================== User-configurable variables =====================
 
 # Path to your DAIR-V2X-C cooperative-vehicle-infrastructure folder
-DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C/cooperative-vehicle-infrastructure"
+# DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C/cooperative-vehicle-infrastructure"
 # DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth_kitti/"
-# DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth_kitti"
+DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth_kitti"
 
 # Choose side: 'infra' or 'veh'
 SIDE = "infra"     # "infra" -> infrastructure-side, "veh" -> vehicle-side
