@@ -19,7 +19,7 @@ N_STEPS = 5000
 
 # DAIR-V2X-C-style root
 # DAIRV2X_C_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure"
-DAIRV2X_C_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth_test7/cooperative-vehicle-infrastructure"
+DAIRV2X_C_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth_test8/cooperative-vehicle-infrastructure"
 
 # AirSim settings
 SETTINGS_JSON_PATH = "/home/sgarimella34/Documents/AirSim/settings.json"

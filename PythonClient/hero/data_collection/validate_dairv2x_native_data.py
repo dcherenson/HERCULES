@@ -50,8 +50,8 @@ except ImportError:
 # ===================== User-configurable variables =====================
 
 # Base path to your cooperative-vehicle-infrastructure folder (native format)
-DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure"
-
+# DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure"
+DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure/"
 # Choose side: 'veh' or 'infra' (or 'vehicle-side' / 'infrastructure-side')
 # SIDE = "veh"
 SIDE = "infra"
