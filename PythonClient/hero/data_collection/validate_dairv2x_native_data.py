@@ -4,32 +4,17 @@ DAIR-V2X (native / non-KITTI) viewer for 2D & 3D labels.
 
 What it shows (very similar to validate_dairv2x_kittistyle_data.py):
 - Camera image with 2D GT boxes from <side>/label/camera/<id>.json.
-- LiDAR point cloud (.bin) with 3D GT boxes drawn in the LiDAR frame from
+- LiDAR point cloud (.bin or .pcd) with 3D GT boxes drawn in the LiDAR frame from
   <side>/label/lidar/<id>.json.
 
 Directory assumptions (matching run_dairv2x_oop_skeleton.py and dataset_kitti_converter.py):
 - Images:                  <ROOT>/<side>/image/<id>.png|jpg
-- LiDAR (x,y,z,intensity): <ROOT>/<side>/velodyne/<id>.bin
+- LiDAR (x,y,z,intensity): <ROOT>/<side>/velodyne/<id>.bin | <id>.pcd
 - 2D labels:               <ROOT>/<side>/label/camera/<id>.json    (may be list, or {"annotations":[...]})
 - 3D labels:               <ROOT>/<side>/label/lidar/<id>.json     (may be list, or {"labels":[...]})
 - Intrinsics:              <ROOT>/<side>/calib/camera_intrinsic/<id>.json
 - Lidar->Camera extrinsic: vehicle-side:        <ROOT>/vehicle-side/calib/lidar_to_camera/<id>.json
                            infrastructure-side: <ROOT>/infrastructure-side/calib/virtuallidar_to_camera/<id>.json
-
-Notes
------
-- Keys accepted for 2D boxes: {"2d_box":{"xmin","ymin","xmax","ymax"}} or COCO-style {"bbox":[x,y,w,h]} or {"bbox":{"x1"/"left","y1"/"top","x2"/"right","y2"/"bottom"}}.
-- Keys accepted for 3D boxes (LiDAR frame): center from one of {"3d_location":{"x","y","z"} | "center":[x,y,z]}
-  size from one of {"3d_dimensions":{"h","w","l"} | "dimensions":{"h","w","l"} | "size":[l,w,h]}
-  yaw from one of {"rotation": rad | "yaw": rad}
-- If intrinsics/extrinsic are present, the script can optionally project 3D box corners into the image for visual cross-check.
-  Toggle PROJECT_3D_ON_IMAGE to enable.
-
-Controls
---------
-- Close the Open3D window to proceed to next frame.
-- Press any key in the OpenCV window to advance (if SHOW_OPENCV=True).
-
 """
 
 import os
@@ -50,12 +35,10 @@ except ImportError:
 # ===================== User-configurable variables =====================
 
 # Base path to your cooperative-vehicle-infrastructure folder (native format)
-# DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure"
-DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure/"
-# Choose side: 'veh' or 'infra' (or 'vehicle-side' / 'infrastructure-side')
-# SIDE = "veh"
-SIDE = "infra"
+DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth_TEST1/cooperative-vehicle-infrastructure/"
 
+# Choose side: 'veh' or 'infra' (or 'vehicle-side' / 'infrastructure-side')
+SIDE = "veh"   # or "veh"
 
 # How many frames to show
 START_IDX = 0
@@ -72,6 +55,12 @@ PROJECT_3D_ON_IMAGE = False
 
 # Open3D point size
 O3D_POINT_SIZE = 1.0
+
+# ===== New format toggles =====
+# If True, prefer *.jpg (still falls back to *.png if jpg missing)
+USE_JPG_IMAGES = True
+# If True, load velodyne from *.pcd (otherwise from *.bin). It will try the other if missing.
+USE_PCD_LIDAR = True
 
 
 # ===================== Path helpers =====================
@@ -99,7 +88,6 @@ def get_dirs_native(root: str, side: str):
         T_dir = calib_dir / "lidar_to_camera"
     else:
         T_dir = calib_dir / "virtuallidar_to_camera"
-    # Return existing-only T_dir (may be missing)
     return img_dir, lbl2_dir, lbl3_dir, velo_dir, K_dir, T_dir
 
 
@@ -111,10 +99,6 @@ def read_json(p: Path):
 
 
 def load_intrinsic(K_json: Path) -> np.ndarray:
-    """
-    Flexible intrinsic loader that accepts matrices under various keys or fx/fy/cx/cy.
-    Returns a 3x3 K matrix.
-    """
     J = read_json(K_json)
 
     def try_matrix(obj):
@@ -125,7 +109,6 @@ def load_intrinsic(K_json: Path) -> np.ndarray:
             return v
         return None
 
-    # common keys
     for key in ("cam_K", "K", "intrinsic", "camera_matrix", "matrix"):
         if key in J:
             v = J[key]
@@ -140,7 +123,6 @@ def load_intrinsic(K_json: Path) -> np.ndarray:
                 if K is not None:
                     return K
 
-    # fx/fy/cx/cy either at root or under "intrinsic"
     def _try_fx_fy_cx_cy(d: Dict[str, Any]):
         fx, fy, cx, cy = (d.get("fx"), d.get("fy"), d.get("cx"), d.get("cy"))
         if None not in (fx, fy, cx, cy):
@@ -160,10 +142,6 @@ def load_intrinsic(K_json: Path) -> np.ndarray:
 
 
 def load_extrinsic_to_cam(T_json: Path) -> np.ndarray:
-    """
-    Returns 4x4 lidar->camera transform. Accepts many layouts.
-    If filename suggests camera->lidar, auto-invert.
-    """
     J = read_json(T_json)
 
     def as44(arr):
@@ -193,10 +171,10 @@ def load_extrinsic_to_cam(T_json: Path) -> np.ndarray:
                     [2*(x*y + z*w), 1-2*(x*x+z*z), 2*(y*z - x*w)],
                     [2*(x*z - y*w), 2*(y*z + x*w), 1-2*(x*x+y*y)]
                 ], dtype=float)
-            elif a.size == 3:  # euler (roll,pitch,yaw) in rad (deg tolerated)
+            elif a.size == 3:  # euler
                 r,p,y = a.tolist()
                 deg = max(abs(r),abs(p),abs(y)) > 2*math.pi
-                def Rx(a): 
+                def Rx(a):
                     ca,sa = math.cos(a), math.sin(a)
                     return np.array([[1,0,0],[0,ca,-sa],[0,sa,ca]], float)
                 def Ry(a):
@@ -220,7 +198,7 @@ def load_extrinsic_to_cam(T_json: Path) -> np.ndarray:
                 ], dtype=float)
             elif all(k in rot for k in ("roll","pitch","yaw")):
                 r,p,y = float(rot["roll"]), float(rot["pitch"]), float(rot["yaw"])
-                def Rx(a): 
+                def Rx(a):
                     ca,sa = math.cos(a), math.sin(a)
                     return np.array([[1,0,0],[0,ca,-sa],[0,sa,ca]], float)
                 def Ry(a):
@@ -343,7 +321,6 @@ def _extract_yaw(g: Dict[str, Any]) -> float:
     if "yaw" in g:
         return float(g["yaw"])
     if "rotation_y" in g:
-        # If someone stored camera-ry by mistake, accept it but treat as LiDAR yaw
         return float(g["rotation_y"])
     return 0.0
 
@@ -358,23 +335,14 @@ def parse_3d_json(path_json: Path) -> List[Dict[str, Any]]:
         typ = g.get("type", "Car")
         c = _extract_center(g)
         h,w,l = _extract_dims_hwl(g)
-        yaw = _extract_yaw(g)  # radians, LiDAR frame (z-up, y-left)
+        yaw = _extract_yaw(g)
         out.append({"type": typ, "center": c, "dims_hwl": (h,w,l), "yaw": yaw})
     return out
 
 
-# ===================== Geometry =====================
+# ===================== Geometry & I/O =====================
 
 def lidar_box_corners(center: np.ndarray, h: float, w: float, l: float, yaw: float) -> np.ndarray:
-    """
-    Build 8 corners (N=8,3) of a LiDAR-frame cuboid with DAIR/KITTI convention:
-    - LiDAR frame: x forward, y left, z up
-    - yaw about +Z
-    - Center is geometric center of the cuboid
-    Corner order similar to KITTI camera box for consistency:
-        (top face)    0:l/2,w/2, h/2; 1:l/2,-w/2, h/2; 2:-l/2,-w/2, h/2; 3:-l/2,w/2, h/2
-        (bottom face) 4:l/2,w/2,-h/2; 5:l/2,-w/2,-h/2; 6:-l/2,-w/2,-h/2; 7:-l/2,w/2,-h/2
-    """
     x_c = [ l/2,  l/2, -l/2, -l/2,  l/2,  l/2, -l/2, -l/2 ]
     y_c = [ w/2, -w/2, -w/2,  w/2,  w/2, -w/2, -w/2,  w/2 ]
     z_c = [ h/2,  h/2,  h/2,  h/2, -h/2, -h/2, -h/2, -h/2 ]
@@ -388,9 +356,6 @@ def lidar_box_corners(center: np.ndarray, h: float, w: float, l: float, yaw: flo
 
 
 def make_open3d_box(corners_lidar: np.ndarray, color=(1.0, 0.0, 0.0)):
-    """
-    corners_lidar: (8,3) in the order produced by lidar_box_corners().
-    """
     if o3d is None:
         return None
     lines = [
@@ -407,31 +372,70 @@ def make_open3d_box(corners_lidar: np.ndarray, color=(1.0, 0.0, 0.0)):
     return ls
 
 
-def load_point_cloud(bin_file: str) -> np.ndarray:
+def _load_bin(bin_file: str) -> np.ndarray:
     if not os.path.exists(bin_file):
         return np.zeros((0,4), dtype=np.float32)
     pts = np.fromfile(bin_file, dtype=np.float32).reshape(-1, 4)  # x,y,z,intensity
     return pts
 
 
+def _load_pcd(pcd_file: str) -> np.ndarray:
+    if not os.path.exists(pcd_file):
+        return np.zeros((0,4), dtype=np.float32)
+    # Prefer Open3D for portability
+    if o3d is not None:
+        pcd = o3d.io.read_point_cloud(pcd_file)
+        if pcd.is_empty():
+            return np.zeros((0,4), dtype=np.float32)
+        pts = np.asarray(pcd.points, dtype=np.float32)
+        # intensity may be missing; pad zeros
+        if pts.shape[1] == 3:
+            intens = np.zeros((pts.shape[0], 1), dtype=np.float32)
+            return np.hstack([pts, intens])
+        elif pts.shape[1] >= 4:
+            return pts[:, :4]
+        else:
+            intens = np.zeros((pts.shape[0], 1), dtype=np.float32)
+            return np.hstack([pts[:, :3], intens])
+    # Fallback to numpy/pypcd style (optional)
+    try:
+        from pypcd import pypcd
+        pc = pypcd.PointCloud.from_path(pcd_file)
+        N = pc.points
+        x = np.asarray(pc.pc_data["x"], dtype=np.float32).reshape(N,1)
+        y = np.asarray(pc.pc_data["y"], dtype=np.float32).reshape(N,1)
+        z = np.asarray(pc.pc_data["z"], dtype=np.float32).reshape(N,1)
+        if "intensity" in pc.pc_data:
+            i = np.asarray(pc.pc_data["intensity"], dtype=np.float32).reshape(N,1)
+        else:
+            i = np.zeros((N,1), dtype=np.float32)
+        return np.hstack([x,y,z,i])
+    except Exception:
+        raise RuntimeError(f"Cannot read PCD: {pcd_file} (install open3d or pypcd)")
+
+
+def load_point_cloud_any(velodyne_dir: Path, stem: str) -> Tuple[np.ndarray, Path]:
+    """
+    Loads <stem>.pcd or <stem>.bin (preference controlled by USE_PCD_LIDAR),
+    returns (points Nx4, used_path).
+    """
+    first_ext = ".pcd" if USE_PCD_LIDAR else ".bin"
+    second_ext = ".bin" if USE_PCD_LIDAR else ".pcd"
+
+    p_first = velodyne_dir / f"{stem}{first_ext}"
+    p_second = velodyne_dir / f"{stem}{second_ext}"
+
+    if p_first.exists():
+        pts = _load_pcd(str(p_first)) if first_ext == ".pcd" else _load_bin(str(p_first))
+        return pts, p_first
+    if p_second.exists():
+        pts = _load_bin(str(p_second)) if second_ext == ".bin" else _load_pcd(str(p_second))
+        return pts, p_second
+
+    return np.zeros((0,4), dtype=np.float32), p_first  # non-existing path for message
+
+
 # ===================== Optional projection for cross-check =====================
-
-def project_lidar_points_to_image(pts_lidar: np.ndarray, K: np.ndarray, T_cam_lidar: np.ndarray, w: int, h: int) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Returns (uv, valid) from LiDAR (x,y,z) -> image space using K [3x3] and T_cam_lidar [4x4].
-    """
-    if pts_lidar.shape[0] == 0:
-        return np.zeros((0,2)), np.zeros((0,), dtype=bool)
-    pts = pts_lidar[:, :3]
-    N = pts.shape[0]
-    pts_h = np.hstack([pts, np.ones((N,1), dtype=float)])
-    cam = (T_cam_lidar @ pts_h.T).T[:, :3]
-    z = cam[:, 2]
-    uv = (K @ cam.T).T
-    uv = uv[:, :2] / np.maximum(z.reshape(-1,1), 1e-6)
-    valid = (z > 1e-6) & (uv[:,0] >= 0) & (uv[:,0] < w) & (uv[:,1] >= 0) & (uv[:,1] < h)
-    return uv, valid
-
 
 def draw_projected_box_on_image(img: np.ndarray, corners_lidar: np.ndarray, K: np.ndarray, T_cam_lidar: np.ndarray, color=(0,255,255), thickness=2):
     h, w = img.shape[:2]
@@ -442,7 +446,6 @@ def draw_projected_box_on_image(img: np.ndarray, corners_lidar: np.ndarray, K: n
     uv = (K @ cam.T).T
     uv = uv[:, :2] / np.maximum(z.reshape(-1,1), 1e-6)
     valid = (z > 1e-6)
-    # edges like make_open3d_box
     edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
     for i,j in edges:
         if valid[i] and valid[j]:
@@ -453,7 +456,7 @@ def draw_projected_box_on_image(img: np.ndarray, corners_lidar: np.ndarray, K: n
 
 # ===================== Main visualization per-frame =====================
 
-def visualize_frame(img_path: Path, lbl2_path: Path, lbl3_path: Path, velo_path: Path, K_path: Path, T_path: Path, side: str, save_prefix: Path | None):
+def visualize_frame(img_path: Path, lbl2_path: Path, lbl3_path: Path, pts: np.ndarray, K_path: Path, T_path: Path, side: str, save_prefix: Path | None):
     # --- Image & 2D ---
     img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
     if img is None:
@@ -465,18 +468,16 @@ def visualize_frame(img_path: Path, lbl2_path: Path, lbl3_path: Path, velo_path:
         cv2.rectangle(img_vis, (x1,y1), (x2,y2), (0,255,0), 2)
         cv2.putText(img_vis, o.get("type",""), (x1, max(0,y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
 
-    # --- 3D + point cloud ---
-    pts = load_point_cloud(str(velo_path))[:, :3]
+    # --- 3D + boxes ---
     boxes3d = parse_3d_json(lbl3_path) if lbl3_path and lbl3_path.exists() else []
 
     o3d_boxes = []
     if o3d is not None:
-        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
-        pcd.colors = o3d.utility.Vector3dVector(np.ones_like(pts) * 0.5)
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[:, :3]))
+        pcd.colors = o3d.utility.Vector3dVector(np.ones_like(pts[:, :3]) * 0.5)
     else:
         pcd = None
 
-    # optional projection setup
     K = None; T_cl = None
     if PROJECT_3D_ON_IMAGE and K_path.exists() and T_path.exists():
         try:
@@ -496,17 +497,17 @@ def visualize_frame(img_path: Path, lbl2_path: Path, lbl3_path: Path, velo_path:
             o3d_boxes.append(make_open3d_box(corners, color=(1.0, 0.0, 0.0)))
 
     # -------- Display / Save --------
-    if SAVE_OUTPUTS:
+    if SAVE_OUTPUTS and save_prefix is not None:
         save_prefix.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(save_prefix.with_suffix(".jpg")), img_vis)
 
     if SHOW_OPENCV:
-        cv2.imshow(f"{side.upper()} 2D (native GT boxes)", img_vis)
+        cv2.imshow(f"{side_dir_name(side).upper()} 2D (native GT boxes)", img_vis)
         cv2.waitKey(1)
 
     if SHOW_OPEN3D and o3d is not None:
         vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name=f"{side.upper()} LiDAR (native 3D GT)", width=1280, height=720, visible=True)
+        vis.create_window(window_name=f"{side_dir_name(side).upper()} LiDAR (native 3D GT)", width=1280, height=720, visible=True)
         opt = vis.get_render_option()
         if opt:
             opt.point_size = O3D_POINT_SIZE
@@ -518,7 +519,7 @@ def visualize_frame(img_path: Path, lbl2_path: Path, lbl3_path: Path, velo_path:
                 vis.add_geometry(b)
         vis.poll_events()
         vis.update_renderer()
-        if SAVE_OUTPUTS:
+        if SAVE_OUTPUTS and save_prefix is not None:
             vis.capture_screen_image(str(save_prefix.with_suffix(".o3d.png")), do_render=True)
         print("Close the Open3D window to proceed to next frame...")
         vis.run()
@@ -531,7 +532,18 @@ def main():
     side = SIDE
     img_dir, lbl2_dir, lbl3_dir, velo_dir, K_dir, T_dir = get_dirs_native(DATA_ROOT, side)
 
-    img_list = sorted(glob.glob(str(img_dir / "*.png")) + glob.glob(str(img_dir / "*.jpg")))
+    # Image search with preference
+    img_globs = []
+    if USE_JPG_IMAGES:
+        img_globs = [str(img_dir / "*.jpg"), str(img_dir / "*.png")]
+    else:
+        img_globs = [str(img_dir / "*.png"), str(img_dir / "*.jpg")]
+
+    img_list = []
+    for pat in img_globs:
+        img_list.extend(glob.glob(pat))
+    img_list = sorted(set(img_list))
+
     if len(img_list) == 0:
         raise RuntimeError(f"No images found in {img_dir}")
 
@@ -550,20 +562,20 @@ def main():
 
         lbl2_path = lbl2_dir / f"{stem}.json"
         lbl3_path = lbl3_dir / f"{stem}.json"
-        velo_path = velo_dir / f"{stem}.bin"
         K_path    = K_dir / f"{stem}.json"
         T_path    = T_dir / f"{stem}.json" if T_dir.exists() else Path("")
 
-        if not velo_path.exists():
-            print(f"[WARN] Missing velodyne for {stem}; skipping point cloud.")
-            continue
-
+        # LiDAR: try preferred ext first, then fallback
+        pts, used_velo = load_point_cloud_any(velo_dir, stem)
+        if pts.shape[0] == 0:
+            print(f"[WARN] Missing/empty velodyne for {stem} (looked for {used_velo.with_suffix('.pcd')} or .bin); skipping point cloud.")
+            # still show the image + 2D if available
         save_prefix = None
         if SAVE_OUTPUTS:
             save_prefix = Path(OUTPUT_DIR) / ("{}_{}".format(side_dir_name(side), stem))
 
         try:
-            visualize_frame(img_path, lbl2_path, lbl3_path, velo_path, K_path, T_path, side, save_prefix)
+            visualize_frame(img_path, lbl2_path, lbl3_path, pts, K_path, T_path, side, save_prefix)
         except Exception as e:
             print(f"[ERROR] Frame {stem} failed: {e}")
 
