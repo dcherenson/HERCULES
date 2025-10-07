@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-dataset_kitti_converter.py (fixed)
+dataset_kitti_converter.py
 
 Convert a DAIR-V2X-style dataset produced by your simulator into a KITTI-style
-dataset (images, velodyne, calib, label_2) — one side at a time.
+dataset (images, velodyne, calib, label_2) — one side at a time — and create a
+train/val/test split (default 70%/15%/15%) in training/ImageSets.
 
 Key choices in this version:
 - It keeps your original dimension mapping EXACTLY as you had it:
-    given source dims {h,w,l}, we pass size_lwh = [h, l, w]
+    given source dims {h,w,l}, we pass size_lwh = [l, w, h]
   because that's what matches your LiDAR geometry.
 - It applies a constant yaw compensation BEFORE the LiDAR->camera conversion
   so the heading aligns with the remapped local box axes:
@@ -25,7 +26,7 @@ Assumed per-side layout:
   <SRC>/<side>/calib/virtuallidar_to_camera/<id>.json     (infrastructure-side)
 
 Output (KITTI):
-  <OUT>/training/{image_2, velodyne, label_2, calib, ImageSets}
+  <OUT>/<side>/training/{image_2, velodyne, label_2, calib, ImageSets}
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import argparse
 import json
 import math
 import os
+import random
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -41,18 +43,24 @@ from typing import Any, Dict, Iterable, List, Tuple
 import numpy as np
 import cv2
 
-# ===================== User configuration =====================
+# ===================== User configuration (defaults) =====================
 # You can override these with CLI flags.
-SRC_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth/cooperative-vehicle-infrastructure/")
-OUT_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/datasets/dair_v2x_synth_kitti")
+# SRC_ROOT = Path("/media/.../datasets/dair_v2x_synth/cooperative-vehicle-infrastructure/")
+# OUT_ROOT = Path("/media/.../datasets/dair_v2x_synth_kitti")
+
+# SRC_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_COMPOSED/cooperative-vehicle-infrastructure/")
+# OUT_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_COMPOSED_kitti")
+
+SRC_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_TEST1/cooperative-vehicle-infrastructure/")
+OUT_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_TEST1_kitti")
+
 SIDES    = ["vehicle-side", "infrastructure-side"]
-MAKE_VAL_SPLIT = False
 
 # Keep your original dimension mapping AND rotate yaw accordingly.
 # If headings are 90° the other way, change to -math.pi/2 or pass --yaw_offset_deg -90.
 YAW_OFFSET_RAD = math.pi / 2.0
 # YAW_OFFSET_RAD = 0.0
-# ===============================================================
+# ========================================================================
 
 
 # ------------------------ IO helpers ------------------------
@@ -211,9 +219,7 @@ def parse_extrinsic(T_json: Path) -> np.ndarray:
                 elif "matrix" in rot:
                     R = np.array(rot["matrix"], dtype=float).reshape(3,3)
 
-
             elif isinstance(rot, (list, tuple, np.ndarray)):
-                # Flatten any nested lists/tuples (e.g., [[r],[p],[y]] or 3x3) to 1-D numeric
                 arr = np.array(rot, dtype=float).reshape(-1)
                 if arr.size == 3:
                     # Heuristic: if any angle has magnitude > 2π, treat as degrees
@@ -264,12 +270,8 @@ def lidar_box_cam_fields(center_l: Iterable[float], dims_lwh: Iterable[float],
     # center to camera
     Xc = R @ center_l + t
 
-    # heading: LiDAR +Z yaw -> direction vector in LiDAR, then rotate to camera
-    # v_l = np.array([math.cos(yaw_l), math.sin(yaw_l), 0.0], dtype=float)
-    # v_c = R @ v_l
-    # ry = math.atan2(v_c[0], v_c[2])  # KITTI yaw is about +Y in camera
-
-    ry=yaw_l
+    # NOTE: For your pipeline, we keep ry = yaw_l after applying the global offset outside.
+    ry = yaw_l
 
     # bottom-center shift in camera coords (y down)
     loc_cam = Xc.copy()
@@ -346,7 +348,7 @@ def write_kitti_label2(out_txt: Path, objs: List[Dict[str,Any]], K: np.ndarray,
         # 3D fields from LiDAR box (native JSON)
         dims = o.get("3d_dimensions") or o.get("dimensions") or o.get("size")
         loc  = o.get("3d_location")  or o.get("location")   or o.get("center")
-        yaw  = o.get("rotation") 
+        yaw  = o.get("rotation")
         if yaw is None:
             yaw = 0.0
         yaw = float(yaw)
@@ -354,15 +356,13 @@ def write_kitti_label2(out_txt: Path, objs: List[Dict[str,Any]], K: np.ndarray,
             yaw = math.radians(yaw)
 
         # ---- YOUR ORIGINAL MAPPING (unchanged) ----
-        # Pass LiDAR size as [l, w, h] with no remapping
+        # Use LiDAR size as [l, w, h]
         if isinstance(dims, dict):
             h_o = float(dims["h"]); w_o = float(dims["w"]); l_o = float(dims["l"])
-            # size_lwh = [h_o, l_o, w_o]   # L' = H,  W' = L,  H' = W
-            size_lwh = [l_o, w_o, h_o] 
+            size_lwh = [l_o, w_o, h_o]
         else:
             h_o, w_o, l_o = [float(v) for v in dims]  # [h,w,l]
-            # size_lwh = [h_o, l_o, w_o]
-            size_lwh = [l_o, w_o, h_o] 
+            size_lwh = [l_o, w_o, h_o]
         # -------------------------------------------
 
         if isinstance(loc, dict):
@@ -370,8 +370,8 @@ def write_kitti_label2(out_txt: Path, objs: List[Dict[str,Any]], K: np.ndarray,
         else:
             center_l = [float(loc[0]), float(loc[1]), float(loc[2])]
 
-        # YAW COMPENSATION so that heading matches the remapped local axes
-        yaw_corr = yaw+YAW_OFFSET_RAD
+        # YAW COMPENSATION
+        yaw_corr = yaw + YAW_OFFSET_RAD
 
         dims_cam, loc_cam, ry = lidar_box_cam_fields(center_l, size_lwh, yaw_corr, T_cam_l)
         alpha = ry - math.atan2(loc_cam[0], loc_cam[2])
@@ -416,7 +416,7 @@ def write_kitti_label2(out_txt: Path, objs: List[Dict[str,Any]], K: np.ndarray,
 
 
 # ---------------------- Side conversion ----------------------
-def convert_side(side: str, src_root: Path, out_root: Path) -> None:
+def convert_side(side: str, src_root: Path, out_root: Path, split: Tuple[float,float,float], split_seed: int) -> None:
     print(f"[INFO] Converting side: {side}")
     in_base  = src_root / side
     img_dir  = in_base / "image"
@@ -442,7 +442,7 @@ def convert_side(side: str, src_root: Path, out_root: Path) -> None:
     label_out  = train_root / "label_2"
     ensure_dir(image_out); ensure_dir(vel_out); ensure_dir(calib_out); ensure_dir(label_out)
 
-    train_ids: List[str] = []
+    all_ids: List[str] = []
     for sid in ids:
         src_img = (img_dir / f"{sid}.png")
         if not src_img.exists():
@@ -473,11 +473,10 @@ def convert_side(side: str, src_root: Path, out_root: Path) -> None:
         # Normalize to KITTI camera basis: x right, y down, z forward
         # Mapping we want: LiDAR X->Cam Z, LiDAR Y->Cam -X, LiDAR Z->Cam -Y
         S = np.array([[ 0, -1,  0, 0],
-                    [ 0,  0, -1, 0],
-                    [ 1,  0,  0, 0],
-                    [ 0,  0,  0, 1]], dtype=float)
+                      [ 0,  0, -1, 0],
+                      [ 1,  0,  0, 0],
+                      [ 0,  0,  0, 1]], dtype=float)
         T_cam_l = S @ T_cam_l
-
 
         # write calib
         write_kitti_calib(calib_out / f"{sid}.txt", K, T_cam_l)
@@ -528,56 +527,107 @@ def convert_side(side: str, src_root: Path, out_root: Path) -> None:
         # write label_2
         write_kitti_label2(label_out / f"{sid}.txt", merged, K, T_cam_l, im_w, im_h)
 
-        train_ids.append(sid)
+        all_ids.append(sid)
 
-    # split files (optional)
+    # ------------------ 70:15:15 split (configurable) ------------------
     is_dir = out_root / side / "training" / "ImageSets"
     ensure_dir(is_dir)
-    if MAKE_VAL_SPLIT:
-        n = len(train_ids)
-        k = int(round(n*0.2))
-        val_ids = set(train_ids[::max(1,n//max(1,k))])
-        train_ids_sorted = [s for s in train_ids if s not in val_ids]
-        val_ids_sorted   = sorted(val_ids)
-    else:
-        train_ids_sorted = sorted(train_ids)
-        val_ids_sorted   = []
 
-    with open(is_dir / "train.txt", "w") as f:
-        for s in train_ids_sorted:
-            f.write(s + "\n")
-    with open(is_dir / "val.txt", "w") as f:
-        for s in val_ids_sorted:
-            f.write(s + "\n")
-    with open(is_dir / "test.txt", "w") as f:
-        pass  # empty
+    n = len(all_ids)
+    if n == 0:
+        print(f"[WARN] No frames converted for side '{side}'. Skipping split.")
+        # still write empty files
+        for name in ("train","val","test"):
+            with open(is_dir / f"{name}.txt", "w") as f:
+                pass
+        return
+
+    r_train, r_val, r_test = split
+    # Normalize in case they don't sum exactly to 1.0
+    s = max(1e-9, (r_train + r_val + r_test))
+    r_train, r_val, r_test = r_train/s, r_val/s, r_test/s
+
+    idxs = list(range(n))
+    rnd = random.Random(split_seed)
+    rnd.shuffle(idxs)
+
+    n_train = int(round(r_train * n))
+    n_val   = int(round(r_val   * n))
+    # make sure total counts exactly n
+    if n_train + n_val > n:
+        n_val = max(0, n - n_train)
+    n_test  = max(0, n - n_train - n_val)
+
+    train_idx = idxs[:n_train]
+    val_idx   = idxs[n_train:n_train+n_val]
+    test_idx  = idxs[n_train+n_val:n_train+n_val+n_test]
+
+    train_ids_sorted = [all_ids[i] for i in sorted(train_idx)]
+    val_ids_sorted   = [all_ids[i] for i in sorted(val_idx)]
+    test_ids_sorted  = [all_ids[i] for i in sorted(test_idx)]
+
+    for name, lst in (("train", train_ids_sorted),
+                      ("val",   val_ids_sorted),
+                      ("test",  test_ids_sorted)):
+        with open(is_dir / f"{name}.txt", "w") as f:
+            for s_id in lst:
+                f.write(s_id + "\n")
+
+    print(f"[INFO] Split {n} frames → {len(train_ids_sorted)} train / "
+          f"{len(val_ids_sorted)} val / {len(test_ids_sorted)} test")
+    # -------------------------------------------------------------------
+
 
 # --------------------------- main ---------------------------
+def _parse_split_arg(s: str) -> Tuple[float,float,float]:
+    """
+    Parse --split like "70,15,15" or "0.7,0.15,0.15".
+    Returns normalized tuple of floats summing ~1.0 (we normalize later anyway).
+    """
+    parts = [p.strip() for p in s.split(",")]
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("Split must have three comma-separated numbers, e.g. 70,15,15")
+    vals = []
+    for p in parts:
+        v = float(p)
+        # Accept percentages (>=1) or proportions (<1)
+        if v > 1.0:
+            v = v / 100.0
+        vals.append(v)
+    if sum(vals) <= 0:
+        raise argparse.ArgumentTypeError("Split ratios must be positive.")
+    return (vals[0], vals[1], vals[2])
+
 def main():
     global YAW_OFFSET_RAD
     parser = argparse.ArgumentParser()
     parser.add_argument("--src", type=str, default=str(SRC_ROOT),
-                        help="Source dataset root.")
+                        help="Source dataset root (cooperative-vehicle-infrastructure).")
     parser.add_argument("--out", type=str, default=str(OUT_ROOT),
                         help="Output KITTI root.")
     parser.add_argument("--sides", type=str, nargs="+", default=SIDES,
                         help="Which sides to convert.")
-    parser.add_argument("--val_split", action="store_true", default=MAKE_VAL_SPLIT,
-                        help="Create a 20% val split in training/ImageSets.")
+    parser.add_argument("--split", type=_parse_split_arg, default=(0.70, 0.15, 0.15),
+                        help='Train/val/test split as "70,15,15" or proportions "0.7,0.15,0.15".')
+    parser.add_argument("--split-seed", type=int, default=1337,
+                        help="Random seed for the split shuffling.")
     parser.add_argument("--yaw_offset_deg", type=float, default=math.degrees(YAW_OFFSET_RAD),
                         help="Yaw offset (degrees) applied BEFORE LiDAR->camera conversion "
                              "to match axis mapping. Use +/-90 depending on your mapping.")
     args = parser.parse_args()
 
-    src = Path(args.src); out = Path(args.out)
+    src = Path(args.src)
+    out = Path(args.out)
     ensure_dir(out)
 
     # update yaw offset if provided
     YAW_OFFSET_RAD = math.radians(args.yaw_offset_deg)
 
     for side in args.sides:
-        convert_side(side, src, out)
-    print(f"[OK] Wrote KITTI-style dataset to: {out}")
+        convert_side(side, src, out, split=args.split, split_seed=args.split_seed)
+
+    print(f"[OK] Wrote KITTI-style dataset (with ImageSets splits) to: {out}")
+
 
 if __name__ == "__main__":
     main()
