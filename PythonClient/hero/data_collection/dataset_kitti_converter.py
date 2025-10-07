@@ -5,7 +5,7 @@ dataset_kitti_converter.py
 
 Convert a DAIR-V2X-style dataset produced by your simulator into a KITTI-style
 dataset (images, velodyne, calib, label_2) — one side at a time — and create a
-train/val/test split (default 70%/15%/15%) in training/ImageSets.
+train/val/test split (default 70%/15%/15%) in <OUT>/<side>/ImageSets (sibling of 'training').
 
 Key choices in this version:
 - It keeps your original dimension mapping EXACTLY as you had it:
@@ -26,7 +26,8 @@ Assumed per-side layout:
   <SRC>/<side>/calib/virtuallidar_to_camera/<id>.json     (infrastructure-side)
 
 Output (KITTI):
-  <OUT>/<side>/training/{image_2, velodyne, label_2, calib, ImageSets}
+  <OUT>/<side>/training/{image_2, velodyne, label_2, calib}
+  <OUT>/<side>/ImageSets/{train.txt, val.txt, test.txt, trainval.txt}
 """
 
 from __future__ import annotations
@@ -328,6 +329,9 @@ def write_kitti_calib(out_txt: Path, K: np.ndarray, T_cam_l: np.ndarray) -> None
             f.write(f"P{i}: {row(Pi)}\n")
         f.write(f"R0_rect: {row(R0)}\n")
         f.write(f"Tr_velo_to_cam: {row(Tr)}\n")
+        # write the same line again (your requested 7th line)
+        f.write(f"Tr_velo_to_cam: {row(Tr)}\n")
+
 
 def write_kitti_label2(out_txt: Path, objs: List[Dict[str,Any]], K: np.ndarray,
                        T_cam_l: np.ndarray, im_w: int, im_h: int) -> None:
@@ -432,7 +436,7 @@ def convert_side(side: str, src_root: Path, out_root: Path, split: Tuple[float,f
     K_dir = calib / "camera_intrinsic"
 
     ids = get_ids(img_dir)
-    print(f"[INFO] Found {len(ids)} frames")
+    print(f"[INFO] Found {len(ids)} frames)")
 
     # out dirs
     train_root = out_root / side / "training"
@@ -530,15 +534,16 @@ def convert_side(side: str, src_root: Path, out_root: Path, split: Tuple[float,f
         all_ids.append(sid)
 
     # ------------------ 70:15:15 split (configurable) ------------------
-    is_dir = out_root / side / "training" / "ImageSets"
-    ensure_dir(is_dir)
+    # Write splits to <OUT>/<side>/ImageSets (sibling of 'training')
+    imagesets_dir = out_root / side / "ImageSets"
+    ensure_dir(imagesets_dir)
 
     n = len(all_ids)
     if n == 0:
         print(f"[WARN] No frames converted for side '{side}'. Skipping split.")
         # still write empty files
-        for name in ("train","val","test"):
-            with open(is_dir / f"{name}.txt", "w") as f:
+        for name in ("train","val","test","trainval"):
+            with open(imagesets_dir / f"{name}.txt", "w") as f:
                 pass
         return
 
@@ -569,9 +574,14 @@ def convert_side(side: str, src_root: Path, out_root: Path, split: Tuple[float,f
     for name, lst in (("train", train_ids_sorted),
                       ("val",   val_ids_sorted),
                       ("test",  test_ids_sorted)):
-        with open(is_dir / f"{name}.txt", "w") as f:
+        with open(imagesets_dir / f"{name}.txt", "w") as f:
             for s_id in lst:
                 f.write(s_id + "\n")
+
+    # convenience: trainval = train ∪ val
+    with open(imagesets_dir / "trainval.txt", "w") as f:
+        for s_id in train_ids_sorted + val_ids_sorted:
+            f.write(s_id + "\n")
 
     print(f"[INFO] Split {n} frames → {len(train_ids_sorted)} train / "
           f"{len(val_ids_sorted)} val / {len(test_ids_sorted)} test")
@@ -608,12 +618,12 @@ def main():
     parser.add_argument("--sides", type=str, nargs="+", default=SIDES,
                         help="Which sides to convert.")
     parser.add_argument("--split", type=_parse_split_arg, default=(0.70, 0.15, 0.15),
-                        help='Train/val/test split as "70,15,15" or proportions "0.7,0.15,0.15".')
+        help='Train/val/test split as "70,15,15" or proportions "0.7,0.15,0.15".')
     parser.add_argument("--split-seed", type=int, default=1337,
                         help="Random seed for the split shuffling.")
     parser.add_argument("--yaw_offset_deg", type=float, default=math.degrees(YAW_OFFSET_RAD),
-                        help="Yaw offset (degrees) applied BEFORE LiDAR->camera conversion "
-                             "to match axis mapping. Use +/-90 depending on your mapping.")
+        help="Yaw offset (degrees) applied BEFORE LiDAR->camera conversion "
+             "to match axis mapping. Use +/-90 depending on your mapping.")
     args = parser.parse_args()
 
     src = Path(args.src)
