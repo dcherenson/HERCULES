@@ -22,12 +22,11 @@ INF_CAL_BASE2W    = ROOT / "infrastructure-side/calib/base_to_world"
 # Output (merged vehicle + infrastructure, in WORLD frame)
 OUT_DIR           = ROOT / "cooperative/label_world"
 
-# (Optional map, currently unused but kept for completeness)
-CLASS_MAP = {
-    "Car": 0, "Truck": 1, "Bus": 2, "Van": 3,
-    "Pedestrian": 4, "Cyclist": 5, "Motorcyclist": 6,
-    "Trafficcone": 7, "Tricycle": 8, "Forklift": 9,
-}
+# ---------- DEDUP TUNING ----------
+PREFER_ON_DUPLICATE = "vehicle"   # "vehicle" | "infra" (who wins when overlapping)
+IOU3D_THRESH        = 0.25        # oriented 3D IoU threshold to consider as duplicate
+IOU_BEV_THRESH      = 0.50        # fallback: oriented BEV IoU threshold
+CENTER_DIST_THRESH  = 2.0         # meters; used with BEV criterion
 
 # ---------- I/O helpers ----------
 
@@ -68,7 +67,7 @@ def load_novatel_to_world(p: Path):
 # ---------- Infrastructure transforms (prefer direct virtuallidar_to_world) ----------
 
 def _load_rt_json(p: Path):
-    """Load a JSON with {rotation: 3x3 or list(9), translation: list(3)}. Returns (R,T) or (I,0) if missing."""
+    """Load a JSON with {rotation: 3x3 or list(9), translation: list(3)}. Returns (R,T) or (None,None) if missing."""
     if not p.exists():
         return None, None
     d = jload(p)
@@ -80,7 +79,6 @@ def _load_rt_json(p: Path):
             return R, T
         except Exception:
             pass
-    # Minimal other shapes not handled here; your dataset uses rotation/translation.
     return None, None
 
 def load_infra_lidar_to_world(stem: str):
@@ -205,6 +203,115 @@ def to_required_schema_world(obj_in, center_w, yaw_w, corners_w):
         "world_8_points": corners_w.tolist()
     }
 
+# ---------- Geometry helpers for IoU ----------
+
+def _bottom_face_corners_from_world8(world8: np.ndarray):
+    """
+    Given 8 world corners in our ordering (0..3 bottom, 4..7 top),
+    return the 4 bottom XY points in order.
+    """
+    if world8.shape != (8,3):
+        raise ValueError("world8 must be (8,3)")
+    return world8[:4, :2]  # (4,2)
+
+def _poly_area(pts: np.ndarray) -> float:
+    """Shoelace area; pts: (N,2) in order (convex rectangle here)."""
+    x = pts[:,0]; y = pts[:,1]
+    return 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+def _suth_hodg_clip(subject: np.ndarray, clipper: np.ndarray) -> np.ndarray:
+    """
+    Sutherland–Hodgman polygon clipping for convex polygons.
+    subject, clipper: (N,2), (M,2). Returns (K,2) possibly empty.
+    """
+    def inside(p, a, b):
+        # keep left side of edge a->b
+        return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0]) >= 0.0
+
+    def intersect(p1, p2, a, b):
+        # line p1->p2 with edge a->b
+        x1,y1 = p1; x2,y2 = p2; x3,y3 = a; x4,y4 = b
+        denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
+        if abs(denom) < 1e-12:
+            return p2  # nearly parallel; return p2 to keep stability
+        px = ((x1*y2 - y1*x2)*(x3 - x4) - (x1 - x2)*(x3*y4 - y3*x4)) / denom
+        py = ((x1*y2 - y1*x2)*(y3 - y4) - (y1 - y2)*(x3*y4 - y3*x4)) / denom
+        return np.array([px, py], dtype=float)
+
+    output = subject.copy()
+    for i in range(len(clipper)):
+        input_list = output
+        if input_list.shape[0] == 0:
+            break
+        output = []
+        A = clipper[i]
+        B = clipper[(i+1) % len(clipper)]
+        S = input_list[-1]
+        for E in input_list:
+            if inside(E, A, B):
+                if not inside(S, A, B):
+                    output.append(intersect(S, E, A, B))
+                output.append(E)
+            elif inside(S, A, B):
+                output.append(intersect(S, E, A, B))
+            S = E
+        output = np.array(output, dtype=float)
+    return output
+
+def _bev_intersection_area(rectA: np.ndarray, rectB: np.ndarray) -> float:
+    """
+    rectA, rectB: (4,2) bottom-face XY corners (convex, ordered).
+    Returns intersection area.
+    """
+    inter = _suth_hodg_clip(rectA, rectB)
+    if inter.shape[0] == 0:
+        return 0.0
+    return _poly_area(inter)
+
+def _height_overlap(zA: float, hA: float, zB: float, hB: float) -> float:
+    A_min, A_max = zA - hA/2.0, zA + hA/2.0
+    B_min, B_max = zB - hB/2.0, zB + hB/2.0
+    return max(0.0, min(A_max, B_max) - max(A_min, B_min))
+
+def oriented_iou_3d(a, b) -> tuple[float, float]:
+    """
+    Compute oriented 3D IoU and BEV IoU using stored world_8_points and dims.
+    a, b are dicts in our output schema (already in world).
+    Returns (iou3d, iou_bev).
+    """
+    # bottom rectangles
+    A_xy = _bottom_face_corners_from_world8(np.array(a["world_8_points"], dtype=float))
+    B_xy = _bottom_face_corners_from_world8(np.array(b["world_8_points"], dtype=float))
+
+    # areas
+    areaA = _poly_area(A_xy)
+    areaB = _poly_area(B_xy)
+    inter_area = _bev_intersection_area(A_xy, B_xy)
+    union_area = max(areaA + areaB - inter_area, 1e-12)
+    iou_bev = inter_area / union_area
+
+    # vertical overlap
+    zA = float(a["3d_location"]["z"]); hA = float(a["3d_dimensions"]["h"])
+    zB = float(b["3d_location"]["z"]); hB = float(b["3d_dimensions"]["h"])
+    inter_h = _height_overlap(zA, hA, zB, hB)
+    if inter_h <= 0.0 or inter_area <= 0.0:
+        return 0.0, iou_bev
+
+    inter_vol = inter_area * inter_h
+    volA = areaA * hA
+    volB = areaB * hB
+    union_vol = max(volA + volB - inter_vol, 1e-12)
+    iou3d = inter_vol / union_vol
+    return iou3d, iou_bev
+
+def centers_dist(a, b) -> float:
+    ax, ay, az = float(a["3d_location"]["x"]), float(a["3d_location"]["y"]), float(a["3d_location"]["z"])
+    bx, by, bz = float(b["3d_location"]["x"]), float(b["3d_location"]["y"]), float(b["3d_location"]["z"])
+    return float(np.linalg.norm([ax-bx, ay-by, az-bz]))
+
+def same_class(a, b) -> bool:
+    return str(a.get("type","")).lower() == str(b.get("type","")).lower()
+
 # ---------- Main ----------
 
 def main():
@@ -227,8 +334,9 @@ def main():
         R_n2w, T_n2w = load_novatel_to_world(VEH_CAL_NOV2W / f"{vid}.json")
         R_v_l2w, T_v_l2w = chain(R_l2n, T_l2n, R_n2w, T_n2w)
 
-        merged_world_list = []
+        merged_world_list: list[dict] = []
 
+        # Transform & keep all vehicle boxes
         for obj in veh_objs_lidar:
             l, w, h, x, y, z, yaw_l = obj_lwh_xyz_yaw(obj)
 
@@ -261,17 +369,34 @@ def main():
                 corners_local = box_corners_local(l, w, h)
                 corners_world = (R_obj_w @ corners_local.T).T + center_w.reshape(1,3)
 
-                merged_world_list.append(to_required_schema_world(obj, center_w, yaw_w, corners_world))
-        else:
-            # No infra labels for this id – that's fine; we still write vehicle-only
-            pass
+                cand = to_required_schema_world(obj, center_w, yaw_w, corners_world)
 
-        # --- WRITE MERGED WORLD LABELS ---
+                # ---------- DEDUP vs already-kept (mostly vehicle first) ----------
+                is_duplicate = False
+                for kept in merged_world_list:
+                    # If classes disagree, allow both (skip strict class check if you want)
+                    if not same_class(cand, kept):
+                        continue
+                    iou3d, ioubev = oriented_iou_3d(cand, kept)
+                    if (iou3d >= IOU3D_THRESH) or (ioubev >= IOU_BEV_THRESH and centers_dist(cand, kept) <= CENTER_DIST_THRESH):
+                        # Duplicate found
+                        if PREFER_ON_DUPLICATE == "infra":
+                            # Replace kept with cand
+                            idx = merged_world_list.index(kept)
+                            merged_world_list[idx] = cand
+                        # else prefer vehicle => do nothing (skip cand)
+                        is_duplicate = True
+                        break
+
+                if not is_duplicate:
+                    merged_world_list.append(cand)
+
+        # --- WRITE MERGED WORLD LABELS (deduplicated) ---
         out_p = OUT_DIR / f"{vid}.json"
         jdump(merged_world_list, out_p)
         written += 1
 
-    print(f"[done] wrote {written} WORLD-frame cooperative label files (veh + infra when available) to: {OUT_DIR}")
+    print(f"[done] wrote {written} WORLD-frame cooperative label files (veh + infra dedup) to: {OUT_DIR}")
 
 if __name__ == "__main__":
     main()
