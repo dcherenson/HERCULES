@@ -69,6 +69,12 @@ USE_JPG_IMAGES = True
 # If True, load velodyne from *.pcd (otherwise from *.bin). It will try the other if missing.
 USE_PCD_LIDAR = True
 
+# ===== Cooperative world label toggles =====
+# Draw parametric boxes reconstructed from (center, dims, yaw) in world:
+DRAW_PARAM_BOXES_IN_WORLD = True
+# ALSO draw world_8_points if label has it (as yellow wireframe in world):
+VIS_WORLD_8_POINTS = True
+
 # ===================== Path helpers =====================
 
 def side_dir_name(side: str) -> str:
@@ -346,7 +352,7 @@ def load_extrinsic_to_world_like(J: Dict[str, Any]) -> np.ndarray:
         elif isinstance(rot, dict):
             if all(k in rot for k in ("w","x","y","z")):
                 w,x,y,z = float(rot["w"]), float(rot["x"]), float(rot["y"]), float(rot["z"])
-                n = math.sqrt(w*w+x*x+y*y+z*z) or 1.0
+                n = math.sqrt(w*w + x*x + y*y + z*z) or 1.0
                 w,x,y,z = w/n, x/n, y/n, z/n
                 R = np.array([
                     [1-2*(y*y+z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
@@ -491,6 +497,21 @@ def _extract_yaw(g: Dict[str, Any]) -> float:
     if "rotation_y" in g: return float(g["rotation_y"])
     return 0.0
 
+def _extract_world8(g: Dict[str, Any]) -> Optional[np.ndarray]:
+    pts = g.get("world_8_points", None)
+    if pts is None: 
+        return None
+    try:
+        arr = np.array(pts, dtype=float)
+        if arr.shape == (8, 3):
+            return arr
+        # try to coerce flat list of 24
+        if arr.size == 24:
+            return arr.reshape(8, 3)
+    except Exception:
+        pass
+    return None
+
 def parse_3d_json(path_json: Path) -> List[Dict[str, Any]]:
     if not path_json.exists():
         return []
@@ -502,7 +523,8 @@ def parse_3d_json(path_json: Path) -> List[Dict[str, Any]]:
         c = _extract_center(g)
         h,w,l = _extract_dims_hwl(g)
         yaw = _extract_yaw(g)
-        out.append({"type": typ, "center": c, "dims_hwl": (h,w,l), "yaw": yaw})
+        w8 = _extract_world8(g)
+        out.append({"type": typ, "center": c, "dims_hwl": (h,w,l), "yaw": yaw, "world8": w8})
     return out
 
 # ===================== Geometry & I/O =====================
@@ -699,7 +721,6 @@ def collect_stems_flex(dirs_or_dir, exts: List[str]) -> set:
 
 # ===================== Cooperative world visualization =====================
 
-# REPLACE your visualize_frame_coop_world with this version
 def visualize_frame_coop_world(root: str, stem: str):
     """
     Loads:
@@ -708,9 +729,6 @@ def visualize_frame_coop_world(root: str, stem: str):
       - infrastructure-side velodyne (pcd/bin) -> T_world_infra_lidar (direct)
     Draws fused clouds + boxes in one Open3D window.
     """
-    # get_dirs_cooperative must return lists for velodyne dirs:
-    #   veh_velo_dirs = [<root>/vehicle-side/velodyne, <root>/vehicle-side/velodyne_bin]
-    #   infra_velo_dirs = [<root>/infrastructure-side/velodyne, <root>/infrastructure-side/velodyne_bin]
     label_world_dir, _coop_calib_dir, veh_velo_dirs, infra_velo_dirs = get_dirs_cooperative(root)
 
     # --- world-frame labels
@@ -729,9 +747,6 @@ def visualize_frame_coop_world(root: str, stem: str):
         print(f"[WARN] Infra cloud missing/empty for '{stem}' (tried {infra_used})")
 
     # --- world transforms
-    # Requires the updated find_world_T_lidar that prioritizes:
-    #   veh: novatel_to_world ∘ lidar_to_novatel
-    #   infra: virtuallidar_to_world
     T_w_veh = find_world_T_lidar(root, stem, "veh")
     T_w_inf = find_world_T_lidar(root, stem, "infra")
 
@@ -765,13 +780,23 @@ def visualize_frame_coop_world(root: str, stem: str):
         )  # bluish
         geoms.append(pcd_i)
 
-    # world-frame boxes (red)
-    for o in boxes_world:
-        h, w, l = o["dims_hwl"]; c = o["center"]; yaw = o["yaw"]
-        corners_w = lidar_box_corners(c, h, w, l, yaw)
-        b = make_open3d_box(corners_w, color=(1.0, 0.0, 0.0))
-        if b is not None:
-            geoms.append(b)
+    # world-frame boxes from params (red)
+    if DRAW_PARAM_BOXES_IN_WORLD:
+        for o in boxes_world:
+            h, w, l = o["dims_hwl"]; c = o["center"]; yaw = o["yaw"]
+            corners_w = lidar_box_corners(c, h, w, l, yaw)
+            b = make_open3d_box(corners_w, color=(1.0, 0.0, 0.0))
+            if b is not None:
+                geoms.append(b)
+
+    # optional world_8_points overlays (yellow)
+    if VIS_WORLD_8_POINTS:
+        for o in boxes_world:
+            w8 = o.get("world8", None)
+            if w8 is not None and w8.shape == (8,3):
+                b8 = make_open3d_box(w8, color=(1.0, 1.0, 0.0))  # yellow
+                if b8 is not None:
+                    geoms.append(b8)
 
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name=f"COOPERATIVE WORLD — {stem}", width=1440, height=900, visible=True)
