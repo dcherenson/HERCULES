@@ -96,13 +96,35 @@ def get_dirs_native(root: str, side: str):
     return img_dir, lbl2_dir, lbl3_dir, velo_dir, K_dir, T_dir
 
 def get_dirs_cooperative(root: str):
-    """Cooperative top-level dirs."""
     coop_dir = Path(root) / "cooperative"
     label_world_dir = coop_dir / "label_world"
     coop_calib_dir = coop_dir / "calib"  # may or may not exist
-    veh_velo_dir = Path(root) / "vehicle-side" / "velodyne"
-    infra_velo_dir = Path(root) / "infrastructure-side" / "velodyne"
-    return label_world_dir, coop_calib_dir, veh_velo_dir, infra_velo_dir
+
+    # both possible lidar dirs for each side
+    veh_velo_dirs = [
+        Path(root) / "vehicle-side" / "velodyne",
+        Path(root) / "vehicle-side" / "velodyne_bin",
+    ]
+    infra_velo_dirs = [
+        Path(root) / "infrastructure-side" / "velodyne",
+        Path(root) / "infrastructure-side" / "velodyne_bin",
+    ]
+    return label_world_dir, coop_calib_dir, veh_velo_dirs, infra_velo_dirs
+
+# add this small helper once (near your other I/O helpers)
+def load_point_cloud_any_from_dirs(velodyne_dirs: List[Path], stem: str) -> Tuple[np.ndarray, Path]:
+    """Try multiple velodyne dirs (e.g., velodyne/ and velodyne_bin/)."""
+    last_attempt = None
+    for d in velodyne_dirs:
+        pts, used = load_point_cloud_any(d, stem)
+        last_attempt = used
+        # if file exists (even if empty), or we actually loaded points, stop here
+        if used.exists() or pts.shape[0] > 0:
+            return pts, used
+    # nothing found
+    if last_attempt is None:
+        last_attempt = velodyne_dirs[-1] / (stem + (".pcd" if USE_PCD_LIDAR else ".bin"))
+    return np.zeros((0,4), dtype=np.float32), last_attempt
 
 # ===================== JSON readers (robust to variants) =====================
 
@@ -351,67 +373,60 @@ def load_extrinsic_to_world_like(J: Dict[str, Any]) -> np.ndarray:
 
 def find_world_T_lidar(root: str, stem: str, side: str) -> Optional[np.ndarray]:
     """
-    Try multiple plausible native locations for world transforms.
-    Returns a 4x4 T_world_lidar or None if not found.
+    Returns 4x4 T_world_lidar for 'veh' or 'infra', using your dataset's layout.
     """
     sd = side_dir_name(side)
-    candidates: List[Path] = []
 
-    # Common direct paths
-    # vehicle-side
+    # 1) Primary paths for YOUR structure
     if sd == "vehicle-side":
-        candidates += [
+        # Chain: novatel_to_world ∘ lidar_to_novatel
+        p_lidar_to_novatel = Path(root)/"vehicle-side"/"calib"/"lidar_to_novatel"/f"{stem}.json"
+        p_novatel_to_world = Path(root)/"vehicle-side"/"calib"/"novatel_to_world"/f"{stem}.json"
+        M1 = _load_44_json(p_lidar_to_novatel)
+        M2 = _load_44_json(p_novatel_to_world)
+        if M1 is not None and M2 is not None:
+            return M2 @ M1
+        # Optional direct fallbacks if they exist in other variants
+        direct_candidates = [
             Path(root)/"vehicle-side"/"calib"/"lidar_to_world"/f"{stem}.json",
             Path(root)/"vehicle-side"/"calib"/"LIDAR_to_world"/f"{stem}.json",
             Path(root)/"vehicle-side"/"calib"/"lidar2world"/f"{stem}.json",
         ]
-    # infrastructure-side (often "virtuallidar")
     else:
-        candidates += [
+        # Infra has direct virtuallidar_to_world in your tree
+        direct_candidates = [
             Path(root)/"infrastructure-side"/"calib"/"virtuallidar_to_world"/f"{stem}.json",
             Path(root)/"infrastructure-side"/"calib"/"virtual_lidar_to_world"/f"{stem}.json",
-            Path(root)/"infrastructure-side"/"calib"/"lidar_to_world"/f"{stem}.json",
+            Path(root)/"infrastructure-side"/"calib"/"lidar_to_world"/f"{stem}.json",  # fallback variant
         ]
 
-    # Cooperative-level calib sometimes stores world T per pair id
-    candidates += [
-        Path(root)/"cooperative"/"calib"/f"{sd}_lidar_to_world"/f"{stem}.json",
-        Path(root)/"cooperative"/"calib"/f"{sd}_virtuallidar_to_world"/f"{stem}.json",
-        Path(root)/"cooperative"/"calib"/f"{sd}_sensor_to_world"/f"{stem}.json",
-    ]
-
-    # Two-hop chain: lidar->ego, ego->world
-    chain_options = []
-    if sd == "vehicle-side":
-        chain_options.append((
-            Path(root)/"vehicle-side"/"calib"/"lidar_to_vehicle"/f"{stem}.json",
-            Path(root)/"vehicle-side"/"calib"/"vehicle_to_world"/f"{stem}.json",
-        ))
-        chain_options.append((
-            Path(root)/"vehicle-side"/"calib"/"lidar_to_ego"/f"{stem}.json",
-            Path(root)/"vehicle-side"/"calib"/"ego_to_world"/f"{stem}.json",
-        ))
-    else:
-        chain_options.append((
-            Path(root)/"infrastructure-side"/"calib"/"virtuallidar_to_base"/f"{stem}.json",
-            Path(root)/"infrastructure-side"/"calib"/"base_to_world"/f"{stem}.json",
-        ))
-
-    # Try direct candidates first
-    for p in candidates:
+    # 2) Try direct candidates
+    for p in direct_candidates:
         M = _load_44_json(p)
         if M is not None:
             return M
 
-    # Try chained candidates
+    # 3) Generic chained fallbacks from earlier version (kept just in case)
+    chain_options = []
+    if sd == "vehicle-side":
+        chain_options += [
+            (Path(root)/"vehicle-side"/"calib"/"lidar_to_vehicle"/f"{stem}.json",
+             Path(root)/"vehicle-side"/"calib"/"vehicle_to_world"/f"{stem}.json"),
+            (Path(root)/"vehicle-side"/"calib"/"lidar_to_ego"/f"{stem}.json",
+             Path(root)/"vehicle-side"/"calib"/"ego_to_world"/f"{stem}.json"),
+        ]
+    else:
+        chain_options += [
+            (Path(root)/"infrastructure-side"/"calib"/"virtuallidar_to_base"/f"{stem}.json",
+             Path(root)/"infrastructure-side"/"calib"/"base_to_world"/f"{stem}.json"),
+        ]
     for p1, p2 in chain_options:
         M1 = _load_44_json(p1)
         M2 = _load_44_json(p2)
         if M1 is not None and M2 is not None:
             return M2 @ M1
 
-    # If nothing found
-    print(f"[WARN] Could not find T_world_lidar for {sd} frame '{stem}'. Looked in several common locations.")
+    print(f"[WARN] Could not find T_world_lidar for {sd} '{stem}'. Checked novatel/base chains and direct *_to_world.")
     return None
 
 # ===================== Label parsing helpers =====================
@@ -652,75 +667,118 @@ def visualize_frame_side(img_path: Path, lbl2_path: Path, lbl3_path: Path, pts: 
         vis.run()
         vis.destroy_window()
 
+
+def _as_dir_list(dirs_or_dir) -> List[Path]:
+    """Normalize a Path or List[Path] into a List[Path]."""
+    if isinstance(dirs_or_dir, (list, tuple)):
+        return [Path(d) for d in dirs_or_dir]
+    return [Path(dirs_or_dir)]
+
+def load_point_cloud_any_flex(dirs_or_dir, stem: str) -> Tuple[np.ndarray, Path]:
+    """Try *.pcd/bin across one or many velodyne dirs."""
+    dirs = _as_dir_list(dirs_or_dir)
+    last_attempt: Optional[Path] = None
+    for d in dirs:
+        pts, used = load_point_cloud_any(d, stem)
+        last_attempt = used
+        if used.exists() or pts.shape[0] > 0:
+            return pts, used
+    if last_attempt is None:
+        last_attempt = dirs[-1] / (stem + (".pcd" if USE_PCD_LIDAR else ".bin"))
+    return np.zeros((0,4), dtype=np.float32), last_attempt
+
+def collect_stems_flex(dirs_or_dir, exts: List[str]) -> set:
+    """Return stems from one or many dirs for given extensions."""
+    dirs = _as_dir_list(dirs_or_dir)
+    stems = set()
+    for d in dirs:
+        for ext in exts:
+            for p in glob.glob(str(d / f"*{ext}")):
+                stems.add(Path(p).stem)
+    return stems
+
 # ===================== Cooperative world visualization =====================
 
+# REPLACE your visualize_frame_coop_world with this version
 def visualize_frame_coop_world(root: str, stem: str):
     """
     Loads:
       - cooperative/label_world/<stem>.json  (3D boxes in world)
-      - vehicle-side/velodyne/<stem>.(pcd|bin)  -> T_world_veh_lidar
-      - infrastructure-side/velodyne/<stem>.(pcd|bin) -> T_world_infra_lidar
+      - vehicle-side velodyne (pcd/bin)  -> T_world_veh_lidar (novatel chain)
+      - infrastructure-side velodyne (pcd/bin) -> T_world_infra_lidar (direct)
     Draws fused clouds + boxes in one Open3D window.
     """
-    label_world_dir, coop_calib_dir, veh_velo_dir, infra_velo_dir = get_dirs_cooperative(root)
+    # get_dirs_cooperative must return lists for velodyne dirs:
+    #   veh_velo_dirs = [<root>/vehicle-side/velodyne, <root>/vehicle-side/velodyne_bin]
+    #   infra_velo_dirs = [<root>/infrastructure-side/velodyne, <root>/infrastructure-side/velodyne_bin]
+    label_world_dir, _coop_calib_dir, veh_velo_dirs, infra_velo_dirs = get_dirs_cooperative(root)
+
+    # --- world-frame labels
     lbl_world_path = label_world_dir / f"{stem}.json"
     if not lbl_world_path.exists():
         raise FileNotFoundError(f"World label not found: {lbl_world_path}")
-
-    # Load world-frame boxes
     boxes_world = parse_3d_json(lbl_world_path)
 
-    # Load both point clouds
-    veh_pts, veh_used = load_point_cloud_any(veh_velo_dir, stem)
-    infra_pts, infra_used = load_point_cloud_any(infra_velo_dir, stem)
+    # --- point clouds (try velodyne/ then velodyne_bin/)
+    veh_pts,   veh_used   = load_point_cloud_any_flex(veh_velo_dirs, stem)
+    infra_pts, infra_used = load_point_cloud_any_flex(infra_velo_dirs, stem)
 
-    # Find transforms
+    if veh_pts.shape[0] == 0:
+        print(f"[WARN] Vehicle cloud missing/empty for '{stem}' (tried {veh_used})")
+    if infra_pts.shape[0] == 0:
+        print(f"[WARN] Infra cloud missing/empty for '{stem}' (tried {infra_used})")
+
+    # --- world transforms
+    # Requires the updated find_world_T_lidar that prioritizes:
+    #   veh: novatel_to_world ∘ lidar_to_novatel
+    #   infra: virtuallidar_to_world
     T_w_veh = find_world_T_lidar(root, stem, "veh")
     T_w_inf = find_world_T_lidar(root, stem, "infra")
 
     def apply_T(pts: np.ndarray, T: Optional[np.ndarray]) -> np.ndarray:
-        if pts.shape[0] == 0: return pts
+        if pts.shape[0] == 0:
+            return pts
         if T is None:
             print("[WARN] Missing world transform; leaving points in original lidar frame.")
             return pts[:, :4]
-        P = np.hstack([pts[:, :3], np.ones((pts.shape[0],1), dtype=float)])  # Nx4
+        P = np.hstack([pts[:, :3], np.ones((pts.shape[0], 1), dtype=float)])  # Nx4
         Pw = (T @ P.T).T[:, :3]
         return np.hstack([Pw, pts[:, 3:4]])  # keep intensity
 
-    veh_world = apply_T(veh_pts, T_w_veh)
+    veh_world   = apply_T(veh_pts,   T_w_veh)
     infra_world = apply_T(infra_pts, T_w_inf)
 
-    # Open3D visualization
+    # --- Open3D viz
     if o3d is None:
         raise RuntimeError("open3d is required for cooperative world visualization")
 
     geoms = []
-
     if veh_world.shape[0] > 0:
         pcd_v = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(veh_world[:, :3]))
-        # gray for vehicle
-        pcd_v.colors = o3d.utility.Vector3dVector(np.ones_like(veh_world[:, :3]) * 0.6)
+        pcd_v.colors = o3d.utility.Vector3dVector(np.ones_like(veh_world[:, :3]) * 0.6)  # gray
         geoms.append(pcd_v)
 
     if infra_world.shape[0] > 0:
         pcd_i = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(infra_world[:, :3]))
-        # a different tint for infra (light bluish)
-        pcd_i.colors = o3d.utility.Vector3dVector(np.tile(np.array([[0.5, 0.6, 1.0]]), (infra_world.shape[0], 1)))
+        pcd_i.colors = o3d.utility.Vector3dVector(
+            np.tile(np.array([[0.5, 0.6, 1.0]]), (infra_world.shape[0], 1))
+        )  # bluish
         geoms.append(pcd_i)
 
-    # Boxes (red)
+    # world-frame boxes (red)
     for o in boxes_world:
-        h,w,l = o["dims_hwl"]; c = o["center"]; yaw = o["yaw"]
+        h, w, l = o["dims_hwl"]; c = o["center"]; yaw = o["yaw"]
         corners_w = lidar_box_corners(c, h, w, l, yaw)
         b = make_open3d_box(corners_w, color=(1.0, 0.0, 0.0))
-        if b is not None: geoms.append(b)
+        if b is not None:
+            geoms.append(b)
 
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name=f"COOPERATIVE WORLD — {stem}", width=1440, height=900, visible=True)
     opt = vis.get_render_option()
     if opt:
         opt.point_size = O3D_POINT_SIZE
-        opt.background_color = np.array([0,0,0])
+        opt.background_color = np.array([0, 0, 0])
     for g in geoms:
         vis.add_geometry(g)
     vis.poll_events(); vis.update_renderer()
@@ -790,8 +848,8 @@ def main():
         ids = sorted([Path(p).stem for p in glob.glob(str(label_world_dir / "*.json"))])
         if len(ids) == 0:
             # Fall back: intersect veh/infra velodyne stems
-            veh_ids = set(Path(p).stem for p in glob.glob(str(veh_velo_dir / "*.pcd"))) | set(Path(p).stem for p in glob.glob(str(veh_velo_dir / "*.bin")))
-            inf_ids = set(Path(p).stem for p in glob.glob(str(infra_velo_dir / "*.pcd"))) | set(Path(p).stem for p in glob.glob(str(infra_velo_dir / "*.bin")))
+            veh_ids = collect_stems_flex(veh_velo_dir, [".pcd", ".bin"])
+            inf_ids = collect_stems_flex(infra_velo_dir, [".pcd", ".bin"])
             ids = sorted(veh_ids & inf_ids)
         if len(ids) == 0:
             raise RuntimeError("No frames found for cooperative_world mode (no label_world/*.json or velodyne files).")
