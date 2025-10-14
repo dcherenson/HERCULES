@@ -39,6 +39,7 @@ except ImportError:
 
 # Base path to your cooperative-vehicle-infrastructure folder (native format)
 DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth_TEST1/cooperative-vehicle-infrastructure/"
+# DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C/cooperative-vehicle-infrastructure/"
 
 # View mode: 'veh', 'infra', or 'cooperative_world'
 # The SIDE value is ignored in cooperative world mode
@@ -133,6 +134,50 @@ def load_point_cloud_any_from_dirs(velodyne_dirs: List[Path], stem: str) -> Tupl
     return np.zeros((0,4), dtype=np.float32), last_attempt
 
 # ===================== JSON readers (robust to variants) =====================
+def _to_float_ndarray(x) -> Optional[np.ndarray]:
+    """
+    Coerce arbitrarily nested lists/tuples (possibly with dict-wrapped scalars)
+    into a float ndarray. Returns None if x isn't array-like.
+    """
+    if isinstance(x, (list, tuple, np.ndarray)):
+        obj = np.array(x, dtype=object)
+        vec = np.vectorize(lambda v: _as_float(v, default=np.nan))
+        arr = vec(obj).astype(float)
+        return arr
+    return None
+
+
+def _as_float(v, default=0.0):
+    """Coerce numbers that may be nested in dicts or strings into float."""
+    try:
+        if v is None:
+            return default
+        # direct numeric
+        if isinstance(v, (int, float, np.number)):
+            return float(v)
+        # string -> float
+        if isinstance(v, str):
+            v = v.strip()
+            if v == "":
+                return default
+            return float(v)
+        # dict wrappers like {"value": ...}, {"data": ...}, {"v": ...}
+        if isinstance(v, dict):
+            for k in ("value", "val", "data", "v", "num"):
+                if k in v:
+                    return _as_float(v[k], default)
+            # sometimes {"x":..,"y":..,"z":..} appears where a scalar was expected; fall back
+            # (not ideal, but avoids crashes)
+            for k in ("x", "y", "z"):
+                if k in v and isinstance(v[k], (int, float, str, np.number)):
+                    return _as_float(v[k], default)
+        # singletons like [3.14]
+        if isinstance(v, (list, tuple)) and len(v) == 1:
+            return _as_float(v[0], default)
+    except Exception:
+        pass
+    return default
+
 
 def read_json(p: Path):
     with open(p, "r") as f:
@@ -290,36 +335,60 @@ def load_extrinsic_to_cam(T_json: Path) -> np.ndarray:
     return M
 
 # --------- Robust world transform loader (for cooperative mode) ---------
-
 def _load_44_json(path: Path) -> Optional[np.ndarray]:
-    if not path.exists(): return None
+    if not path.exists():
+        return None
     J = read_json(path)
-    # try common shapes
-    for k in ("matrix","transform","Tr","T","pose","Mat","M"):
+
+    def arr_to_44(arr: np.ndarray) -> Optional[np.ndarray]:
+        if arr is None:
+            return None
+        flat = arr.reshape(-1)
+        if flat.size == 16:
+            return flat.reshape(4, 4)
+        if flat.size == 12:
+            M = np.eye(4, dtype=float)
+            M[:3, :] = flat.reshape(3, 4)
+            return M
+        return None
+
+    # 1) Look for common top-level keys with either raw arrays or nested dicts
+    for k in ("matrix", "transform", "Tr", "T", "pose", "Mat", "M"):
         if k in J:
             v = J[k]
             if isinstance(v, dict):
-                for kk in ("matrix","data","values"):
+                # nested: try matrix/data/values first
+                for kk in ("matrix", "data", "values"):
                     if kk in v:
-                        arr = np.array(v[kk], dtype=float)
-                        if arr.size in (12,16):
-                            if arr.size == 16: return arr.reshape(4,4)
-                            M = np.eye(4); M[:3,:] = arr.reshape(3,4); return M
+                        A = arr_to_44(_to_float_ndarray(v[kk]))
+                        if A is not None:
+                            return A
+                # also allow rotation+translation nested under this key
+                if "rotation" in v and "translation" in v:
+                    try:
+                        return load_extrinsic_to_world_like(v)
+                    except Exception:
+                        pass
             else:
-                arr = np.array(v, dtype=float)
-                if arr.size in (12,16):
-                    if arr.size == 16: return arr.reshape(4,4)
-                    M = np.eye(4); M[:3,:] = arr.reshape(3,4); return M
-    # try rotation+translation
+                A = arr_to_44(_to_float_ndarray(v))
+                if A is not None:
+                    return A
+
+    # 2) rotation + translation at the root
     if "rotation" in J and "translation" in J:
-        M = load_extrinsic_to_world_like(J)  # type: ignore
-        if isinstance(M, np.ndarray) and M.shape == (4,4): return M
-    # flat list?
-    arr = np.array(J, dtype=float)
-    if arr.size in (12,16):
-        if arr.size == 16: return arr.reshape(4,4)
-        M = np.eye(4); M[:3,:] = arr.reshape(3,4); return M
+        try:
+            return load_extrinsic_to_world_like(J)
+        except Exception:
+            pass
+
+    # 3) Flat list at the root (ONLY if array-like, not a dict)
+    A = _to_float_ndarray(J)
+    M = arr_to_44(A)
+    if M is not None:
+        return M
+
     return None
+
 
 def load_extrinsic_to_world_like(J: Dict[str, Any]) -> np.ndarray:
     # helper used above
@@ -466,50 +535,99 @@ def parse_2d_json(path_json: Path) -> List[Dict[str, Any]]:
     return out
 
 def _extract_center(g: Dict[str, Any]) -> np.ndarray:
+    # DAIR variants: "3d_location": {"x":..., "y":..., "z":...} and each may be nested (e.g., {"value": ...})
     if "3d_location" in g and isinstance(g["3d_location"], dict):
-        x = float(g["3d_location"].get("x", 0.0))
-        y = float(g["3d_location"].get("y", 0.0))
-        z = float(g["3d_location"].get("z", 0.0))
-        return np.array([x,y,z], dtype=float)
-    if "center" in g and isinstance(g["center"], (list,tuple)) and len(g["center"])==3:
-        return np.array([float(g["center"][0]), float(g["center"][1]), float(g["center"][2])], dtype=float)
-    return np.array([0.0,0.0,0.0], dtype=float)
+        loc = g["3d_location"]
+        x = _as_float(loc.get("x"), 0.0)
+        y = _as_float(loc.get("y"), 0.0)
+        z = _as_float(loc.get("z"), 0.0)
+        return np.array([x, y, z], dtype=float)
 
-def _extract_dims_hwl(g: Dict[str, Any]) -> Tuple[float,float,float]:
+    # Alternate: "center": [x,y,z] or {"x":..}
+    if "center" in g:
+        c = g["center"]
+        if isinstance(c, (list, tuple)) and len(c) == 3:
+            return np.array([_as_float(c[0]), _as_float(c[1]), _as_float(c[2])], dtype=float)
+        if isinstance(c, dict):
+            x = _as_float(c.get("x"), 0.0)
+            y = _as_float(c.get("y"), 0.0)
+            z = _as_float(c.get("z"), 0.0)
+            return np.array([x, y, z], dtype=float)
+
+    return np.array([0.0, 0.0, 0.0], dtype=float)
+
+
+def _extract_dims_hwl(g: Dict[str, Any]) -> Tuple[float, float, float]:
+    # Standard DAIR keys
     if "3d_dimensions" in g and isinstance(g["3d_dimensions"], dict):
-        h = float(g["3d_dimensions"].get("h", 0.0))
-        w = float(g["3d_dimensions"].get("w", 0.0))
-        l = float(g["3d_dimensions"].get("l", 0.0))
-        return h,w,l
+        d = g["3d_dimensions"]
+        h = _as_float(d.get("h"), 0.0)
+        w = _as_float(d.get("w"), 0.0)
+        l = _as_float(d.get("l"), 0.0)
+        return h, w, l
     if "dimensions" in g and isinstance(g["dimensions"], dict):
-        h = float(g["dimensions"].get("h", 0.0))
-        w = float(g["dimensions"].get("w", 0.0))
-        l = float(g["dimensions"].get("l", 0.0))
-        return h,w,l
-    if "size" in g and isinstance(g["size"], (list,tuple)) and len(g["size"])==3:
-        l,w,h = [float(v) for v in g["size"]]
-        return h,w,l
-    return 0.0,0.0,0.0
+        d = g["dimensions"]
+        h = _as_float(d.get("h"), 0.0)
+        w = _as_float(d.get("w"), 0.0)
+        l = _as_float(d.get("l"), 0.0)
+        return h, w, l
+
+    # Some formats use "size": [l, w, h] possibly wrapped
+    if "size" in g:
+        s = g["size"]
+        if isinstance(s, (list, tuple)) and len(s) == 3:
+            l = _as_float(s[0], 0.0)
+            w = _as_float(s[1], 0.0)
+            h = _as_float(s[2], 0.0)
+            return h, w, l
+        if isinstance(s, dict):  # e.g., {"l": {...}, "w": {...}, "h": {...}}
+            h = _as_float(s.get("h"), 0.0)
+            w = _as_float(s.get("w"), 0.0)
+            l = _as_float(s.get("l"), 0.0)
+            return h, w, l
+
+    return 0.0, 0.0, 0.0
+
 
 def _extract_yaw(g: Dict[str, Any]) -> float:
-    if "rotation" in g:   return float(g["rotation"])
-    if "yaw" in g:        return float(g["yaw"])
-    if "rotation_y" in g: return float(g["rotation_y"])
+    # Accept "rotation", "yaw", or "rotation_y" in any wrapped form
+    for key in ("rotation", "yaw", "rotation_y", "ry"):
+        if key in g:
+            return _as_float(g[key], 0.0)
+    # Sometimes orientation is a dict with degrees/radians flag; if so, try to unwrap "value"
+    if "orientation" in g:
+        return _as_float(g["orientation"], 0.0)
     return 0.0
+
 
 def _extract_world8(g: Dict[str, Any]) -> Optional[np.ndarray]:
     pts = g.get("world_8_points", None)
-    if pts is None: 
+    if pts is None:
         return None
+    # case 1: already numeric [[x,y,z], ...]
     try:
         arr = np.array(pts, dtype=float)
         if arr.shape == (8, 3):
             return arr
-        # try to coerce flat list of 24
         if arr.size == 24:
             return arr.reshape(8, 3)
     except Exception:
         pass
+
+    # case 2: list of dicts [{"x":..,"y":..,"z":..}, ...]
+    if isinstance(pts, list) and len(pts) == 8 and isinstance(pts[0], dict):
+        out = np.zeros((8, 3), dtype=float)
+        for i, p in enumerate(pts):
+            out[i, 0] = _as_float(p.get("x"), 0.0)
+            out[i, 1] = _as_float(p.get("y"), 0.0)
+            out[i, 2] = _as_float(p.get("z"), 0.0)
+        return out
+
+    # case 3: dict with a nested field like {"points": [...]} or {"data": [...]}
+    if isinstance(pts, dict):
+        for k in ("points", "data", "value", "vals"):
+            if k in pts:
+                return _extract_world8({"world_8_points": pts[k]})
     return None
 
 def parse_3d_json(path_json: Path) -> List[Dict[str, Any]]:

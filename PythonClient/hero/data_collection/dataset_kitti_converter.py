@@ -21,8 +21,12 @@ import numpy as np
 import cv2
 
 # ===================== Defaults (override by CLI) =====================
-SRC_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_TEST1/cooperative-vehicle-infrastructure/")
-OUT_ROOT = Path("/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_TEST1_kitti")
+# SRC_ROOT = Path("/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth_TEST1/cooperative-vehicle-infrastructure/")
+# OUT_ROOT = Path("/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth_TEST1_kitti")
+
+SRC_ROOT = Path("/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C-SUBSET1/cooperative-vehicle-infrastructure/")
+OUT_ROOT = Path("/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C-SUBSET1_kitti")
+
 SIDES    = ["vehicle-side", "infrastructure-side"]
 YAW_OFFSET_RAD = math.pi / 2.0  # change via --yaw_offset_deg
 # =====================================================================
@@ -101,73 +105,115 @@ def _euler_to_R(roll: float, pitch: float, yaw: float, degrees: bool=False) -> n
 
 def parse_extrinsic(T_json: Path) -> np.ndarray:
     J = read_json(T_json)
+
     def try_matrix_like(obj: Any) -> np.ndarray | None:
-        try: arr = np.array(obj, dtype=float).reshape(-1)
-        except Exception: return None
-        if arr.size == 16:
-            M = np.eye(4); M[:] = arr.reshape(4,4); return M
-        if arr.size == 12:
-            M = np.eye(4); M[:3,:] = arr.reshape(3,4); return M
+        try:
+            arr = np.array(obj, dtype=float)
+        except Exception:
+            return None
+        flat = arr.reshape(-1)
+        if flat.size == 16:
+            M = np.eye(4); M[:] = flat.reshape(4, 4); return M
+        if flat.size == 12:
+            M = np.eye(4); M[:3, :] = flat.reshape(3, 4); return M
+        # Some tools store a 3x3 R and a 3x1 t together; not handled here.
         return None
 
+    def coerce_R(rot: Any) -> np.ndarray | None:
+        # Accept 3x3 matrix, Euler(3), quaternion(4), or dict variants
+        if rot is None:
+            return None
+        if isinstance(rot, dict):
+            if all(k in rot for k in ("w","x","y","z")):
+                return _quat_to_R([rot["w"],rot["x"],rot["y"],rot["z"]])
+            if all(k in rot for k in ("x","y","z","w")):
+                return _quat_to_R([rot["w"],rot["x"],rot["y"],rot["z"]])
+            if all(k in rot for k in ("roll","pitch","yaw")):
+                return _euler_to_R(rot["roll"],rot["pitch"],rot["yaw"])
+            if "matrix" in rot:
+                arr = np.array(rot["matrix"], dtype=float).reshape(-1)
+                if arr.size == 9: return arr.reshape(3,3)
+        arr = np.array(rot, dtype=float).reshape(-1)
+        if arr.size == 3:
+            deg = (np.abs(arr).max() > 2*math.pi + 1e-6)
+            return _euler_to_R(arr[0], arr[1], arr[2], degrees=deg)
+        if arr.size == 4:
+            return _quat_to_R(arr)
+        if arr.size == 9:
+            return arr.reshape(3,3)
+        return None
+
+    def coerce_t(trans: Any) -> np.ndarray | None:
+        if trans is None:
+            return None
+        # Accept [x,y,z], [[x],[y],[z]], [[x,y,z]], tuples, dicts, etc.
+        if isinstance(trans, dict) and all(k in trans for k in ("x","y","z")):
+            arr = np.array([trans["x"], trans["y"], trans["z"]], dtype=float)
+        else:
+            arr = np.array(trans, dtype=float)
+        arr = arr.reshape(-1)
+        if arr.size >= 3:
+            return arr[:3].astype(float)
+        return None
+
+    # 1) Direct matrix-like forms
     M = None
     for k in ("matrix","T","transform","data","values"):
         if k in J:
-            M = try_matrix_like(J[k]); 
-            if M is not None: break
+            M = try_matrix_like(J[k])
+            if M is not None:
+                break
     if M is None:
         for k in ("matrix","T","transform"):
             node = J.get(k)
             if isinstance(node, dict):
                 for kk in ("matrix","data","values"):
                     M = try_matrix_like(node.get(kk))
-                    if M is not None: break
-            if M is not None: break
+                    if M is not None:
+                        break
+            if M is not None:
+                break
     if M is None and isinstance(J.get("extrinsic"), dict):
         node = J["extrinsic"]
         for kk in ("matrix","data","values"):
             M = try_matrix_like(node.get(kk))
-            if M is not None: break
+            if M is not None:
+                break
+    if M is not None:
+        # Good—already a 4x4 or 3x4
+        lower = T_json.as_posix().lower()
+        if any(s in lower for s in ("camera_to_lidar","cam_to_lidar","camera2lidar")):
+            M = np.linalg.inv(M)
+        return M
 
-    if M is None:
-        rot = J.get("rotation") or J.get("rot") or J.get("R")
-        trans = J.get("translation") or J.get("t") or J.get("trans") or J.get("T")
-        def build_from_rt(rot, trans):
-            R = None
-            if isinstance(rot, dict):
-                if all(k in rot for k in ("w","x","y","z")):
-                    R = _quat_to_R([rot["w"],rot["x"],rot["y"],rot["z"]])
-                elif all(k in rot for k in ("x","y","z","w")):
-                    R = _quat_to_R([rot["w"],rot["x"],rot["y"],rot["z"]])
-                elif all(k in rot for k in ("roll","pitch","yaw")):
-                    R = _euler_to_R(rot["roll"],rot["pitch"],rot["yaw"])
-                elif "matrix" in rot:
-                    R = np.array(rot["matrix"], dtype=float).reshape(3,3)
-            elif isinstance(rot, (list,tuple,np.ndarray)):
-                arr = np.array(rot, dtype=float).reshape(-1)
-                if arr.size == 3:
-                    deg = (np.abs(arr).max() > 2*math.pi + 1e-6)
-                    R = _euler_to_R(arr[0],arr[1],arr[2], degrees=deg)
-                elif arr.size == 4:
-                    R = _quat_to_R(arr)
-                elif arr.size == 9:
-                    R = arr.reshape(3,3)
-            t = None
-            if isinstance(trans, dict) and all(k in trans for k in ("x","y","z")):
-                t = np.array([trans["x"],trans["y"],trans["z"]], dtype=float)
-            elif isinstance(trans, (list,tuple)) and len(trans) == 3:
-                t = np.array([trans[0],trans[1],trans[2]], dtype=float)
-            if R is not None and t is not None:
-                M = np.eye(4); M[:3,:3] = R; M[:3,3] = t; return M
-        M = build_from_rt(rot, trans)
+    # 2) Build from rotation + translation
+    rot = J.get("rotation") or J.get("rot") or J.get("R")
+    trans = J.get("translation") or J.get("t") or J.get("trans") or J.get("T")
 
-    if M is None:
-        raise ValueError(f"Unrecognized extrinsic JSON: {T_json}")
+    R = coerce_R(rot)
+    t = coerce_t(trans)
+
+    # Some sources wrap both under "extrinsic": {"rotation":..., "translation":...}
+    if (R is None or t is None) and isinstance(J.get("extrinsic"), dict):
+        ex = J["extrinsic"]
+        if R is None:
+            R = coerce_R(ex.get("rotation") or ex.get("R"))
+        if t is None:
+            t = coerce_t(ex.get("translation") or ex.get("t"))
+
+    if R is None or t is None:
+        raise ValueError(f"Unrecognized extrinsic JSON (need rotation+translation or 3x4/4x4 matrix): {T_json}")
+
+    # Assemble homogeneous transform
+    M = np.eye(4, dtype=float)
+    M[:3, :3] = R
+    M[:3,  3] = t  # <- t is guaranteed flat length-3 now
 
     lower = T_json.as_posix().lower()
     if any(s in lower for s in ("camera_to_lidar","cam_to_lidar","camera2lidar")):
         M = np.linalg.inv(M)
     return M
+
 
 def lidar_box_cam_fields(center_l: Iterable[float], dims_lwh: Iterable[float],
                          yaw_l: float, T_cam_l: np.ndarray):
@@ -221,7 +267,7 @@ def write_kitti_label2(out_txt: Path, objs: List[Dict[str,Any]], K: np.ndarray,
         return l,t,r,b
     lines: List[str] = []
     for o in objs:
-        typ = o.get("type","Car")
+        typ = o.get("type","car")
         dims = o.get("3d_dimensions") or o.get("dimensions") or o.get("size")
         loc  = o.get("3d_location")  or o.get("location")   or o.get("center")
         yaw  = float(o.get("rotation", 0.0))
@@ -343,7 +389,7 @@ def convert_side(side: str, src_root: Path, out_root: Path,
         twod = []
         for o in (recs2 or []):
             if "2d_box" in o and isinstance(o["2d_box"], dict):
-                twod.append({"2d_box": o["2d_box"], "type": o.get("type","Car")})
+                twod.append({"2d_box": o["2d_box"], "type": o.get("type","car")})
             elif "bbox" in o and isinstance(o["bbox"], dict):
                 bb = o["bbox"]
                 twod.append({"2d_box": {
@@ -351,18 +397,18 @@ def convert_side(side: str, src_root: Path, out_root: Path,
                     "ymin": bb.get("ymin") or bb.get("y1") or bb.get("top"),
                     "xmax": bb.get("xmax") or bb.get("x2") or bb.get("right"),
                     "ymax": bb.get("ymax") or bb.get("y2") or bb.get("bottom"),
-                }, "type": o.get("type","Car")})
+                }, "type": o.get("type","car")})
             else:
                 b = o.get("bbox")
                 if isinstance(b, (list,tuple)) and len(b) == 4:
                     x,y,w,h = b
                     twod.append({"2d_box": {"xmin":x,"ymin":y,"xmax":x+w,"ymax":y+h},
-                                 "type": o.get("type","Car")})
+                                 "type": o.get("type","car")})
 
         threed = [o for o in (recs3 or [])]
         merged = []
         for i, g in enumerate(threed):
-            rec = {"type": g.get("type","Car")}
+            rec = {"type": g.get("type","car")}
             if i < len(twod):
                 rec["2d_box"] = twod[i]["2d_box"]
                 rec["type"]   = twod[i].get("type", rec["type"])
@@ -435,7 +481,7 @@ def main():
                         help="Output KITTI root.")
     parser.add_argument("--sides", type=str, nargs="+", default=SIDES,
                         help="Sides to convert.")
-    parser.add_argument("--split", type=_parse_split_arg, default=(0.85, 0.15, 0.00),
+    parser.add_argument("--split", type=_parse_split_arg, default=(0.8, 0.2, 0.00),
                         help='Train/val/test split "85,15,0" or proportions "0.85,0.15,0.0".')
     parser.add_argument("--split-seed", type=int, default=1337)
     parser.add_argument("--yaw_offset_deg", type=float, default=math.degrees(YAW_OFFSET_RAD))

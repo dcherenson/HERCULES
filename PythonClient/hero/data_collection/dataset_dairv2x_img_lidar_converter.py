@@ -17,7 +17,9 @@ from PIL import Image
 
 # === USER CONFIGURATION ===
 DATASET_ROOT = Path(
-    "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth_TEST1"
+    # "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_FULL"
+    "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C-SUBSET1"
+
 )
 # ===========================
 

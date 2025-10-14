@@ -8,22 +8,11 @@ from typing import Dict, List, Optional, Tuple, Iterable, Any, Union
 # ====== CONFIG  ======
 # =====================
 CONFIG = {
-    # Root that contains your dataset folder
     "DATASETS_ROOT": "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets",
-
-    # The dataset folder name to sample from (must contain cooperative-vehicle-infrastructure/)
     "DATASET_NAME": "DAIR-V2X-C",
-
-    # Output subset folder name (created under DATASETS_ROOT)
     "OUTPUT_NAME": "DAIR-V2X-C-SUBSET1",
-
-    # Total pairs to copy at random
     "COUNT": 100,
-
-    # Random seed
     "SEED": 1337,
-
-    # Start index & dry run toggle
     "START_INDEX": 0,
     "DRY_RUN": False,
 }
@@ -51,10 +40,7 @@ CALIB_OPTIONAL = [
     "calib/novatel_to_world",
 ]
 
-# === Side-specific required modalities
-# Each entry can be:
-#   ("subdir", ["ext1","ext2"])  -> required single path
-#   [ ("subdirA", ["exts"]), ("subdirB", ["exts"]) ]  -> alternatives; first that exists is accepted
+# Side-specific required modalities (allow infra label/virtuallidar)
 PER_SIDE_REQUIRED_MODALITIES: Dict[str, List[Union[Tuple[str, List[str]], List[Tuple[str, List[str]]]]]] = {
     "vehicle-side": [
         ("image", ["png", "jpg", "jpeg"]),
@@ -66,7 +52,6 @@ PER_SIDE_REQUIRED_MODALITIES: Dict[str, List[Union[Tuple[str, List[str]], List[T
         ("image", ["png", "jpg", "jpeg"]),
         ("velodyne", ["bin", "pcd"]),
         ("label/camera", ["json"]),
-        # accept either label/lidar or label/virtuallidar
         [("label/lidar", ["json"]), ("label/virtuallidar", ["json"])],
     ],
 }
@@ -76,6 +61,13 @@ PER_SIDE_REQUIRED_MODALITIES: Dict[str, List[Union[Tuple[str, List[str]], List[T
 # =====================
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
+
+def copy_file(src: Path, dst: Path, dry: bool = False):
+    ensure_dir(dst.parent)
+    if dry:
+        print(f"[DRY] COPY {src} -> {dst}")
+    else:
+        shutil.copy2(src, dst)
 
 def first_existing(base: Path, rel: str, stem: str, exts: List[str]) -> Optional[Path]:
     d = base / rel
@@ -90,23 +82,16 @@ def first_existing(base: Path, rel: str, stem: str, exts: List[str]) -> Optional
 def copy_group(dst_side_root: Path, mapping: Dict[str, Path], new_base: str, dry: bool):
     for sub, src in mapping.items():
         out_dir = dst_side_root / sub
-        ensure_dir(out_dir)
         out_file = out_dir / f"{new_base}{src.suffix}"
-        if dry:
-            print(f"[DRY] COPY {src} -> {out_file}")
-        else:
-            shutil.copy2(src, out_file)
+        copy_file(src, out_file, dry=dry)
 
 def width_for(n: int) -> int:
-    # at least 4 for nicer sorting, otherwise digits of (n-1)
     return max(4, len(str(max(0, n - 1))))
-
 
 # ---------- Pairs from cooperative/data_info.json ----------
 IMG_PATH_RE = re.compile(r"(vehicle-side|infrastructure-side)/image/([^/]+)\.(png|jpg|jpeg)$", re.IGNORECASE)
 
 def _iter_strings(obj: Any) -> Iterable[str]:
-    """Yield all string values recursively from an arbitrary JSON structure."""
     if isinstance(obj, str):
         yield obj
     elif isinstance(obj, dict):
@@ -117,9 +102,6 @@ def _iter_strings(obj: Any) -> Iterable[str]:
             yield from _iter_strings(v)
 
 def extract_pair_from_record(rec: Any) -> Optional[Tuple[str, str]]:
-    """
-    Return (veh_stem, infra_stem) if both image paths are found anywhere in the record.
-    """
     veh_stem = None
     infra_stem = None
     for s in _iter_strings(rec):
@@ -136,13 +118,9 @@ def extract_pair_from_record(rec: Any) -> Optional[Tuple[str, str]]:
     return None
 
 def load_pairs_from_data_info(coop_dir: Path) -> List[Tuple[str, str]]:
-    """
-    Parse cooperative/data_info.json and produce list of (veh_stem, infra_stem).
-    """
     di_path = coop_dir / "cooperative" / "data_info.json"
     if not di_path.is_file():
         return []
-
     with open(di_path, "r") as f:
         data = json.load(f)
 
@@ -166,7 +144,6 @@ def load_pairs_from_data_info(coop_dir: Path) -> List[Tuple[str, str]]:
         if p:
             pairs.append(p)
 
-    # Deduplicate preserving order
     seen = set()
     uniq_pairs = []
     for v, i in pairs:
@@ -175,15 +152,9 @@ def load_pairs_from_data_info(coop_dir: Path) -> List[Tuple[str, str]]:
             seen.add((v, i))
     return uniq_pairs
 
-
-# ---------- Validation using per-side stems & alternatives ----------
+# ---------- Validation ----------
 def resolve_required(side_root: Path, requirement: Union[Tuple[str, List[str]], List[Tuple[str, List[str]]]], stem: str) -> Optional[Tuple[str, Path]]:
-    """
-    For a requirement that may be a single (sub,exts) or a list of alternatives,
-    return (chosen_sub, existing_path) if satisfied, else None.
-    """
     if isinstance(requirement, list):
-        # Alternatives: return first that exists
         for sub, exts in requirement:
             p = first_existing(side_root, sub, stem, exts)
             if p is not None:
@@ -198,67 +169,46 @@ def resolve_required(side_root: Path, requirement: Union[Tuple[str, List[str]], 
 
 def validate_side_for_stem(side_root: Path, side: str, stem: str) -> Optional[Dict[str, Path]]:
     mapping: Dict[str, Path] = {}
-
-    # required modalities (with alternatives supported)
     for req in PER_SIDE_REQUIRED_MODALITIES[side]:
         found = resolve_required(side_root, req, stem)
         if found is None:
             return None
         chosen_sub, p = found
         mapping[chosen_sub] = p
-
-    # required calib
     for sub in CALIB_REQUIRED.get(side, []):
         p = first_existing(side_root, sub, stem, ["json"])
         if p is None:
             return None
         mapping[sub] = p
-
-    # optional calib
     for sub in CALIB_OPTIONAL:
         p = first_existing(side_root, sub, stem, ["json"])
         if p is not None:
             mapping[sub] = p
-
     return mapping
 
-
 def collect_valid_pairs(dataset_root: Path) -> List[Tuple[Tuple[str, str], Dict[str, Dict[str, Path]]]]:
-    """
-    Returns list of ((veh_stem, infra_stem), per_side_maps) for pairs that have all required files.
-    """
     coop_root = dataset_root / COOP
     pairs = load_pairs_from_data_info(dataset_root / COOP)
-
     if not pairs:
         print(f"ERROR: Could not extract pairs from '{coop_root / 'cooperative' / 'data_info.json'}'.", file=sys.stderr)
         return []
-
     out: List[Tuple[Tuple[str, str], Dict[str, Dict[str, Path]]]] = []
     for veh_stem, infra_stem in pairs:
         ok = True
         per_side: Dict[str, Dict[str, Path]] = {}
-
         vs_root = coop_root / "vehicle-side"
-        vs_map = validate_side_for_stem(vs_root, "vehicle-side", veh_stem)
-        if vs_map is None:
-            ok = False
-
         is_root = coop_root / "infrastructure-side"
+        vs_map = validate_side_for_stem(vs_root, "vehicle-side", veh_stem)
         is_map = validate_side_for_stem(is_root, "infrastructure-side", infra_stem)
-        if is_map is None:
+        if (vs_map is None) or (is_map is None):
             ok = False
-
         if ok:
             per_side["vehicle-side"] = vs_map
             per_side["infrastructure-side"] = is_map
             out.append(((veh_stem, infra_stem), per_side))
-
     return out
 
-
 def diagnose_missing(dataset_root: Path, max_print: int = 12):
-    """Show why some candidate pairs are failing."""
     coop_root = dataset_root / COOP
     pairs = load_pairs_from_data_info(dataset_root / COOP)
     if not pairs:
@@ -267,7 +217,6 @@ def diagnose_missing(dataset_root: Path, max_print: int = 12):
     printed = 0
     for veh_stem, infra_stem in pairs:
         issues = {}
-        # vehicle-side
         vs_root = coop_root / "vehicle-side"
         miss_vs = []
         for req in PER_SIDE_REQUIRED_MODALITIES["vehicle-side"]:
@@ -285,7 +234,6 @@ def diagnose_missing(dataset_root: Path, max_print: int = 12):
         if miss_vs:
             issues["vehicle-side"] = miss_vs
 
-        # infrastructure-side
         is_root = coop_root / "infrastructure-side"
         miss_is = []
         for req in PER_SIDE_REQUIRED_MODALITIES["infrastructure-side"]:
@@ -311,6 +259,29 @@ def diagnose_missing(dataset_root: Path, max_print: int = 12):
             if printed >= max_print:
                 break
 
+# ---------- cooperative/label_world support ----------
+def copy_label_world_for_pair(coop_src_root: Path, coop_dst_root: Path,
+                              veh_stem: str, infra_stem: str, dry: bool) -> List[str]:
+    """
+    Copy label_world files whose stem matches veh_stem or infra_stem.
+    Returns list of filenames copied.
+    """
+    src_dir = coop_src_root / "cooperative" / "label_world"
+    if not src_dir.is_dir():
+        return []
+    dst_dir = coop_dst_root / "cooperative" / "label_world"
+    ensure_dir(dst_dir)
+
+    copied: List[str] = []
+    # Copy any extension that matches the stems (usually .json)
+    for stem in (veh_stem, infra_stem):
+        for p in src_dir.glob(f"{stem}.*"):
+            dst = dst_dir / p.name
+            if not dst.exists():
+                copy_file(p, dst, dry=dry)
+            copied.append(p.name)
+    # Deduplicate list
+    return sorted(list(dict.fromkeys(copied)))
 
 # =====================
 # ====== Main    =====
@@ -345,9 +316,12 @@ def main():
     if not cfg["DRY_RUN"]:
         ensure_dir(coop_out / "vehicle-side")
         ensure_dir(coop_out / "infrastructure-side")
+        # also ensure cooperative subtree for label_world
+        ensure_dir(coop_out / "cooperative")
 
     # Auto width for filenames
-    pad_width = width_for(int(cfg["START_INDEX"]) + take)
+    # pad_width = width_for(int(cfg["START_INDEX"]) + take)
+    pad_width = 6  # force KITTI-friendly width
 
     # Copy
     global_idx = int(cfg["START_INDEX"])
@@ -356,10 +330,17 @@ def main():
         new_base = str(global_idx).zfill(pad_width)
         for side, mp in per_side_maps.items():
             copy_group(coop_out / side, mp, new_base, cfg["DRY_RUN"])
+
+        # NEW: copy cooperative/label_world files that match either stem
+        world_files = copy_label_world_for_pair(
+            coop_root, coop_out, veh_stem, infra_stem, cfg["DRY_RUN"]
+        )
+
         mapping.append({
             "vehicle_old_basename": veh_stem,
             "infrastructure_old_basename": infra_stem,
-            "new_basename": new_base
+            "new_basename": new_base,
+            "label_world_copied": world_files,   # <- recorded
         })
         global_idx += 1
 
@@ -378,6 +359,7 @@ def main():
         "required_calib": CALIB_REQUIRED,
         "optional_calib": CALIB_OPTIONAL,
         "paired_by": "cooperative/data_info.json",
+        "label_world_source": str(coop_root / "cooperative" / "label_world"),
     }
     if cfg["DRY_RUN"]:
         print(f"[DRY] Would write manifest to {out_root / 'compose_manifest.json'}")
