@@ -39,13 +39,12 @@ def main():
     # ---- User params ----
     world_size   = 700        # X/Y span (m), same as your working script
     patch_size   = 100        # cube side (m)
-    stack_height = 600        # total height to cover (m)
+    stack_height = 100        # total height to cover (m)
     resolution   = 0.5        # voxel size (m)
     world_center = (0.0, 0.0, 0.0)    # ground (NED Z = 0)
-    output_dir   = "/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customcity_0p5mcubed"
-    port         = 41451
+    output_dir   = "/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customforest_0p5mcubed"
+    port         = 41452
     # ----------------------
-
     os.makedirs(output_dir, exist_ok=True)
     client = airsim.VehicleClient(port=port)
 

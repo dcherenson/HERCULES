@@ -2,11 +2,14 @@
 set -euo pipefail
 
 # ====== CONFIG ======
-BINVOX_DIR="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customcity_0p5mcubed"
+BINVOX_DIR="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customforest_0p5mcubed"
 BINVOX2BT="/home/sgarimella34/octomap/bin/binvox2bt_unique_offsets"
 BT_DIR="$BINVOX_DIR"                           # where layer_*.bt will be written
 PATCH_SIZE=100                                 # must match Python collector
-BBOX="-500 -500 -600 500 500 600"              # crop box for octomap
+
+# BBOX="xmin ymin zmin xmax ymax zmax"
+# BBOX="-500 -500 -600 500 500 600"              # crop box for octomap
+BBOX="-1000 -1000 -600 1000 1000 600"
 # =====================
 
 usage() {
