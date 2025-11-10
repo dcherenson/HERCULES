@@ -3,22 +3,22 @@
 Draw fire-spread boundaries on a PGM map and emit a paste-ready
 UE5 Python snippet that spawns BP_FireCube actors ONLY inside those regions.
 
-IMPROVEMENTS vs previous:
-- Fills the polygon INTERIOR using a hexagonal lattice (best packing) with mild jitter.
-- Orders points from centroid -> boundary to emulate a natural spread.
-- Seeds are selected per polygon (first and every SEED_STRIDE thereafter).
-- "Not over the top": density controlled via SPACING_M and optional MAX_CUBES_TOTAL.
+Improvements:
+- Fills polygon interiors with a hex lattice + mild jitter.
+- Orders points from centroid -> boundary to emulate natural spread.
+- Switchable seeding policy: exactly one seed per polygon OR centroid + stride.
+- UE snippet hard-disables FX on non-seeds, only enables seed at start, with optional timed spread.
 
 HOW TO USE
 ----------
-1) Adjust USER SETTINGS below (paths, map->world, density, UE params).
+1) Adjust USER SETTINGS (paths, density, seeding policy, UE params).
 2) Run: python fire_spawn_map.py
 3) Draw one or more polygons:
    - Left-click to add vertices
-   - Press ENTER to finish a polygon
+   - Press ENTER to finish one polygon (it is stored)
    - Draw more if needed
    - Close the window when done
-4) Copy the printed UE5 snippet and paste it into the UE5 Python Console.
+4) Copy printed UE5 snippet and paste into UE5 Python Console.
 """
 
 import sys
@@ -43,9 +43,14 @@ PGM_PATH = "/home/sgarimella34/multi-robot-coordination/trajectory_data/occupanc
 # 2) Density / distribution
 SPACING_M = 3.0         # target center-to-center spacing between FireCubes (meters)
 JITTER_FRAC = 0.15      # random jitter as a fraction of spacing (0..0.3 recommended)
-SEED_STRIDE = 10        # per polygon: first point is seed, then every Nth (distance order)
 GLOBAL_SEED = 1337      # deterministic sampling/jitter and yaw
 MAX_CUBES_TOTAL = 1200  # safety cap; set None to disable
+
+# 2a) Seeding policy switch:
+#    "centroid" -> exactly one seed (the centroid/closest) per polygon
+#    "stride"   -> centroid is a seed AND every SEED_STRIDE-th point thereafter
+SEED_POLICY = "centroid"   # "centroid" or "stride"
+SEED_STRIDE = 10           # used only if SEED_POLICY == "stride" and > 1
 
 # 3) Map->World parameters
 RES_M = 0.5             # meters per pixel
@@ -54,13 +59,18 @@ ORIGIN_Y_M = 0.0        # world Y (m) at image center
 FLIP_Y_WORLD = False    # set True if UE Y is inverted relative to map's up
 WORLD_SCALE_CM = 100.0  # centimeters per meter for UE (usually 100)
 
-# 4) UE spawn parameters
+# 4) UE spawn parameters (used inside emitted snippet)
 BP_REF = "/Game/Vefects/Free_Fire/Blueprints/BP_FireCube"
 AUTO_ROTATE = True
 ASSIGN_TAGS = True
 TRACE_TOP_Z = 20000.0
 TRACE_BOTTOM_Z = -20000.0
 GROUND_Z_OFFSET_CM = 80.0
+
+# 5) Optional timed spread (handled inside the emitted UE snippet)
+DO_TIMED_SPREAD   = True     # if False: only seeds burn; others remain off
+SPREAD_BATCH_SIZE = 8        # cubes per wave
+SPREAD_INTERVAL_S = 0.75     # seconds between waves
 
 # =========================
 # ====== CORE LOGIC =======
@@ -168,7 +178,6 @@ def hex_fill_points_inside(path: Path, spacing_px: float) -> np.ndarray:
     Generate a hexagonal lattice of points inside polygon 'path' with given spacing in pixels.
     Returns Nx2 array in pixel coords.
     """
-    # Hex grid parameters
     dx = spacing_px
     dy = spacing_px * math.sqrt(3) / 2.0
 
@@ -176,12 +185,10 @@ def hex_fill_points_inside(path: Path, spacing_px: float) -> np.ndarray:
     xmin, ymin = bbox[0]
     xmax, ymax = bbox[1]
 
-    # Build grid
     pts = []
     row = 0
     y = ymin
     while y <= ymax:
-        # offset every other row by dx/2
         x_start = xmin + (dx * 0.5 if (row % 2) == 1 else 0.0)
         x = x_start
         while x <= xmax:
@@ -205,15 +212,17 @@ def apply_jitter(points_px: np.ndarray, spacing_px: float, frac: float, path: Pa
     mag = spacing_px * frac
     jitter = (np.random.rand(*points_px.shape) - 0.5) * 2.0 * mag
     jittered = points_px + jitter
-
-    # If jittered falls outside, keep original
     mask_inside = np.array([path.contains_point(tuple(p)) for p in jittered], dtype=bool)
     out = points_px.copy()
     out[mask_inside] = jittered[mask_inside]
     return out
 
+# =========================
+# ===== UE5 SNIPPET =======
+# =========================
+
 UE_TEMPLATE = r'''# === AUTO-GENERATED: Paste this into the UE5 Python Console ===
-import unreal, random
+import unreal, random, time
 
 # ----- SETTINGS YOU CAN TWEAK -----
 BP_REF               = {bp_ref!r}
@@ -223,6 +232,9 @@ ASSIGN_TAGS          = {assign_tags}
 TRACE_TOP_Z          = {trace_top_z}
 TRACE_BOTTOM_Z       = {trace_bottom_z}
 GROUND_Z_OFFSET_CM   = {ground_z_offset_cm}
+DO_TIMED_SPREAD      = {do_timed_spread}
+SPREAD_BATCH_SIZE    = {spread_batch}
+SPREAD_INTERVAL_S    = {spread_interval}
 # ----------------------------------
 
 world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
@@ -282,16 +294,65 @@ def ground_project(x: float, y: float) -> unreal.Vector:
         return unreal.Vector(p.x, p.y, p.z + GROUND_Z_OFFSET_CM)
     return unreal.Vector(x, y, 0.0 + GROUND_Z_OFFSET_CM)
 
-def spawn_fire(loc: unreal.Vector, idx: int, is_seed: bool=False) -> unreal.Actor:
+# ---------- FX control (hard override) ----------
+def _get_fx_components(actor):
+    fx = []
+    try:
+        for c in actor.get_components_by_class(unreal.NiagaraComponent):
+            fx.append(c)
+    except Exception:
+        pass
+    try:
+        for c in actor.get_components_by_class(unreal.ParticleSystemComponent):
+            fx.append(c)
+    except Exception:
+        pass
+    return fx
+
+def _deactivate_fx(actor):
+    for c in _get_fx_components(actor):
+        for m in ("deactivate", "deactivate_immediately", "deactivate_system"):
+            if hasattr(c, m):
+                try:
+                    getattr(c, m)()
+                    break
+                except Exception:
+                    pass
+        try: c.set_editor_property("auto_activate", False)
+        except Exception: pass
+        try: c.set_editor_property("visible", False)
+        except Exception: pass
+
+def _activate_fx(actor):
+    for c in _get_fx_components(actor):
+        try: c.set_editor_property("visible", True)
+        except Exception: pass
+        try: c.set_editor_property("auto_activate", True)
+        except Exception: pass
+        for m in ("activate", "activate_system", "reinitialize_system"):
+            if hasattr(c, m):
+                try:
+                    getattr(c, m)()
+                    break
+                except Exception:
+                    pass
+
+def spawn_fire(loc: unreal.Vector, idx: int, is_seed: bool) -> unreal.Actor:
     yaw = random.uniform(0, 360) if AUTO_ROTATE else 0.0
     rot = unreal.Rotator(0.0, yaw, 0.0)
     actor = lvl.spawn_actor_from_class(BP_CLASS, loc, rot)
     actor.set_actor_label(f"BP_FireCube_{{idx+1}}", True)
+
+    # Replace tags so class defaults can't keep StartFire on non-seeds
     if ASSIGN_TAGS:
-        tags = list(actor.tags)
-        if "Flammable" not in tags: tags.append("Flammable")
-        if is_seed and "StartFire" not in tags: tags.append("StartFire")
-        actor.tags = tags
+        actor.tags = (["Flammable", "StartFire"] if is_seed else ["Flammable"])
+
+    # Hard override FX state:
+    if is_seed:
+        _activate_fx(actor)     # only seeds burn now
+    else:
+        _deactivate_fx(actor)   # everyone else OFF regardless of BP defaults
+
     return actor
 
 # (x_cm, y_cm, is_seed) — ordered from centroid outward per polygon
@@ -299,37 +360,75 @@ FIRE_POINTS = [
 {points_block}
 ]
 
+actors = []
 idx = 0
 for (x_cm, y_cm, is_seed) in FIRE_POINTS:
     loc = ground_project(x_cm, y_cm)
-    spawn_fire(loc, idx, is_seed=bool(is_seed))
+    a = spawn_fire(loc, idx, bool(is_seed))
+    actors.append((bool(is_seed), a))
     idx += 1
 
-print(f"Spawned {{idx}} BP_FireCube actors from filled polygon regions.")
+print(f"Spawned {{idx}} BP_FireCube actors. Seeds burn; non-seeds off.")
+
+# Timed spread: turn ON FX for non-seeds in waves (in given order)
+if DO_TIMED_SPREAD:
+    print("Timed spread active...")
+    pending = [a for (is_seed, a) in actors if not is_seed]
+    for i in range(0, len(pending), SPREAD_BATCH_SIZE):
+        batch = pending[i:i+SPREAD_BATCH_SIZE]
+        for a in batch:
+            _activate_fx(a)
+        time.sleep(max(0.0, float(SPREAD_INTERVAL_S)))
+
+print("Done. Fire spreads outward from each polygon centroid.")
 # === END AUTO-GENERATED ===
 '''
 
-def emit_ue_snippet(points_world_cm_with_seed: np.ndarray,
-                    bp_ref: str, seed: int, auto_rotate: bool, assign_tags: bool,
-                    trace_top_z: float, trace_bottom_z: float, ground_z_offset_cm: float):
+def emit_ue_snippet(points_world_cm_with_seed: np.ndarray):
     # points_world_cm_with_seed: Nx3 [x_cm, y_cm, seed_flag]
     lines = [f"    ({x:.2f}, {y:.2f}, {int(s)})," for x, y, s in points_world_cm_with_seed]
     points_block = "\n".join(lines)
 
     txt = UE_TEMPLATE.format(
-        bp_ref=bp_ref,
-        seed=seed,
-        auto_rotate="True" if auto_rotate else "False",
-        assign_tags="True" if assign_tags else "False",
-        trace_top_z=trace_top_z,
-        trace_bottom_z=trace_bottom_z,
-        ground_z_offset_cm=ground_z_offset_cm,
+        bp_ref=BP_REF,
+        seed=GLOBAL_SEED,
+        auto_rotate="True" if AUTO_ROTATE else "False",
+        assign_tags="True" if ASSIGN_TAGS else "False",
+        trace_top_z=TRACE_TOP_Z,
+        trace_bottom_z=TRACE_BOTTOM_Z,
+        ground_z_offset_cm=GROUND_Z_OFFSET_CM,
+        do_timed_spread="True" if DO_TIMED_SPREAD else "False",
+        spread_batch=int(SPREAD_BATCH_SIZE),
+        spread_interval=float(SPREAD_INTERVAL_S),
         points_block=points_block,
     )
     print("\n" + "="*72)
     print("PASTE THE FOLLOWING INTO UE5 PYTHON CONSOLE:\n")
     print(txt)
     print("="*72 + "\n")
+
+# =========================
+# ===== MAIN & SEEDS ======
+# =========================
+
+def compute_seed_flags(n: int, policy: str, stride: int) -> np.ndarray:
+    """
+    Build a 0/1 array of length n indicating which positions are seeds.
+    Assumes points are already sorted centroid->outward; index 0 is centroid.
+    """
+    seeds = np.zeros((n,), dtype=int)
+    if n == 0:
+        return seeds
+    # centroid always a seed
+    seeds[0] = 1
+    if policy.lower() == "stride":
+        if stride and stride > 1:
+            seeds[stride::stride] = 1
+    elif policy.lower() == "centroid":
+        pass  # only centroid
+    else:
+        raise ValueError("SEED_POLICY must be 'centroid' or 'stride'")
+    return seeds
 
 def main():
     # Deterministic behavior
@@ -374,7 +473,7 @@ def main():
         # Generate hex lattice inside the polygon
         pts_px = hex_fill_points_inside(path, spacing_px)
 
-        # Apply mild jitter to avoid a too-regular look
+        # Apply mild jitter to avoid too-regular look
         pts_px = apply_jitter(pts_px, spacing_px, JITTER_FRAC, path)
 
         if pts_px.shape[0] == 0:
@@ -398,12 +497,9 @@ def main():
             world_scale_cm=WORLD_SCALE_CM
         )
 
-        # Seed pattern: first is a seed, then every SEED_STRIDE
+        # Seed flags according to SEED_POLICY
         n = pts_cm.shape[0]
-        seed_flags = np.zeros((n,), dtype=int)
-        seed_flags[0] = 1
-        if SEED_STRIDE > 1:
-            seed_flags[SEED_STRIDE::SEED_STRIDE] = 1
+        seed_flags = compute_seed_flags(n, SEED_POLICY, SEED_STRIDE)
 
         # Accumulate, respecting MAX_CUBES_TOTAL
         if MAX_CUBES_TOTAL is not None and total_count + n > MAX_CUBES_TOTAL:
@@ -428,18 +524,10 @@ def main():
     all_points_cm_with_seed = np.concatenate(all_points_cm_with_seed, axis=0)
 
     print(f"[INFO] Generated {all_points_cm_with_seed.shape[0]} spawn points at spacing ~{SPACING_M} m.")
+    print(f"[INFO] Seeding policy: {SEED_POLICY} (stride={SEED_STRIDE if SEED_POLICY=='stride' else 'n/a'})")
 
     # Emit UE snippet (print only)
-    emit_ue_snippet(
-        points_world_cm_with_seed=all_points_cm_with_seed,
-        bp_ref=BP_REF,
-        seed=GLOBAL_SEED,
-        auto_rotate=AUTO_ROTATE,
-        assign_tags=ASSIGN_TAGS,
-        trace_top_z=TRACE_TOP_Z,
-        trace_bottom_z=TRACE_BOTTOM_Z,
-        ground_z_offset_cm=GROUND_Z_OFFSET_CM
-    )
+    emit_ue_snippet(points_world_cm_with_seed=all_points_cm_with_seed)
 
 if __name__ == "__main__":
     main()
