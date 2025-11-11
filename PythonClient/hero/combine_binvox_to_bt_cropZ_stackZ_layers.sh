@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ====== CONFIG ======
-BINVOX_DIR="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customforest_0p5mcubed"
+BINVOX_DIR="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/ausenv_semanticrag_1mcubed/"
 BINVOX2BT="/home/sgarimella34/octomap/bin/binvox2bt_unique_offsets"
 BT_DIR="$BINVOX_DIR"                           # where layer_*.bt will be written
 PATCH_SIZE=100                                 # must match Python collector

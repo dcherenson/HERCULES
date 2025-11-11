@@ -2,7 +2,7 @@ import setup_path
 import cosysairsim as airsim
 
 
-client = airsim.VehicleClient()
+client = airsim.VehicleClient(port=41452)
 client.confirmConnection()
 
 client.simEnableWeather(True)

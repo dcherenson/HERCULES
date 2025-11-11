@@ -2,11 +2,11 @@
 <launch>
 
   <!-- ====== Args you may want to tweak ====== -->
-  <arg name="octomap_path" default="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/customforest_0p5mcubed/combined.bt"/>
-  <arg name="slice_altitude" default="17.0"/>
-  <arg name="inflation_radius" default="0.0"/>
+  <arg name="octomap_path" default="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/ausenv_semanticrag_1mcubed/combined.bt"/>
+  <arg name="slice_altitude" default="4.5"/>
+  <arg name="inflation_radius" default="1.0"/>
   <arg name="unknown_flag" default="true"/>
-  <arg name="map_file" default="customforest_0mAlt_OGM_0p5m"/>
+  <arg name="map_file" default="ausenv_0mAlt_OGM_0p5m"/>
   <arg name="map_topic" default="sliced_projected_map"/>
 
   <!-- 1) Load the .bt file -->
@@ -28,12 +28,12 @@
   </node>
 
   <!-- 3) Save the sliced map -->
-  <node pkg="nav2_map_server"
+  <!-- <node pkg="nav2_map_server"
         exec="map_saver_cli"
         name="map_saver_cli"
         output="screen"
         args="-f $(var map_file)">
     <remap from="map" to="$(var map_topic)"/>
-  </node>
+  </node> -->
 
 </launch>
