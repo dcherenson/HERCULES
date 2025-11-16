@@ -19,15 +19,15 @@ DT_RATE         = 200.0        # IMU rate (Hz)
 DT              = 1.0 / DT_RATE
 # OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/test5_2uav2ugv_calib_752x480"
 # OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/1ugv_crop_area_test2"
-OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/test5_forest_2uav2ugv_calib_752x480"
+OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/test9_forest_2uav_camtilt_calib_752x480"
 SAVE_DEPTH_PNG  = True         # if True, also write a visual 8‐bit PNG
 
+# DRONE_NAMES   = ["Drone1", "Drone2"]
+# HUSKY_NAMES   = ["Husky1", "Husky2"]
+
+
 DRONE_NAMES   = ["Drone1", "Drone2"]
-HUSKY_NAMES   = ["Husky1", "Husky2"]
-
-
-# DRONE_NAMES   = []
-# HUSKY_NAMES   = ["Husky1"]
+HUSKY_NAMES   = []
 
 CAMERA_NAME   = "front_center"
 LIDAR_NAME    = "LidarSensor1"

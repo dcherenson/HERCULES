@@ -30,7 +30,7 @@ WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_
 DEFAULT_NUM_DRONES=2
 
 # Default velocity
-VELOCITY=1.4 
+VELOCITY=1.2 
 # VELOCITY=5.0
 
 # Default fly altitude. NOTE!!! This altitude is relative to the PlayerStart object's height in UE5, which is 1.5m above ground
