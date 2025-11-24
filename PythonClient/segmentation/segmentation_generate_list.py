@@ -26,8 +26,12 @@ if __name__ == '__main__':
     currentObjectList = client.simListInstanceSegmentationObjects()
     print("Generating list of all current objects...")
     with open('airsim_segmentation_colormap_list_' +  datetime.now().strftime("%Y_%m_%d_%H_%M_%S") + '.csv', 'w') as f:
-        f.write("ObjectName,R,G,B\n")
-        for index, item in enumerate(currentObjectList):
-            f.write("%s,%s\n" % (item, ','.join([str(x) for x in colorMap[index,:]])))
+        f.write("ObjectName,SegmentationID,R,G,B\n")
+        for item in currentObjectList:
+            seg_id = client.simGetSegmentationObjectID(item)
+            if seg_id is None or seg_id < 0:
+                continue
+            r, g, b = colorMap[seg_id]
+            f.write(f"{item},{seg_id},{int(r)},{int(g)},{int(b)}\n")
     print("Generated list of all current objects with a total of " + str(len(currentObjectList)) + ' objects.')
 

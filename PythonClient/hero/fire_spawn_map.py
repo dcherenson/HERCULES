@@ -34,6 +34,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import PolygonSelector
 from matplotlib.path import Path
+from matplotlib.patches import Polygon as MplPolygon  # for filled shading
 from PIL import Image
 
 # =========================
@@ -134,6 +135,21 @@ class PolyCollector:
         if event.key == 'enter':
             if self._current is not None and len(self._current) >= 3:
                 self.store.polys_imgpx.append(self._current.copy())
+
+                # >>> Fill the closed polygon for visualization <<<
+                try:
+                    patch = MplPolygon(
+                        self._current,
+                        closed=True,
+                        facecolor='tab:blue',
+                        edgecolor='none',
+                        alpha=0.75
+                    )
+                    self.ax.add_patch(patch)
+                except Exception:
+                    pass
+                # <<< end fill >>>
+
                 print(f"[INFO] Stored polygon with {len(self._current)} points.")
                 self._current = None
                 try:
@@ -314,7 +330,7 @@ def resolve_bp_class(bp_ref: str) -> unreal.Class:
         cls = _try(t)
         if isinstance(cls, unreal.Class):
             return cls
-    raise RuntimeError(f"Could not resolve a UClass from '{{bp_ref}}'.")
+    raise RuntimeError(f"Could not resolve a UClass from '{bp_ref}'.")
 
 BP_CLASS = resolve_bp_class(BP_REF)
 
@@ -352,8 +368,7 @@ def _get_fx_components(actor):
         pass
     try:
         for c in actor.get_components_by_class(unreal.ParticleSystemComponent):
-            fx.append(c)
-    except Exception:
+        ...
         pass
     return fx
 
@@ -389,7 +404,7 @@ def spawn_fire(loc: unreal.Vector, idx: int, is_seed: bool) -> unreal.Actor:
     yaw = random.uniform(0, 360) if AUTO_ROTATE else 0.0
     rot = unreal.Rotator(0.0, yaw, 0.0)
     actor = lvl.spawn_actor_from_class(BP_CLASS, loc, rot)
-    actor.set_actor_label(f"BP_FireCube_{{idx+1}}", True)
+    actor.set_actor_label(f"BP_FireCube_{idx+1}", True)
 
     # Replace tags so class defaults can't keep StartFire on non-seeds
     if ASSIGN_TAGS:
@@ -416,7 +431,7 @@ for (x_cm, y_cm, z_off_cm, is_seed) in FIRE_POINTS:
     actors.append((bool(is_seed), a))
     idx += 1
 
-print(f"Spawned {{idx}} BP_FireCube actors. Seeds burn; non-seeds off.")
+print(f"Spawned {idx} BP_FireCube actors. Seeds burn; non-seeds off.")
 
 # Timed spread: turn ON FX for non-seeds in waves (in given order)
 if DO_TIMED_SPREAD:
