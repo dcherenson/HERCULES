@@ -38,12 +38,12 @@ except ImportError:
 # ===================== User-configurable variables =====================
 
 # Base path to your cooperative-vehicle-infrastructure folder (native format)
-DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/dair_v2x_synth_TEST1/cooperative-vehicle-infrastructure/"
-# DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C/cooperative-vehicle-infrastructure/"
+# DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_FULL/cooperative-vehicle-infrastructure/"
+DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C-SUBSET1/cooperative-vehicle-infrastructure/"
 
 # View mode: 'veh', 'infra', or 'cooperative_world'
 # The SIDE value is ignored in cooperative world mode
-VIEW_MODE = "cooperative_world"   # 'veh' | 'infra' | 'cooperative_world'
+VIEW_MODE = "infra"   # 'veh' | 'infra' | 'cooperative_world'
 
 # For side-only modes:
 SIDE = "infra"   # 'veh' or 'infra' (ignored for cooperative_world)
