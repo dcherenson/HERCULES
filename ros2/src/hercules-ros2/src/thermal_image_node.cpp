@@ -46,6 +46,10 @@ public:
         declare_parameter("view_mode", std::string("nightvision"));
         get_parameter("view_mode", view_mode_);
 
+        // --- NVG gain (multiplier for night-vision intensifier) ---
+        declare_parameter("nvg_gain", 1.0);
+        get_parameter("nvg_gain", nvg_gain_);
+
         // --- ROS interfaces ---
         image_pub_ = create_publisher<sensor_msgs::msg::Image>(
             thermal_topic_, 10);
@@ -202,7 +206,8 @@ private:
             double mean_val = cv::mean(agc_in)[0];
             // rough proxy for "gain": darker mean -> higher gain
             double norm_mean = std::max(1.0, mean_val);
-            double gain_factor = std::clamp(80.0 / norm_mean, 0.5, 4.0);
+            // darker mean -> higher base gain, scaled by nvg_gain_
+            double gain_factor = std::clamp((80.0 / norm_mean) * nvg_gain_, 0.5, 4.0);
 
             double noise_sigma = 3.0 * gain_factor; // tune
             cv::Mat noise(clahe_out.size(), CV_16SC1);
@@ -221,7 +226,8 @@ private:
             cv::GaussianBlur(bright_mask, glow, cv::Size(0, 0), 5.0, 5.0);
 
             // scale glow so it adds a soft halo, not full white
-            cv::normalize(glow, glow, 0, 120, cv::NORM_MINMAX);
+            // cv::normalize(glow, glow, 0, 120, cv::NORM_MINMAX);
+            cv::normalize(glow, glow, 0, 40, cv::NORM_MINMAX);
             cv::Mat halo_src;
             noisy.copyTo(halo_src);
             halo_src += glow;
@@ -255,9 +261,9 @@ private:
             std::vector<cv::Mat> ch(3);
             cv::split(nv_bgr, ch);
 
-            // tune these numbers to taste
-            ch[1] = ch[1] * 0.9f + 15;                          // main green channel
-            ch[0] = ch[1] * 0.05f;                              // tiny blue bleed
+            // a bit less saturated, slightly less blue bleed
+            ch[1] = ch[1] * 0.8f + 15;                          // main green channel
+            ch[0] = ch[1] * 0.03f;                              // tiny blue bleed
             ch[2] = cv::Mat::zeros(ch[2].size(), ch[2].type()); // no red
 
             cv::merge(ch, nv_bgr);
@@ -349,7 +355,7 @@ private:
 
     // params & ROS
     std::string scene_topic_, seg_topic_, thermal_topic_;
-    double temp_min_, temp_max_, eps_min_, eps_max_, alpha_;
+    double temp_min_, temp_max_, eps_min_, eps_max_, alpha_, nvg_gain_;
     bool use_cmap_;
     std::string view_mode_;
 
