@@ -8,18 +8,18 @@ import setup_path
 import cosysairsim as airsim
 
 def radiance(absoluteTemperature, emissivity, dx=0.01, response=None):
-    """Compute spectral radiance (Planck × emissivity × camera response)."""
+    """Compute spectral radiance (Planck x emissivity x camera response)."""
     wavelength = np.arange(8, 14, dx)
     c1 = 1.19104e8
     c2 = 1.43879e4
 
-    # Planck’s law × emissivity × camera response (if provided)
+    # Planck’s law x emissivity x camera response (if provided)
     factor = response if response is not None else 1.0
     L = factor * emissivity * (
         c1 / ((wavelength**5) * (np.exp(c2 / (wavelength * absoluteTemperature)) - 1))
     )
 
-    # integrate over λ to get scalar radiance
+    # integrate over lambda to get scalar radiance
     if absoluteTemperature.ndim > 1:
         return L, np.trapz(L, dx=dx, axis=1)
     else:

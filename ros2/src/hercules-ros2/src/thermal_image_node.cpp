@@ -129,44 +129,107 @@ private:
 
         if (view_mode_ == "nightvision")
         {
-            // --- 1) CLAHE for contrast ---
-            cv::Mat stretched;
+            // 0) base luminance from real scene
+            cv::Mat luminance;
+            if (!last_gray_.empty() && last_gray_.size() == seg.size())
+            {
+                luminance = last_gray_;
+            }
+            else
+            {
+                // fallback to blended if scene is not available
+                luminance = blended;
+            }
+
+            // Optional: small thermal fusion (for "fused" goggles)
+            const double thermal_blend = 0.15; // 0 = pure scene, 1 = pure thermal
+            cv::Mat fused;
+            cv::addWeighted(luminance, 1.0 - thermal_blend,
+                            blended, thermal_blend,
+                            0.0, fused);
+
+            // 1) automatic gain control based on histogram percentiles
+            // map [p_low, p_high] to [0, 255]
+            cv::Mat agc_in = fused.clone();
+            int histSize = 256;
+            float range[] = {0.f, 256.f};
+            const float *ranges[] = {range};
+            cv::Mat hist;
+            cv::calcHist(&agc_in, 1, 0, cv::Mat(), hist, 1, &histSize, ranges, true, false);
+
+            int total = agc_in.rows * agc_in.cols;
+            int low_count = static_cast<int>(0.02 * total);
+            int high_count = static_cast<int>(0.98 * total);
+
+            int cumsum = 0;
+            int p_low = 0, p_high = 255;
+            for (int i = 0; i < 256; ++i)
+            {
+                cumsum += static_cast<int>(hist.at<float>(i));
+                if (cumsum >= low_count)
+                {
+                    p_low = i;
+                    break;
+                }
+            }
+            cumsum = 0;
+            for (int i = 255; i >= 0; --i)
+            {
+                cumsum += static_cast<int>(hist.at<float>(i));
+                if (cumsum >= total - high_count)
+                {
+                    p_high = i;
+                    break;
+                }
+            }
+            if (p_high <= p_low)
+                p_high = p_low + 1; // avoid divide by zero
+
+            double alpha_gain = 255.0 / (p_high - p_low);
+            double beta_offset = -alpha_gain * p_low;
+
+            cv::Mat agc;
+            agc_in.convertTo(agc, CV_8U, alpha_gain, beta_offset);
+
+            // 2) CLAHE for local contrast (behaves more like intensifier)
+            cv::Mat clahe_out;
             {
                 auto clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
-                clahe->apply(blended, stretched);
+                clahe->apply(agc, clahe_out);
             }
-            // --- 2) gamma <1 to darken highlights ---
-            cv::Mat gamma;
+
+            // 3) gain-dependent shot noise (darker scenes produce more grain)
+            double mean_val = cv::mean(agc_in)[0];
+            // rough proxy for "gain": darker mean -> higher gain
+            double norm_mean = std::max(1.0, mean_val);
+            double gain_factor = std::clamp(80.0 / norm_mean, 0.5, 4.0);
+
+            double noise_sigma = 3.0 * gain_factor; // tune
+            cv::Mat noise(clahe_out.size(), CV_16SC1);
+            cv::randn(noise, 0.0, noise_sigma);
+
+            cv::Mat tmp16;
+            clahe_out.convertTo(tmp16, CV_16SC1);
+            tmp16 += noise;
+            cv::Mat noisy;
+            tmp16.convertTo(noisy, CV_8U); // values are saturated to [0,255]
+
+            // 4) highlight bloom/halo around the brightest pixels
+            cv::Mat bright_mask;
+            cv::threshold(noisy, bright_mask, 220, 255, cv::THRESH_BINARY);
+            cv::Mat glow;
+            cv::GaussianBlur(bright_mask, glow, cv::Size(0, 0), 5.0, 5.0);
+
+            // scale glow so it adds a soft halo, not full white
+            cv::normalize(glow, glow, 0, 120, cv::NORM_MINMAX);
+            cv::Mat halo_src;
+            noisy.copyTo(halo_src);
+            halo_src += glow;
+
+            // 5) vignette (reuse your existing logic)
+            cv::Mat vignet = halo_src.clone();
             {
-                stretched.convertTo(gamma, CV_32F, 1.0 / 255);
-                const float g = 0.5f;
-                cv::pow(gamma, g, gamma);
-                gamma *= 255;
-                gamma.convertTo(gamma, CV_8U);
-            }
-            // --- 3) green-only BGR with offset ---
-            cv::Mat nvgauss;
-            {
-                cv::cvtColor(gamma, nvgauss, cv::COLOR_GRAY2BGR);
-                std::vector<cv::Mat> ch(3);
-                cv::split(nvgauss, ch);
-                ch[1] = ch[1] * 0.6f + 20; // boost green
-                ch[0] = cv::Mat::zeros(ch[0].size(), ch[0].type());
-                ch[2] = cv::Mat::zeros(ch[2].size(), ch[2].type());
-                cv::merge(ch, nvgauss);
-            }
-            // --- 4) film grain ---
-            {
-                cv::Mat noise(nvgauss.size(), CV_8SC3);
-                cv::randn(noise, 0, 8);
-                cv::Mat tmp;
-                nvgauss.convertTo(tmp, CV_16SC3);
-                tmp += noise;
-                tmp.convertTo(nvgauss, CV_8UC3);
-            }
-            // --- 5) vignette ---
-            {
-                int w = nvgauss.cols, h = nvgauss.rows;
+                int w = vignet.cols, h = vignet.rows;
                 cv::Mat mask(h, w, CV_32F);
                 cv::Point2f c(w / 2.f, h / 2.f);
                 float maxD = std::hypot(w / 2.f, h / 2.f);
@@ -177,23 +240,32 @@ private:
                     {
                         float d = std::hypot(x - c.x, y - c.y) / maxD;
                         float v = 1.0f - d * d;
-                        pm[x] = std::clamp(v, 0.3f, 1.0f);
+                        pm[x] = std::clamp(v, 0.35f, 1.0f); // a bit stronger vignette
                     }
                 }
-                std::vector<cv::Mat> ch(3);
-                cv::split(nvgauss, ch);
-                for (int i = 0; i < 3; ++i)
-                {
-                    cv::Mat f;
-                    ch[i].convertTo(f, CV_32F);
-                    cv::multiply(f, mask, f);
-                    f.convertTo(ch[i], CV_8U);
-                }
-                cv::merge(ch, nvgauss);
+                cv::Mat v32;
+                vignet.convertTo(v32, CV_32F);
+                cv::multiply(v32, mask, v32);
+                v32.convertTo(vignet, CV_8U);
             }
-            output = nvgauss;
+
+            // 6) green phosphor conversion
+            cv::Mat nv_bgr;
+            cv::cvtColor(vignet, nv_bgr, cv::COLOR_GRAY2BGR);
+            std::vector<cv::Mat> ch(3);
+            cv::split(nv_bgr, ch);
+
+            // tune these numbers to taste
+            ch[1] = ch[1] * 0.9f + 15;                          // main green channel
+            ch[0] = ch[1] * 0.05f;                              // tiny blue bleed
+            ch[2] = cv::Mat::zeros(ch[2].size(), ch[2].type()); // no red
+
+            cv::merge(ch, nv_bgr);
+
+            output = nv_bgr;
             encoding = "rgb8";
         }
+
         else if (view_mode_ == "flir")
         {
             cv::applyColorMap(blended, output, cv::COLORMAP_INFERNO);
