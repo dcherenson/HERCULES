@@ -18,7 +18,7 @@ Output:
         Label,ObjectName,SegmentationID,R,G,B
 
 Usage:
-  python3 merge_labels_colors.py \
+  python3 itemlabel_to_color_csv.py \
       --labels_csv ue_actor_label_to_name.csv \
       --colors_csv airsim_segmentation_colormap_list_2025_11_23_23_37_23.csv \
       --out_csv label_color_map.csv

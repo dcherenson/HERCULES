@@ -143,6 +143,22 @@ ament_target_dependencies(thermal_image_node
   cv_bridge
 )
 
+# thermal image segmentation based node___________________
+add_executable(thermal_image_segmentation_based_node
+ src/thermal_image_segmentation_based_node.cpp)
+ament_target_dependencies(thermal_image_segmentation_based_node
+
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_sensor_msgs
+  cv_bridge
+)
+
+
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}/
 )
@@ -150,6 +166,7 @@ install(DIRECTORY launch
 
 install(TARGETS
 thermal_image_node
+thermal_image_segmentation_based_node
   DESTINATION lib/${PROJECT_NAME}
 )
 # ____________________________
