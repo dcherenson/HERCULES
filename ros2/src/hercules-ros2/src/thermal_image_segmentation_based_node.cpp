@@ -88,6 +88,10 @@ public:
         declare_parameter("nvg_gain", 1.0);
         get_parameter("nvg_gain", nvg_gain_);
 
+        // --- Fire-from-RGB toggle ---
+        declare_parameter("use_fire_rgb", false);
+        get_parameter("use_fire_rgb", use_fire_rgb_);
+
         // --- Precompute spectral response and load label map ---
         precomputeSpectralResponse();
         loadLabelMap(label_map_csv_);
@@ -117,7 +121,8 @@ public:
                     " T-range:    [%.1f,%.1f] K\n"
                     " eps-range:  [%.2f,%.2f]\n"
                     " depth_att:  %.3f\n"
-                    " view_mode:  %s",
+                    " view_mode:  %s\n"
+                    " use_fire_rgb: %s",
                     scene_topic_.c_str(),
                     seg_topic_.c_str(),
                     depth_topic_.c_str(),
@@ -125,7 +130,8 @@ public:
                     temp_min_, temp_max_,
                     eps_min_, eps_max_,
                     depth_attenuation_,
-                    view_mode_.c_str());
+                    view_mode_.c_str(),
+                    use_fire_rgb_ ? "true" : "false");
     }
 
 private:
@@ -299,9 +305,16 @@ private:
 
     void sceneCallback(const sensor_msgs::msg::Image::SharedPtr msg)
     {
-        // Keep last grayscale scene for NVG / potential blending
-        auto cvb = cv_bridge::toCvShare(msg, "bgr8");
-        cv::cvtColor(cvb->image, last_gray_, cv::COLOR_BGR2GRAY);
+        try
+        {
+            auto cvb = cv_bridge::toCvShare(msg, "bgr8");
+            last_scene_bgr_ = cvb->image.clone(); // full-color scene
+            cv::cvtColor(cvb->image, last_gray_, cv::COLOR_BGR2GRAY);
+        }
+        catch (const cv_bridge::Exception &e)
+        {
+            RCLCPP_ERROR(get_logger(), "sceneCallback cv_bridge exception: %s", e.what());
+        }
     }
 
     void depthCallback(const sensor_msgs::msg::Image::SharedPtr msg)
@@ -340,7 +353,6 @@ private:
         cv::Mat seg_bgr;
         try
         {
-            // AirSim usually publishes BGR; adjust here if your topic is rgb8
             seg_bgr = cv_bridge::toCvShare(msg, "bgr8")->image;
         }
         catch (const cv_bridge::Exception &e)
@@ -362,21 +374,37 @@ private:
         // 2) build flat thermal map [0–255] with depth attenuation
         cv::Mat thermo(seg_bgr.size(), CV_8UC1);
         cv::Mat kangaroo_mask(seg_bgr.size(), CV_8UC1, cv::Scalar(0));
+        cv::Mat fire_mask(seg_bgr.size(), CV_8UC1, cv::Scalar(0));
 
         bool use_depth =
             !last_depth_.empty() &&
             last_depth_.size() == seg_bgr.size() &&
             last_depth_.type() == CV_32FC1;
 
+        // Scene HSV for fire detection (Niagara flames) when enabled
+        cv::Mat scene_hsv;
+        bool have_scene_for_fire =
+            use_fire_rgb_ &&
+            !last_scene_bgr_.empty() &&
+            last_scene_bgr_.size() == seg_bgr.size();
+
+        if (have_scene_for_fire)
+        {
+            cv::cvtColor(last_scene_bgr_, scene_hsv, cv::COLOR_BGR2HSV);
+        }
+
         int kangaroo_pixel_count = 0;
+        int fire_pixel_count_raw = 0;
 
         for (int y = 0; y < seg_bgr.rows; ++y)
         {
             const cv::Vec3b *seg_row = seg_bgr.ptr<cv::Vec3b>(y);
             uint8_t *t_row = thermo.ptr<uint8_t>(y);
-            uint8_t *mask_row = kangaroo_mask.ptr<uint8_t>(y);
+            uint8_t *kang_row = kangaroo_mask.ptr<uint8_t>(y);
+            uint8_t *fire_row = fire_mask.ptr<uint8_t>(y);
 
             const float *d_row = use_depth ? last_depth_.ptr<float>(y) : nullptr;
+            const cv::Vec3b *hsv_row = have_scene_for_fire ? scene_hsv.ptr<cv::Vec3b>(y) : nullptr;
 
             for (int x = 0; x < seg_bgr.cols; ++x)
             {
@@ -390,7 +418,7 @@ private:
                 auto it = lut_.find(key);
                 uint8_t base_cnt = (it != lut_.end() ? it->second : 0);
 
-                // Check if this color corresponds specifically to kangaroo
+                // Kangaroo detection via CSV profiles
                 bool is_kangaroo = false;
                 auto itp = color_to_profile_.find(key);
                 if (itp != color_to_profile_.end())
@@ -401,13 +429,38 @@ private:
 
                 if (is_kangaroo)
                 {
-                    // Extra boost before colormap so they sit at the very hot end
+                    // Extra boost before colormap so they sit near the very hot end
                     if (base_cnt < 245)
                         base_cnt = 245;
-                    mask_row[x] = 255;
+                    kang_row[x] = 255;
                     ++kangaroo_pixel_count;
                 }
 
+                // Fire detection from RGB scene using HSV, only if enabled
+                bool is_fire_here = false;
+                if (hsv_row != nullptr)
+                {
+                    const cv::Vec3b &hsv = hsv_row[x];
+                    uint8_t H = hsv[0]; // 0..179
+                    uint8_t S = hsv[1]; // 0..255
+                    uint8_t V = hsv[2]; // 0..255
+
+                    // Heuristic for flames: bright, saturated, red/orange
+                    if (V > 180 && S > 120 &&
+                        ((H <= 20) || (H >= 160)))
+                    {
+                        is_fire_here = true;
+                    }
+                }
+
+                if (is_fire_here)
+                {
+                    base_cnt = 255; // max thermal intensity for raw fire pixels
+                    fire_row[x] = 255;
+                    ++fire_pixel_count_raw;
+                }
+
+                // Depth attenuation (you could skip attenuation for fire if you prefer)
                 if (use_depth)
                 {
                     float d = d_row[x];
@@ -429,13 +482,53 @@ private:
             }
         }
 
+        // --- Post-process fire mask to make it a thick, filled blob ---
+        int fire_pixel_count = 0;
+        if (use_fire_rgb_ && fire_pixel_count_raw > 0)
+        {
+            // 1) Make the mask thicker and close gaps
+            // Increase kernel size and iterations compared to before
+            cv::Mat kernel = cv::getStructuringElement(
+                cv::MORPH_ELLIPSE, cv::Size(21, 21)); // was 11x11
+
+            // Close small holes and connect nearby bits
+            cv::morphologyEx(fire_mask, fire_mask, cv::MORPH_CLOSE,
+                             kernel, cv::Point(-1, -1), 3); // was 2
+
+            // Grow a bit more
+            cv::dilate(fire_mask, fire_mask, kernel,
+                       cv::Point(-1, -1), 2); // was 1
+
+            // 2) Fill any remaining interior holes
+            cv::Mat ff = fire_mask.clone();
+            // Flood-fill from outside; mark all external background as 255
+            cv::floodFill(ff, cv::Point(0, 0), 255);
+            // Invert: now "holes" become 255, outside becomes 0
+            cv::bitwise_not(ff, ff);
+            // Union with original ring to get a solid blob
+            cv::bitwise_or(fire_mask, ff, fire_mask);
+
+            fire_pixel_count = cv::countNonZero(fire_mask);
+
+            // Force thermal map to maximum wherever we consider it fire
+            for (int y = 0; y < thermo.rows; ++y)
+            {
+                uint8_t *t_row = thermo.ptr<uint8_t>(y);
+                uint8_t *fire_row = fire_mask.ptr<uint8_t>(y);
+                for (int x = 0; x < thermo.cols; ++x)
+                {
+                    if (fire_row[x])
+                        t_row[x] = 255;
+                }
+            }
+        }
+
         // Estimate number of distinct kangaroos via connected components
         int kangaroo_count = 0;
         if (kangaroo_pixel_count > 0)
         {
             cv::Mat labels;
             int n_labels = cv::connectedComponents(kangaroo_mask, labels, 8, CV_32S);
-            // label 0 is background
             kangaroo_count = std::max(0, n_labels - 1);
         }
 
@@ -452,6 +545,14 @@ private:
                 get_logger(), *get_clock(), 2000,
                 "segCallback: detected %d kangaroos (approx), %d kangaroo pixels.",
                 kangaroo_count, kangaroo_pixel_count);
+        }
+
+        if (use_fire_rgb_ && fire_pixel_count > 0)
+        {
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "segCallback: fire mask ~%d pixels (after fill).",
+                fire_pixel_count);
         }
 
         // 3) build "blended" only for NVG; for FLIR we use pure thermo
@@ -473,7 +574,6 @@ private:
 
         if (view_mode_ == "nightvision")
         {
-            // Simple placeholder NVG: green-tinted blended image
             cv::Mat nv_bgr;
             cv::cvtColor(blended, nv_bgr, cv::COLOR_GRAY2BGR);
             std::vector<cv::Mat> ch(3);
@@ -491,22 +591,32 @@ private:
             cv::Mat flir_bgr;
             cv::applyColorMap(thermo, flir_bgr, cv::COLORMAP_INFERNO);
 
-            // Optional: still tint kangaroo regions orange if you want
             cv::Mat flir_out = flir_bgr.clone();
             const cv::Vec3b kangaroo_bgr(0, 165, 255); // bright orange in BGR
+            const cv::Vec3b fire_bgr(0, 255, 255);     // bright yellow
 
-            if (kangaroo_pixel_count > 0)
+            if (kangaroo_pixel_count > 0 || fire_pixel_count > 0)
             {
                 for (int y = 0; y < flir_out.rows; ++y)
                 {
                     cv::Vec3b *row = flir_out.ptr<cv::Vec3b>(y);
-                    const uint8_t *mrow = kangaroo_mask.ptr<uint8_t>(y);
+                    const uint8_t *krow = kangaroo_mask.ptr<uint8_t>(y);
+                    const uint8_t *frow = fire_mask.ptr<uint8_t>(y);
+
                     for (int x = 0; x < flir_out.cols; ++x)
                     {
-                        if (mrow[x])
+                        if (frow[x])
                         {
                             cv::Vec3b orig = row[x];
-                            // Heavy blend: mostly orange, keep a little of Inferno
+                            // Fire: mostly bright yellow, keep a bit of Inferno
+                            row[x][0] = static_cast<uchar>(0.2 * orig[0] + 0.8 * fire_bgr[0]);
+                            row[x][1] = static_cast<uchar>(0.2 * orig[1] + 0.8 * fire_bgr[1]);
+                            row[x][2] = static_cast<uchar>(0.2 * orig[2] + 0.8 * fire_bgr[2]);
+                        }
+                        else if (krow[x])
+                        {
+                            cv::Vec3b orig = row[x];
+                            // Kangaroo: mostly orange, keep some Inferno
                             row[x][0] = static_cast<uchar>(0.2 * orig[0] + 0.8 * kangaroo_bgr[0]);
                             row[x][1] = static_cast<uchar>(0.2 * orig[1] + 0.8 * kangaroo_bgr[1]);
                             row[x][2] = static_cast<uchar>(0.2 * orig[2] + 0.8 * kangaroo_bgr[2]);
@@ -673,6 +783,7 @@ private:
     // color_key (0x00RRGGBB) -> thermal profile (used to detect kangaroo etc.)
     std::unordered_map<uint32_t, ThermalProfile> color_to_profile_;
 
+    cv::Mat last_scene_bgr_; // full scene for fire detection
     cv::Mat last_gray_;
     cv::Mat last_depth_;
     std::vector<double> band_;
@@ -686,6 +797,7 @@ private:
     double depth_attenuation_;
     bool use_cmap_;
     std::string view_mode_;
+    bool use_fire_rgb_;
 
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr
