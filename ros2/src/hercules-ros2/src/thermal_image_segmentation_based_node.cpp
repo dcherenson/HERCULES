@@ -11,6 +11,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 using std::placeholders::_1;
 
@@ -18,7 +19,18 @@ struct ThermalProfile
 {
     double base_temp_K; // nominal surface temperature
     double emissivity;  // 0..1
+    bool is_animal;     // warm body (kangaroo, deer, human, etc.)
+    bool is_fire;       // true for fire / flame emitters
+    bool is_kangaroo;   // specifically a kangaroo
 };
+
+// Pack RGB into a 32-bit key: 0x00RRGGBB
+static inline uint32_t makeColorKey(uint8_t r, uint8_t g, uint8_t b)
+{
+    return (static_cast<uint32_t>(r) << 16) |
+           (static_cast<uint32_t>(g) << 8) |
+           static_cast<uint32_t>(b);
+}
 
 class ThermalImageNode : public rclcpp::Node
 {
@@ -38,7 +50,7 @@ public:
                           std::string("/hercules_node/Drone1/front_center_ThermalIR/image"));
 
         declare_parameter("label_map_csv",
-                          std::string("/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/PythonClient/segmentation/label_color_map_ausenv.csv"));
+                          std::string("/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/PythonClient/segmentation/label_color_map_ausenvkangaroos.csv"));
 
         get_parameter("scene_topic", scene_topic_);
         get_parameter("seg_topic", seg_topic_);
@@ -57,17 +69,19 @@ public:
         get_parameter("eps_max", eps_max_);
 
         // Depth attenuation factor (how fast intensity decays with distance)
-        declare_parameter("depth_attenuation", 0.03); // 1 / (1 + k * d)
+        declare_parameter("depth_attenuation", 0.01); // 1 / (1 + k * d)
         get_parameter("depth_attenuation", depth_attenuation_);
 
         // --- Blending weight & colormap (still used for NVG) ---
         declare_parameter("thermal_weight", 0.25);
-        declare_parameter("use_colormap", false);
+        // Outside FLIR, we still want color by default
+        declare_parameter("use_colormap", true);
         get_parameter("thermal_weight", alpha_);
         get_parameter("use_colormap", use_cmap_);
 
         // --- View mode: thermal | nightvision | flir ---
-        declare_parameter("view_mode", std::string("nightvision"));
+        // Default to FLIR
+        declare_parameter("view_mode", std::string("flir"));
         get_parameter("view_mode", view_mode_);
 
         // --- NVG gain (multiplier for night-vision intensifier) ---
@@ -125,29 +139,40 @@ private:
         return out;
     }
 
-    // Decide emissivity and base temperature from a semantic label string
-    ThermalProfile classifyLabel(const std::string &label) const
+    // Decide emissivity and base temperature from label + object_name
+    ThermalProfile classifyLabel(const std::string &label,
+                                 const std::string &object_name) const
     {
-        std::string l = toLower(label);
-        ThermalProfile p;
+        // Combine both fields, since BP_Kangaroo23 is usually in object_name
+        std::string combined = label + " " + object_name;
+        std::string l = toLower(combined);
 
-        // Very rough priors, you can tweak as you learn your environment better.
+        ThermalProfile p;
+        // Default neutral
+        p.base_temp_K = 295.0; // ~22 °C
+        p.emissivity = 0.90;
+        p.is_animal = false;
+        p.is_fire = false;
+        p.is_kangaroo = false;
+
         if (l.find("tree") != std::string::npos ||
             l.find("bush") != std::string::npos ||
             l.find("grass") != std::string::npos ||
-            l.find("plant") != std::string::npos)
+            l.find("plant") != std::string::npos ||
+            l.find("vegetation") != std::string::npos)
         {
-            // Vegetation
-            p.base_temp_K = 295.0; // ~22 C
+            // Vegetation, slightly cooler
+            p.base_temp_K = 293.0; // ~20 °C
             p.emissivity = 0.97;
         }
         else if (l.find("road") != std::string::npos ||
                  l.find("ground") != std::string::npos ||
                  l.find("dirt") != std::string::npos ||
-                 l.find("rock") != std::string::npos)
+                 l.find("rock") != std::string::npos ||
+                 l.find("soil") != std::string::npos)
         {
             // Soil / asphalt / rock
-            p.base_temp_K = 305.0; // warmer in sun
+            p.base_temp_K = 300.0; // ~27 °C
             p.emissivity = 0.93;
         }
         else if (l.find("car") != std::string::npos ||
@@ -155,8 +180,8 @@ private:
                  l.find("vehicle") != std::string::npos ||
                  l.find("husky") != std::string::npos)
         {
-            // Vehicles / metal
-            p.base_temp_K = 315.0; // engine / cabin warmer
+            // Vehicles / metal, warmed by engine
+            p.base_temp_K = 305.0; // ~32 °C
             p.emissivity = 0.90;
         }
         else if (l.find("fire") != std::string::npos ||
@@ -166,21 +191,21 @@ private:
             // Fire source (very hot, high emissivity)
             p.base_temp_K = 1000.0;
             p.emissivity = 0.98;
+            p.is_fire = true;
         }
         else if (l.find("animal") != std::string::npos ||
                  l.find("kangaroo") != std::string::npos ||
                  l.find("deer") != std::string::npos ||
-                 l.find("human") != std::string::npos)
+                 l.find("human") != std::string::npos ||
+                 l.find("person") != std::string::npos)
         {
-            // Warm body
-            p.base_temp_K = 310.0;
+            // Warm body: kangaroo, etc.
+            p.base_temp_K = 315.0; // ~42 °C
             p.emissivity = 0.98;
-        }
-        else
-        {
-            // Default neutral stuff
-            p.base_temp_K = 295.0;
-            p.emissivity = 0.90;
+            p.is_animal = true;
+
+            if (l.find("kangaroo") != std::string::npos)
+                p.is_kangaroo = true;
         }
 
         // Clamp to global min/max in case you extend these later
@@ -190,6 +215,7 @@ private:
     }
 
     // Load CSV: Label, ObjectName, SegmentationID, R, G, B
+    // Build mapping: (R,G,B) -> ThermalProfile
     void loadLabelMap(const std::string &csv_path)
     {
         std::ifstream file(csv_path);
@@ -219,28 +245,39 @@ private:
                 continue;
             if (!std::getline(ss, seg_id_str, ','))
                 continue;
-            // R,G,B exist but we do not need them for thermal; we can still parse
-            std::getline(ss, r_str, ',');
-            std::getline(ss, g_str, ',');
-            std::getline(ss, b_str, ',');
+            if (!std::getline(ss, r_str, ','))
+                continue;
+            if (!std::getline(ss, g_str, ','))
+                continue;
+            if (!std::getline(ss, b_str, ','))
+                continue;
 
-            int seg_id = 0;
+            int r_i = 0, g_i = 0, b_i = 0;
             try
             {
-                seg_id = std::stoi(seg_id_str);
+                r_i = std::stoi(r_str);
+                g_i = std::stoi(g_str);
+                b_i = std::stoi(b_str);
             }
             catch (...)
             {
                 continue;
             }
 
-            ThermalProfile prof = classifyLabel(label);
-            id_to_profile_[static_cast<uint8_t>(seg_id)] = prof;
+            uint8_t r = static_cast<uint8_t>(std::clamp(r_i, 0, 255));
+            uint8_t g = static_cast<uint8_t>(std::clamp(g_i, 0, 255));
+            uint8_t b = static_cast<uint8_t>(std::clamp(b_i, 0, 255));
+
+            // Classify based on label + object_name (this is where "kangaroo" is detected)
+            ThermalProfile prof = classifyLabel(label, object_name);
+
+            uint32_t key = makeColorKey(r, g, b);
+            color_to_profile_[key] = prof;
             ++count;
         }
 
         RCLCPP_INFO(get_logger(),
-                    "Loaded %zu thermal profiles from %s",
+                    "Loaded %zu thermal profiles (color-based) from %s",
                     count, csv_path.c_str());
     }
 
@@ -299,39 +336,77 @@ private:
 
     void segCallback(const sensor_msgs::msg::Image::SharedPtr msg)
     {
-        // 1) segmentation mask (mono8: each value is a SegmentationID)
-        cv::Mat seg = cv_bridge::toCvShare(msg, "mono8")->image;
+        // Treat segmentation as a color image whose RGB values match the CSV
+        cv::Mat seg_bgr;
+        try
+        {
+            // AirSim usually publishes BGR; adjust here if your topic is rgb8
+            seg_bgr = cv_bridge::toCvShare(msg, "bgr8")->image;
+        }
+        catch (const cv_bridge::Exception &e)
+        {
+            RCLCPP_ERROR(get_logger(), "segCallback cv_bridge exception: %s", e.what());
+            return;
+        }
 
-        // 2) init LUT on first frame (per-label radiance from CSV + physics)
+        // 1) init LUT on first frame (per-color radiance from CSV + physics)
         if (!initialized_)
         {
-            initLUT(seg);
+            initLUT(seg_bgr);
             initialized_ = true;
             RCLCPP_INFO(
                 get_logger(),
-                "LUT initialized for %zu labels", lut_.size());
+                "Color-based LUT initialized for %zu entries", lut_.size());
         }
 
-        // 3) build flat thermal map [0–255] with depth attenuation
-        cv::Mat thermo(seg.size(), CV_8UC1);
+        // 2) build flat thermal map [0–255] with depth attenuation
+        cv::Mat thermo(seg_bgr.size(), CV_8UC1);
+        cv::Mat kangaroo_mask(seg_bgr.size(), CV_8UC1, cv::Scalar(0));
 
         bool use_depth =
             !last_depth_.empty() &&
-            last_depth_.size() == seg.size() &&
+            last_depth_.size() == seg_bgr.size() &&
             last_depth_.type() == CV_32FC1;
 
-        for (int y = 0; y < seg.rows; ++y)
+        int kangaroo_pixel_count = 0;
+
+        for (int y = 0; y < seg_bgr.rows; ++y)
         {
-            const uint8_t *seg_row = seg.ptr<uint8_t>(y);
+            const cv::Vec3b *seg_row = seg_bgr.ptr<cv::Vec3b>(y);
             uint8_t *t_row = thermo.ptr<uint8_t>(y);
+            uint8_t *mask_row = kangaroo_mask.ptr<uint8_t>(y);
 
             const float *d_row = use_depth ? last_depth_.ptr<float>(y) : nullptr;
 
-            for (int x = 0; x < seg.cols; ++x)
+            for (int x = 0; x < seg_bgr.cols; ++x)
             {
-                uint8_t lbl = seg_row[x];
-                auto it = lut_.find(lbl);
+                const cv::Vec3b &pix = seg_row[x];
+                uint8_t b = pix[0];
+                uint8_t g = pix[1];
+                uint8_t r = pix[2];
+
+                uint32_t key = makeColorKey(r, g, b);
+
+                auto it = lut_.find(key);
                 uint8_t base_cnt = (it != lut_.end() ? it->second : 0);
+
+                // Check if this color corresponds specifically to kangaroo
+                bool is_kangaroo = false;
+                auto itp = color_to_profile_.find(key);
+                if (itp != color_to_profile_.end())
+                {
+                    if (itp->second.is_kangaroo)
+                        is_kangaroo = true;
+                }
+
+                if (is_kangaroo)
+                {
+                    // Extra boost before colormap so they sit at the very hot end
+                    if (base_cnt < 245)
+                        base_cnt = 245;
+                    mask_row[x] = 255;
+                    ++kangaroo_pixel_count;
+                }
 
                 if (use_depth)
                 {
@@ -354,7 +429,32 @@ private:
             }
         }
 
-        // 4) build "blended" only for NVG; for FLIR we use pure thermo
+        // Estimate number of distinct kangaroos via connected components
+        int kangaroo_count = 0;
+        if (kangaroo_pixel_count > 0)
+        {
+            cv::Mat labels;
+            int n_labels = cv::connectedComponents(kangaroo_mask, labels, 8, CV_32S);
+            // label 0 is background
+            kangaroo_count = std::max(0, n_labels - 1);
+        }
+
+        if (kangaroo_pixel_count == 0)
+        {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 5000,
+                "segCallback: no kangaroo pixels detected this frame. "
+                "Check CSV colors and label strings for 'kangaroo'.");
+        }
+        else
+        {
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "segCallback: detected %d kangaroos (approx), %d kangaroo pixels.",
+                kangaroo_count, kangaroo_pixel_count);
+        }
+
+        // 3) build "blended" only for NVG; for FLIR we use pure thermo
         cv::Mat blended;
         if (!last_gray_.empty() && last_gray_.size() == thermo.size())
         {
@@ -367,84 +467,113 @@ private:
             blended = thermo;
         }
 
-        // 5) visualization
+        // 4) visualization
         cv::Mat output;
         std::string encoding;
 
         if (view_mode_ == "nightvision")
         {
-            // keep your existing NVG pipeline here (omitted for brevity) ...
-            // output = nv_bgr; encoding = "rgb8";
-            // [YOUR NIGHT VISION CODE GOES HERE]
-            // For now just fall back to green display of blended:
+            // Simple placeholder NVG: green-tinted blended image
             cv::Mat nv_bgr;
             cv::cvtColor(blended, nv_bgr, cv::COLOR_GRAY2BGR);
             std::vector<cv::Mat> ch(3);
             cv::split(nv_bgr, ch);
-            ch[1] = ch[1] * 0.9f + 15; // green
-            ch[0] = ch[1] * 0.05f;
-            ch[2] = cv::Mat::zeros(ch[2].size(), ch[2].type());
+            ch[1] = ch[1] * 0.9f + 15;                          // main green channel
+            ch[0] = ch[1] * 0.05f;                              // tiny blue bleed
+            ch[2] = cv::Mat::zeros(ch[2].size(), ch[2].type()); // no red
             cv::merge(ch, nv_bgr);
             output = nv_bgr;
-            encoding = "rgb8";
+            encoding = "bgr8";
         }
         else if (view_mode_ == "flir")
         {
             // FLIR-style view: pure thermal map -> Inferno colormap
-            cv::applyColorMap(thermo, output, cv::COLORMAP_INFERNO);
-            encoding = "rgb8";
+            cv::Mat flir_bgr;
+            cv::applyColorMap(thermo, flir_bgr, cv::COLORMAP_INFERNO);
+
+            // Optional: still tint kangaroo regions orange if you want
+            cv::Mat flir_out = flir_bgr.clone();
+            const cv::Vec3b kangaroo_bgr(0, 165, 255); // bright orange in BGR
+
+            if (kangaroo_pixel_count > 0)
+            {
+                for (int y = 0; y < flir_out.rows; ++y)
+                {
+                    cv::Vec3b *row = flir_out.ptr<cv::Vec3b>(y);
+                    const uint8_t *mrow = kangaroo_mask.ptr<uint8_t>(y);
+                    for (int x = 0; x < flir_out.cols; ++x)
+                    {
+                        if (mrow[x])
+                        {
+                            cv::Vec3b orig = row[x];
+                            // Heavy blend: mostly orange, keep a little of Inferno
+                            row[x][0] = static_cast<uchar>(0.2 * orig[0] + 0.8 * kangaroo_bgr[0]);
+                            row[x][1] = static_cast<uchar>(0.2 * orig[1] + 0.8 * kangaroo_bgr[1]);
+                            row[x][2] = static_cast<uchar>(0.2 * orig[2] + 0.8 * kangaroo_bgr[2]);
+                        }
+                    }
+                }
+            }
+
+            output = flir_out;
+            encoding = "bgr8";
         }
-        else // "thermal" grayscale
+        else // "thermal" but still colorized
         {
-            if (use_cmap_)
-            {
-                cv::applyColorMap(thermo, output, cv::COLORMAP_INFERNO);
-                encoding = "rgb8";
-            }
-            else
-            {
-                output = thermo;
-                encoding = "mono8";
-            }
+            cv::Mat col;
+            cv::applyColorMap(thermo, col, cv::COLORMAP_INFERNO);
+            output = col;
+            encoding = "bgr8";
         }
 
-        // 6) publish
+        // 5) publish
         auto out_msg = cv_bridge::CvImage(
                            msg->header, encoding, output)
                            .toImageMsg();
         image_pub_->publish(*out_msg);
     }
 
-    // Build LUT: segID -> thermal count [0..255] using CSV + Planck integral
-    void initLUT(const cv::Mat &seg)
+    // Build LUT: color_key -> thermal count [0..255] using CSV + Planck integral
+    void initLUT(const cv::Mat &seg_bgr)
     {
-        std::set<uint8_t> labels;
-        for (int y = 0; y < seg.rows; ++y)
+        std::set<uint32_t> colors;
+        for (int y = 0; y < seg_bgr.rows; ++y)
         {
-            const uint8_t *row = seg.ptr<uint8_t>(y);
-            for (int x = 0; x < seg.cols; ++x)
-                labels.insert(row[x]);
+            const cv::Vec3b *row = seg_bgr.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < seg_bgr.cols; ++x)
+            {
+                uint8_t b = row[x][0];
+                uint8_t g = row[x][1];
+                uint8_t r = row[x][2];
+                uint32_t key = makeColorKey(r, g, b);
+                colors.insert(key);
+            }
         }
 
         const double c1 = 1.19104e8;
         const double c2 = 1.43879e4;
 
         double max_rad = 0.0;
-        std::unordered_map<uint8_t, double> rads;
+        std::unordered_map<uint32_t, double> rads;
 
-        for (uint8_t L : labels)
+        // First pass: compute radiance per color key
+        for (uint32_t key : colors)
         {
-            // lookup profile; if not found, fall back to a default
             ThermalProfile prof;
-            auto itp = id_to_profile_.find(L);
-            if (itp != id_to_profile_.end())
+
+            auto itp = color_to_profile_.find(key);
+            if (itp != color_to_profile_.end())
             {
                 prof = itp->second;
             }
             else
             {
+                // default neutral if not in CSV
                 prof.base_temp_K = 295.0;
-                prof.emissivity = 0.9;
+                prof.emissivity = 0.90;
+                prof.is_animal = false;
+                prof.is_fire = false;
+                prof.is_kangaroo = false;
             }
 
             double T = prof.base_temp_K;
@@ -463,26 +592,87 @@ private:
 
                 sum += Ld * 0.01; // Δλ = 0.01 µm
             }
-            rads[L] = sum;
+
+            // Optionally clamp fire radiance so it does not completely dominate
+            if (prof.is_fire)
+            {
+                const double max_fire_factor = 3.0;
+                sum = std::min(sum, max_fire_factor * 1e6); // arbitrary large scale
+            }
+
+            rads[key] = sum;
             max_rad = std::max(max_rad, sum);
         }
 
         if (max_rad <= 0.0)
             max_rad = 1.0;
 
-        // normalize to [0,255]
+        // Second pass: normalize to [0,255] and boost animals
         for (auto &kv : rads)
         {
+            uint32_t key = kv.first;
+            double rad = kv.second;
+
             uint8_t cnt = static_cast<uint8_t>(
-                std::round((kv.second / max_rad) * 255.0));
-            lut_[kv.first] = cnt;
+                std::round((rad / max_rad) * 255.0));
+
+            auto itp = color_to_profile_.find(key);
+            if (itp != color_to_profile_.end())
+            {
+                const ThermalProfile &prof = itp->second;
+
+                // Ensure animals (kangaroos, etc.) live near the top of the brightness range
+                if (prof.is_animal)
+                {
+                    if (cnt < 220)
+                        cnt = 220;
+                }
+
+                if (prof.is_fire)
+                {
+                    cnt = 255;
+                }
+            }
+
+            lut_[key] = cnt;
+        }
+
+        // Debug log for a few entries
+        RCLCPP_INFO(get_logger(), "Color-based LUT entries:");
+        int printed = 0;
+        for (auto &kv : lut_)
+        {
+            if (printed > 50)
+                break; // avoid spamming logs
+
+            uint32_t key = kv.first;
+            uint8_t gray = kv.second;
+            uint8_t r = static_cast<uint8_t>((key >> 16) & 0xFF);
+            uint8_t g = static_cast<uint8_t>((key >> 8) & 0xFF);
+            uint8_t b = static_cast<uint8_t>(key & 0xFF);
+
+            auto itp = color_to_profile_.find(key);
+            bool is_animal = (itp != color_to_profile_.end()) && itp->second.is_animal;
+            bool is_fire = (itp != color_to_profile_.end()) && itp->second.is_fire;
+            bool is_kangaroo = (itp != color_to_profile_.end()) && itp->second.is_kangaroo;
+
+            RCLCPP_INFO(get_logger(),
+                        "  color (R=%u,G=%u,B=%u) -> gray %u (animal=%s, kangaroo=%s, fire=%s)",
+                        r, g, b, gray,
+                        is_animal ? "true" : "false",
+                        is_kangaroo ? "true" : "false",
+                        is_fire ? "true" : "false");
+            ++printed;
         }
     }
 
     // state
     bool initialized_;
-    std::unordered_map<uint8_t, uint8_t> lut_;                  // segID -> grayscale
-    std::unordered_map<uint8_t, ThermalProfile> id_to_profile_; // segID -> thermal profile
+    // color_key (0x00RRGGBB) -> grayscale
+    std::unordered_map<uint32_t, uint8_t> lut_;
+    // color_key (0x00RRGGBB) -> thermal profile (used to detect kangaroo etc.)
+    std::unordered_map<uint32_t, ThermalProfile> color_to_profile_;
+
     cv::Mat last_gray_;
     cv::Mat last_depth_;
     std::vector<double> band_;
