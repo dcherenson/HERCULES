@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-trajectory_editor.py (with interactive adjusted-origin support)
+trajectory_editor.py (with interactive adjusted-origin support + delete mode)
 
 Adds:
  - Draws the map's current origin (0,0,0) and a user-selected adjusted origin.
@@ -8,6 +8,7 @@ Adds:
  - Press 'r' to clear the adjusted origin (back to None).
  - When an adjusted origin is set, newly added points are stored relative to that adjusted origin.
    (Existing points are not modified.)
+ - Press 'd' to enter "delete-point" mode, then left-click near a point to delete it.
 
 Usage example:
 Run from the directory of the txt files e.g. /home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity/
@@ -129,6 +130,7 @@ class TrajectoryEditor:
         self.dragging = False
         self.offset = (0, 0)
         self.add_mode = False
+        self.delete_mode = False
         self.current_traj_idx = 0
 
         # Adjusted-origin state
@@ -163,6 +165,7 @@ class TrajectoryEditor:
         print(" - Press 'o' to set the adjusted origin (click on map after pressing 'o').")
         print(" - Press 'r' to clear the adjusted origin.")
         print(" - With an adjusted origin set, NEWLY ADDED points are stored relative to it.")
+        print(" - Press 'd' to toggle delete-point mode; in this mode left-click near a point to delete it.")
         print(" - Press 's' to save all modified trajectories.")
         print(" - Press 'q' to quit without saving.")
         print("=========================")
@@ -277,7 +280,8 @@ class TrajectoryEditor:
         for i, traj in enumerate(self.trajectories):
             if event.artist == traj.scatter:
                 ind = event.ind
-                if not len(ind): return
+                if not len(ind):
+                    return
                 self.selected_traj   = i
                 self.selected_pt_idx = ind[0]
                 self.dragging = True
@@ -289,8 +293,10 @@ class TrajectoryEditor:
                 return
 
     def on_motion(self, event):
-        if not self.dragging or self.selected_traj is None: return
-        if event.xdata is None or event.ydata is None: return
+        if not self.dragging or self.selected_traj is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
         new_disp_x = event.xdata + self.offset[0]
         new_disp_y = event.ydata + self.offset[1]
         # display->internal: (x_int, y_int) = (y_disp, x_disp)
@@ -312,7 +318,18 @@ class TrajectoryEditor:
     def on_key(self, event):
         if event.key == 'a':
             self.add_mode = not self.add_mode
+            if self.add_mode and self.delete_mode:
+                self.delete_mode = False
+                print("Delete-point mode OFF.")
             print(f"Add-point mode {'ON' if self.add_mode else 'OFF'}")
+        elif event.key == 'd':
+            self.delete_mode = not self.delete_mode
+            if self.delete_mode and self.add_mode:
+                self.add_mode = False
+                print("Add-point mode OFF.")
+            print(f"Delete-point mode {'ON' if self.delete_mode else 'OFF'}")
+            if self.delete_mode:
+                print("Left-click near a point to delete it.")
         elif event.key in [str(i+1) for i in range(len(self.trajectories))]:
             idx = int(event.key)-1
             self.current_traj_idx = idx
@@ -353,6 +370,11 @@ class TrajectoryEditor:
             self._draw_map_and_trajectories()
             return
 
+        # Handle delete-point mode
+        if self.delete_mode and event.button == 1:
+            self._delete_nearest_point(event.xdata, event.ydata)
+            return
+
         # Handle add-point mode
         if not self.add_mode or event.button != 1:
             return
@@ -377,6 +399,49 @@ class TrajectoryEditor:
         self._update_plot(traj)
         self.fig.canvas.draw_idle()
 
+    def _delete_nearest_point(self, x_disp, y_disp):
+        """Delete the nearest trajectory point to the display click, within a threshold."""
+        min_dist2 = None
+        best_traj_idx = None
+        best_pt_idx = None
+
+        for ti, traj in enumerate(self.trajectories):
+            if traj.points.shape[0] == 0:
+                continue
+            pts = traj.points[:, :2]
+            xs = pts[:, 1]  # internal->display
+            ys = pts[:, 0]
+            dx = xs - x_disp
+            dy = ys - y_disp
+            dist2 = dx*dx + dy*dy
+            local_idx = np.argmin(dist2)
+            local_min = dist2[local_idx]
+            if min_dist2 is None or local_min < min_dist2:
+                min_dist2 = local_min
+                best_traj_idx = ti
+                best_pt_idx = local_idx
+
+        if min_dist2 is None:
+            print("No points available to delete.")
+            return
+
+        # Threshold radius in world units (squared); tweak multiplier if needed
+        threshold = (self.resolution * 5.0)**2
+        if min_dist2 > threshold:
+            print("No point close enough to delete (click closer).")
+            return
+
+        traj = self.trajectories[best_traj_idx]
+        if traj.points.shape[0] <= 1:
+            print(f"Refusing to delete last remaining point in {traj.filename}")
+            return
+
+        deleted = traj.points[best_pt_idx].copy()
+        traj.points = np.delete(traj.points, best_pt_idx, axis=0)
+        self._update_plot(traj)
+        print(f"Deleted point {best_pt_idx} from {traj.filename}: x={deleted[0]:.3f}, y={deleted[1]:.3f}")
+        self.fig.canvas.draw_idle()
+
     def _update_plot(self, traj):
         pts = traj.points[:,:2]
         xs, ys = pts[:,1], pts[:,0]  # internal->display
@@ -388,7 +453,7 @@ class TrajectoryEditor:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Interactive Trajectory Editor with Add-Point Mode, Selection, and Adjusted Origin")
+    parser = argparse.ArgumentParser(description="Interactive Trajectory Editor with Add-Point Mode, Selection, Adjusted Origin, and Delete Mode")
     parser.add_argument('--map', required=True, help="Path to occupancy grid map (PNG or PGM).")
     parser.add_argument('--traj', nargs='+', required=True, help="One or more trajectory text files.")
     parser.add_argument('--origin', nargs=2, type=float, default=[0.0, 0.0], metavar=('OX','OY'),
