@@ -24,7 +24,7 @@ from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation, RotationSpline
 
 def load_odom(odom_file):
-    """Load odom.txt → (ts, positions, quaternions)."""
+    """Load odom.txt -> (ts, positions, quaternions)."""
     ts, pos, ori = [], [], []
     with open(odom_file, 'r') as f:
         for line in f:

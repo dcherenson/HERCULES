@@ -24,7 +24,10 @@ EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_r
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity2/"
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity3"
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity5"
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_forest/"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_forest/"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_dump/"
+WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test_thruroad_dump"
+
 
 
 # Default number of UGVs if none specified
@@ -32,10 +35,10 @@ DEFAULT_NUM_UGVS=2
 
 # Default linear speed (in m/s) when no individual speed is provided
 # NOTE!!! Set speed to 0.35 when you are running in simpause clock based physics, do not remove below
-# DEFAULT_SPEED=0.35
+DEFAULT_SPEED=0.35
 # DEFAULT_SPEED=0.5
 
-DEFAULT_SPEED=1.2
+# DEFAULT_SPEED=1.4
 
 # Default control-loop frequency (in Hz)
 DEFAULT_CTRL_HZ=20

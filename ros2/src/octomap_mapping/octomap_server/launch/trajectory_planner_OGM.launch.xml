@@ -6,9 +6,12 @@
         output="screen">
 
         <param name="settings_file" value="/home/sgarimella34/Documents/AirSim/settings_trajectory_planning.json"/>
-        <param name="output_folder" value="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_convoy/"/>
+        <param name="output_folder" value="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_random_explore/"/>
         <param name="ground_map_topic" value="Ausenv_0mAlt_OGM_0p5m"/>
         <param name="drone_map_topic" value="Ausenv_35mAlt_OGM_0p5m"/>
+
+        <param name="planning_horizon_steps" value="5"/>
+
 
     </node>
 

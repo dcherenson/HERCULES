@@ -38,18 +38,18 @@ except ImportError:
 # ===================== User-configurable variables =====================
 
 # Base path to your cooperative-vehicle-infrastructure folder (native format)
-# DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_FULL/cooperative-vehicle-infrastructure/"
-DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C-SUBSET1/cooperative-vehicle-infrastructure/"
+DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/dair_v2x_synth_FULL/cooperative-vehicle-infrastructure/"
+# DATA_ROOT = "/home/sgarimella34/multi-robot-coordination/collaborative-perception-BEVP/datasets/DAIR-V2X-C-SUBSET1/cooperative-vehicle-infrastructure/"
 
 # View mode: 'veh', 'infra', or 'cooperative_world'
 # The SIDE value is ignored in cooperative world mode
-VIEW_MODE = "infra"   # 'veh' | 'infra' | 'cooperative_world'
+VIEW_MODE = "veh"   # 'veh' | 'infra' | 'cooperative_world'
 
 # For side-only modes:
-SIDE = "infra"   # 'veh' or 'infra' (ignored for cooperative_world)
+SIDE = "veh"   # 'veh' or 'infra' (ignored for cooperative_world)
 
 # How many frames to show
-START_IDX = 0
+START_IDX = 21
 MAX_FRAMES = 20
 
 # Visualization toggles
@@ -62,7 +62,7 @@ OUTPUT_DIR   = "/home/sgarimella34/vis_native_viewer"
 PROJECT_3D_ON_IMAGE = False
 
 # Open3D point size
-O3D_POINT_SIZE = 1.0
+O3D_POINT_SIZE = 1.2
 
 # ===== New format toggles =====
 # If True, prefer *.jpg (still falls back to *.png if jpg missing)
@@ -760,7 +760,9 @@ def visualize_frame_side(img_path: Path, lbl2_path: Path, lbl3_path: Path, pts: 
     o3d_boxes = []
     if o3d is not None:
         pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[:, :3]))
-        pcd.colors = o3d.utility.Vector3dVector(np.ones_like(pts[:, :3]) * 0.5)
+        # blue points
+        blue = np.array([[0.0, 0.0, 1.0]], dtype=float)
+        pcd.colors = o3d.utility.Vector3dVector(np.tile(blue, (pts.shape[0], 1)))
     else:
         pcd = None
 
@@ -794,7 +796,8 @@ def visualize_frame_side(img_path: Path, lbl2_path: Path, lbl3_path: Path, pts: 
         opt = vis.get_render_option()
         if opt:
             opt.point_size = O3D_POINT_SIZE
-            opt.background_color = np.array([0,0,0])
+            # white background
+            opt.background_color = np.array([1.0, 1.0, 1.0], dtype=float)
         if pcd is not None:
             vis.add_geometry(pcd)
         for b in o3d_boxes:

@@ -73,6 +73,8 @@ public:
         this->declare_parameter("drone_altitude", 10.0); // meters
         this->declare_parameter("use_k_rrt_for_checkpoints", false);
 
+        this->declare_parameter<int>("planning_horizon_steps", 50);
+
         // Retrieve parameters.
         this->get_parameter("use_k_rrt_for_checkpoints", use_k_rrt_for_checkpoints_);
         this->get_parameter("trajectory_exploration_radius", trajectory_exploration_radius_);
@@ -98,6 +100,9 @@ public:
         this->get_parameter("drone_max_linear_velocity", drone_max_linear_velocity_);
         this->get_parameter("drone_max_turn_angle_deg", drone_max_turn_angle_deg_);
         this->get_parameter("max_linear_acceleration", max_linear_acceleration_);
+
+        planning_horizon_steps_ =
+            this->get_parameter("planning_horizon_steps").as_int();
 
         // Declare and assign default value
         output_folder_string_ = this->declare_parameter<std::string>(
@@ -297,6 +302,8 @@ private:
     double ugv_inflation_radius_, uav_inflation_radius_;
     double uav_astar_inflation_radius_;
 
+    int planning_horizon_steps_;
+
     std::string output_file_path_;
     std::string output_folder_string_;
     std::string robot_name_;
@@ -438,7 +445,12 @@ private:
                     cell_y >= 0 && cell_y < static_cast<int>(msg->info.height))
                 {
                     int msg_index = cell_y * msg->info.width + cell_x;
-                    occupancy_grid_ground_[idx] = msg->data[msg_index];
+                    int8_t val = msg->data[msg_index];
+                    // Preserve obstacles (100), treat everything else (0 or -1) as unknown for planning.
+                    if (val == 100)
+                        occupancy_grid_ground_[idx] = 100;
+                    else
+                        occupancy_grid_ground_[idx] = -1;
                 }
                 else
                 {
@@ -497,7 +509,12 @@ private:
                     cell_y >= 0 && cell_y < static_cast<int>(msg->info.height))
                 {
                     int msg_index = cell_y * msg->info.width + cell_x;
-                    occupancy_grid_drone_[idx] = msg->data[msg_index];
+                    int8_t val = msg->data[msg_index];
+                    // Preserve obstacles (100), treat everything else (0 or -1) as unknown for planning.
+                    if (val == 100)
+                        occupancy_grid_drone_[idx] = 100;
+                    else
+                        occupancy_grid_drone_[idx] = -1;
                 }
                 else
                 {
@@ -734,7 +751,6 @@ private:
             return t_linear + t_angular;
         };
 
-        // Lambda: plan a segment from current state to a given goal.
         // Lambda: plan a segment from current state to a given goal.
         auto plan_segment =
             [this, &curr_x, &curr_y, &curr_time, &curr_theta, &compute_dt](double goal_x, double goal_y, double goal_z) -> std::pair<TrajVec, TrajVec>
@@ -998,6 +1014,7 @@ private:
                     prev_x = wx;
                     prev_y = wy;
                 }
+
                 return std::make_pair(seg_dense_rrt, seg_sparse_rrt);
             }
         }; // end of plan_segment lambda
@@ -1229,6 +1246,57 @@ private:
             dense_full_traj.insert(dense_full_traj.end(), extra_seg.first.begin() + 1, extra_seg.first.end());
             sparse_full_traj.insert(sparse_full_traj.end(), extra_seg.second.begin() + 1, extra_seg.second.end());
         }
+
+        // -------------------- Apply planning horizon in discrete steps (if enabled) --------------------
+        // planning_horizon_steps_ is interpreted as a limit on the number of *segments*
+        // of the sparse trajectory. We therefore keep at most planning_horizon_steps_ + 1
+        // sparse waypoints (including the initial state), and we truncate the dense
+        // trajectory to have approximately the same *arc length*.
+        if (planning_horizon_steps_ > 0)
+        {
+            int max_points = planning_horizon_steps_ + 1; // include start state
+            if (static_cast<int>(sparse_full_traj.size()) > max_points)
+            {
+                // 1) Compute horizon length along the sparse trajectory.
+                double horizon_length = 0.0;
+                for (int i = 1; i < max_points; ++i)
+                {
+                    double dx = std::get<0>(sparse_full_traj[i]) - std::get<0>(sparse_full_traj[i - 1]);
+                    double dy = std::get<1>(sparse_full_traj[i]) - std::get<1>(sparse_full_traj[i - 1]);
+                    horizon_length += std::sqrt(dx * dx + dy * dy);
+                }
+
+                // 2) Truncate sparse trajectory to that many waypoints.
+                sparse_full_traj.resize(static_cast<std::size_t>(max_points));
+
+                // 3) Truncate dense trajectory so its arc length does not exceed horizon_length.
+                std::vector<std::tuple<double, double, double, double>> dense_truncated;
+                dense_truncated.reserve(dense_full_traj.size());
+                dense_truncated.push_back(dense_full_traj.front());
+
+                double dense_length = 0.0;
+                const double eps = 1e-6;
+
+                for (std::size_t i = 1; i < dense_full_traj.size(); ++i)
+                {
+                    double dx = std::get<0>(dense_full_traj[i]) - std::get<0>(dense_full_traj[i - 1]);
+                    double dy = std::get<1>(dense_full_traj[i]) - std::get<1>(dense_full_traj[i - 1]);
+                    double seg_len = std::sqrt(dx * dx + dy * dy);
+
+                    if (dense_length + seg_len > horizon_length + eps)
+                    {
+                        break;
+                    }
+
+                    dense_length += seg_len;
+                    dense_truncated.push_back(dense_full_traj[i]);
+                }
+
+                dense_full_traj.swap(dense_truncated);
+            }
+        }
+        // -------------------------------------------------------------------------
+
         double final_length = 0.0;
         for (size_t i = 1; i < sparse_full_traj.size(); i++)
         {
@@ -1236,7 +1304,9 @@ private:
             double dy = std::get<1>(sparse_full_traj[i]) - std::get<1>(sparse_full_traj[i - 1]);
             final_length += std::sqrt(dx * dx + dy * dy);
         }
-        RCLCPP_INFO(this->get_logger(), "Planned trajectory length: %.2f m with %zu waypoints", final_length, sparse_full_traj.size());
+        RCLCPP_INFO(this->get_logger(),
+                    "Planned trajectory length: %.2f m with %zu waypoints",
+                    final_length, sparse_full_traj.size());
         return std::make_pair(dense_full_traj, sparse_full_traj);
     }
 
@@ -1385,7 +1455,13 @@ private:
             orig_height = original_height_drone_;
             orig_origin_x = original_origin_x_drone_;
             orig_origin_y = original_origin_y_drone_;
-            full_grid = original_ogm_drone_;
+            // Start with a grid that only preserves static obstacles from the original OGM.
+            full_grid.assign(original_ogm_drone_.size(), -1);
+            for (size_t i = 0; i < original_ogm_drone_.size(); ++i)
+            {
+                if (original_ogm_drone_[i] == 100)
+                    full_grid[i] = 100;
+            }
             msg.info.origin.position.z = drone_altitude_;
         }
         else
@@ -1394,9 +1470,16 @@ private:
             orig_height = original_height_ground_;
             orig_origin_x = original_origin_x_ground_;
             orig_origin_y = original_origin_y_ground_;
-            full_grid = original_ogm_ground_;
+            // Start with a grid that only preserves static obstacles from the original OGM.
+            full_grid.assign(original_ogm_ground_.size(), -1);
+            for (size_t i = 0; i < original_ogm_ground_.size(); ++i)
+            {
+                if (original_ogm_ground_[i] == 100)
+                    full_grid[i] = 100;
+            }
             msg.info.origin.position.z = 0.0;
         }
+
         msg.info.width = orig_width;
         msg.info.height = orig_height;
         msg.info.origin.position.x = orig_origin_x;
@@ -1832,6 +1915,55 @@ private:
                 curr_theta = std::atan2(target_y - prev_y, target_x - prev_x);
             }
         }
+
+        // -------------------- Apply planning horizon in discrete steps (if enabled) --------------------
+        // Same idea as in plan_trajectory(): limit to planning_horizon_steps_ sparse
+        // segments and truncate the dense convoy trajectory by *arc length*.
+        if (planning_horizon_steps_ > 0)
+        {
+            int max_points = planning_horizon_steps_ + 1; // include start state
+            if (static_cast<int>(sparse_traj.size()) > max_points)
+            {
+                // 1) Horizon length along the sparse convoy trajectory.
+                double horizon_length = 0.0;
+                for (int i = 1; i < max_points; ++i)
+                {
+                    double dx = std::get<0>(sparse_traj[i]) - std::get<0>(sparse_traj[i - 1]);
+                    double dy = std::get<1>(sparse_traj[i]) - std::get<1>(sparse_traj[i - 1]);
+                    horizon_length += std::sqrt(dx * dx + dy * dy);
+                }
+
+                // 2) Truncate sparse trajectory.
+                sparse_traj.resize(static_cast<std::size_t>(max_points));
+
+                // 3) Truncate dense trajectory by length.
+                std::vector<std::tuple<double, double, double, double>> dense_truncated;
+                dense_truncated.reserve(dense_traj.size());
+                dense_truncated.push_back(dense_traj.front());
+
+                double dense_length = 0.0;
+                const double eps = 1e-6;
+
+                for (std::size_t i = 1; i < dense_traj.size(); ++i)
+                {
+                    double dx = std::get<0>(dense_traj[i]) - std::get<0>(dense_traj[i - 1]);
+                    double dy = std::get<1>(dense_traj[i]) - std::get<1>(dense_traj[i - 1]);
+                    double seg_len = std::sqrt(dx * dx + dy * dy);
+
+                    if (dense_length + seg_len > horizon_length + eps)
+                    {
+                        break;
+                    }
+
+                    dense_length += seg_len;
+                    dense_truncated.push_back(dense_traj[i]);
+                }
+
+                dense_traj.swap(dense_truncated);
+            }
+        }
+        // -------------------------------------------------------------------------
+
         RCLCPP_INFO(this->get_logger(), "Planned convoy trajectory (time-synced with companion UGV).");
         return std::make_pair(dense_traj, sparse_traj);
     }
