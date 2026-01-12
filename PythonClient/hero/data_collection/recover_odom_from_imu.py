@@ -5,13 +5,13 @@ recover_odom_from_imu.py
 Recover odometry (t, x y z qw qx qy qz) from IMU:
     t, ax, ay, az, gx, gy, gz
 
-Critical: you MUST set the initial attitude. For your synthetic pipeline, the
-best option is to initialize from the first pose in the ground-truth odom file
-that you used to generate the synthetic IMU.
+Critical: you MUST set the initial attitude (and realistically initial velocity).
+For your synthetic pipeline, the best option is to initialize from the first
+pose in the ground-truth odom file that you used to generate the synthetic IMU.
 
 This script assumes your IMU is:
   - acc_body is specific force in body frame (a_world - g, rotated into body)
-  - omega_body is body angular velocity (rad/s)
+  - omega_body is body angular velocity (rad/s) in body frame
 and that you want a world frame consistent with your odom output.
 
 No fancy alignment is done beyond the provided initialization.
@@ -25,25 +25,26 @@ from scipy.spatial.transform import Rotation
 # USER SETTINGS (EDIT ME)
 # -------------------------
 
-IMU_PATH = "/home/sgarimella34/Documents/raw_data_hercules/Drone2/synthetic_imu.txt"
-OUT_ODOM_PATH = "/home/sgarimella34/Documents/raw_data_hercules/Drone2/recovered_odom.txt"
+IMU_PATH = "/home/sgarimella34/Documents/raw_data_hercules/Drone1/synthetic_imu.txt"
+OUT_ODOM_PATH = "/home/sgarimella34/Documents/raw_data_hercules/Drone1/recovered_odom.txt"
 
-# If True, we initialize from the first pose in this odom file:
+# If True, initialize from the first TWO poses in this odom file (for pos0, vel0, quat0)
 INIT_FROM_GT_ODOM = True
-GT_ODOM_INIT_PATH = "/home/sgarimella34/Documents/raw_data_hercules/Drone2/odom.txt"
+GT_ODOM_INIT_PATH = "/home/sgarimella34/Documents/raw_data_hercules/Drone1/odom.txt"
 
 # If INIT_FROM_GT_ODOM is False, use these:
-INIT_POS = np.array([0.0, 0.0, 0.0])          # x y z
-INIT_VEL = np.array([0.0, 0.0, 0.0])          # vx vy vz
+INIT_POS = np.array([0.0, 0.0, 0.0])             # x y z
+INIT_VEL = np.array([0.0, 0.0, 0.0])             # vx vy vz
 INIT_QUAT_WXYZ = np.array([1.0, 0.0, 0.0, 0.0])  # qw qx qy qz
 
 # Gravity in your chosen world frame.
 # IMPORTANT: This must match the frame used in the IMU synthesis.
-# If your odom positions are NED (z down), then gravity is +Z:
-GRAVITY_WORLD = np.array([0.0, 0.0, 9.80665])
+# If your world Z is down (NED-like):  [0,0,+9.80665]
+# If your world Z is up   (ENU/UE):    [0,0,-9.80665]
+GRAVITY_WORLD = np.array([0.0, 0.0, 9.80665], dtype=float)
 
 # Safety: drop / clamp weird time steps
-MAX_DT = 0.1   # seconds, tune if needed (for example if IMU is 200 Hz, dt ~ 0.005)
+MAX_DT = 0.1  # seconds (for IMU 200 Hz, dt ~ 0.005)
 
 # -------------------------
 # IO
@@ -55,6 +56,7 @@ def load_imu(path: str):
     acc_body = data[:, 1:4]
     omega_body = data[:, 4:7]
     return t, acc_body, omega_body
+
 
 def _looks_like_int_only_line(line: str) -> bool:
     s = line.strip()
@@ -70,13 +72,8 @@ def _looks_like_int_only_line(line: str) -> bool:
     except ValueError:
         return False
 
-def load_first_pose_from_odom(odom_path: str):
-    """
-    Odom format:
-      optional first line: integer count
-      then: t x y z qw qx qy qz
-    Returns: (pos0, quat_wxyz0)
-    """
+
+def _read_odom_lines(odom_path: str):
     p = Path(odom_path)
     lines = p.read_text(errors="ignore").splitlines()
     lines = [ln.strip() for ln in lines if ln.strip()]
@@ -85,16 +82,48 @@ def load_first_pose_from_odom(odom_path: str):
 
     if _looks_like_int_only_line(lines[0]):
         lines = lines[1:]
-    if not lines:
-        raise ValueError(f"No pose lines in odom file: {odom_path}")
 
-    parts = lines[0].split()
+    if len(lines) < 2:
+        raise ValueError(f"Need at least 2 pose lines in odom file: {odom_path}")
+
+    return lines
+
+
+def _parse_odom_pose(line: str):
+    # format: t x y z qw qx qy qz
+    parts = line.split()
     if len(parts) < 8:
-        raise ValueError(f"First pose line has too few columns: {lines[0]}")
+        raise ValueError(f"Odom line has too few columns: {line}")
 
+    t = float(parts[0])
     x, y, z = map(float, parts[1:4])
     qw, qx, qy, qz = map(float, parts[4:8])
-    return np.array([x, y, z], dtype=float), np.array([qw, qx, qy, qz], dtype=float)
+    return t, np.array([x, y, z], dtype=float), np.array([qw, qx, qy, qz], dtype=float)
+
+
+def load_first_pose_and_velocity_from_odom(odom_path: str):
+    """
+    Odom format:
+      optional first line: integer count
+      then: t x y z qw qx qy qz
+
+    Returns:
+      pos0 : (3,)
+      vel0 : (3,) estimated from first two poses
+      quat0: (4,) wxyz from first pose
+    """
+    lines = _read_odom_lines(odom_path)
+
+    t0, p0, q0 = _parse_odom_pose(lines[0])
+    t1, p1, _  = _parse_odom_pose(lines[1])
+
+    dt = t1 - t0
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError(f"Bad initial dt from odom: t0={t0}, t1={t1}")
+
+    v0 = (p1 - p0) / dt
+    return p0, v0, q0
+
 
 # -------------------------
 # INTEGRATION
@@ -112,7 +141,7 @@ def integrate_trapezoid(t, acc_body, omega_body, pos0, vel0, quat_wxyz0):
     pos[0] = pos0
     vel[0] = vel0
 
-    # Initialize orientation from given quaternion
+    # Initialize orientation from given quaternion (wxyz)
     qw, qx, qy, qz = quat_wxyz0
     rot = Rotation.from_quat([qx, qy, qz, qw])  # SciPy expects [x y z w]
     q0_xyzw = rot.as_quat()
@@ -124,19 +153,17 @@ def integrate_trapezoid(t, acc_body, omega_body, pos0, vel0, quat_wxyz0):
     for i in range(1, n):
         dti = float(dt[i])
 
-        # Handle bad timestamps that can cause "shoot off into space"
+        # Handle bad timestamps
         if not np.isfinite(dti) or dti <= 0.0:
-            # Just copy state forward
             pos[i] = pos[i - 1]
             vel[i] = vel[i - 1]
             quats[i] = quats[i - 1]
             continue
 
         if dti > MAX_DT:
-            # Clamp large gaps to avoid huge integration jumps
             dti = MAX_DT
 
-        # 1) orientation update: assumes omega_body is in body frame
+        # 1) orientation update: omega_body is in BODY frame
         delta_q = Rotation.from_rotvec(omega_body[i - 1] * dti)
         rot_new = rot * delta_q
 
@@ -159,6 +186,7 @@ def integrate_trapezoid(t, acc_body, omega_body, pos0, vel0, quat_wxyz0):
 
     return pos, quats
 
+
 def save_odom(t, pos, quats, path: str):
     with open(path, "w") as f:
         for ti, p, q in zip(t, pos, quats):
@@ -167,12 +195,12 @@ def save_odom(t, pos, quats, path: str):
                 f"{q[0]:.6f} {q[1]:.6f} {q[2]:.6f} {q[3]:.6f}\n"
             )
 
+
 def main():
     t, acc_body, omega_body = load_imu(IMU_PATH)
 
     if INIT_FROM_GT_ODOM:
-        pos0, quat0 = load_first_pose_from_odom(GT_ODOM_INIT_PATH)
-        vel0 = np.array([0.0, 0.0, 0.0], dtype=float)
+        pos0, vel0, quat0 = load_first_pose_and_velocity_from_odom(GT_ODOM_INIT_PATH)
     else:
         pos0 = INIT_POS.astype(float)
         vel0 = INIT_VEL.astype(float)
@@ -181,6 +209,7 @@ def main():
     pos, quats = integrate_trapezoid(t, acc_body, omega_body, pos0, vel0, quat0)
     save_odom(t, pos, quats, OUT_ODOM_PATH)
     print(f"Wrote recovered odom to: {OUT_ODOM_PATH}")
+
 
 if __name__ == "__main__":
     main()

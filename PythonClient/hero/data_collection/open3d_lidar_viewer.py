@@ -2,238 +2,390 @@
 """
 open3d_lidar_viewer.py
 
-Load and visualize LiDAR .npy files (Nx3 float arrays in meters) with Open3D.
-Designed for data saved by Cosys-AirSim/HERCULES collectors where LiDAR points
-are stored under ".../<vehicle>/lidar/<timestamp>.npy".
+Plays LiDAR .npy frames from a directory in chronological order, where the
+filename (without extension) is the timestamp (seconds).
 
-Usage:
-  python3 open3d_lidar_viewer.py /path/to/file_or_dir [--voxel 0.05] [--min 0.2] [--max 120]
-  python3 open3d_lidar_viewer.py /dataset/root/Drone1/lidar --play
-  python3 open3d_lidar_viewer.py /dataset/root --play  # auto-finds */lidar/*.npy
+This version avoids Window.set_on_tick() by running a background playback loop
+and posting updates onto the GUI thread.
 
-Keys in the viewer:
-  [ → ] : next frame     [ ← ] : previous frame
-  [ space ] : toggle autoplay
-  [ s ] : save current frame as .ply next to the .npy
-  [ q ] : quit
+Requirements:
+  pip install open3d==0.18.0 numpy
 
-Install:
-  pip install open3d==0.18.0  # or a compatible version available to you
+How to use:
+  1) Edit LIDAR_PATH and (optionally) START_TIMESTAMP_S below.
+  2) Run:
+       python3 open3d_lidar_viewer.py
+
+Keys:
+  Space : pause/resume playback
+  D     : next frame (also pauses)
+  A     : previous frame (also pauses)
+  Q     : quit
+
+Notes:
+  - Point size is controlled by POINT_SIZE (increase to make points larger).
+  - The current .npy filename is shown in the top-left label and in the window title.
 """
 
-import argparse
+from __future__ import annotations
+
 import glob
-import os
+import re
 import time
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 import numpy as np
 import open3d as o3d
 
+import open3d.visualization.gui as gui
+import open3d.visualization.rendering as rendering
+
+
+# ============================================================
+# USER SETTINGS (edit these only)
+# ============================================================
+LIDAR_PATH = "/media/sgarimella34/SSD2/raw_data_hercules/ausenv_stereo_lidarfix_perimeterseq_2ugvuav_752x480/Drone1/lidar/"
+
+# Start playing from the first frame whose timestamp >= this value (seconds).
+# Set to None to start from the beginning.
+START_TIMESTAMP_S: Optional[float] = 72.0  # e.g. 1700000123.5
+
+FPS = 10.0
+LOOP = True
+
+POINT_SIZE = 3.0
+FRAME_SIZE_M = 1.0
+
+VOXEL_M = 0.0
+MIN_RANGE_M = None
+MAX_RANGE_M = None
+
+BACKGROUND = [0.0, 0.0, 0.0, 1.0]  # RGBA
+# ============================================================
+
+
+def _parse_timestamp_from_stem(stem: str) -> Tuple[int, float, str]:
+    """
+    Sorting key for filenames:
+      - Prefer numeric timestamp from full stem, else first numeric substring, else lexicographic.
+    Returns (kind, ts, stem) where kind=0 means numeric timestamp is available.
+    """
+    s = stem.strip()
+
+    try:
+        return (0, float(int(s)), stem)
+    except Exception:
+        pass
+    try:
+        return (0, float(s), stem)
+    except Exception:
+        pass
+
+    m = re.search(r"(\d+(?:\.\d+)?)", s)
+    if m:
+        try:
+            return (0, float(m.group(1)), stem)
+        except Exception:
+            pass
+
+    return (1, 0.0, stem)
+
+
+def _timestamp_from_filename(path: str) -> Optional[float]:
+    kind, ts, _ = _parse_timestamp_from_stem(Path(path).stem)
+    return ts if kind == 0 else None
+
 
 def find_npy_files(path: str) -> List[str]:
-    """
-    Return a sorted list of LiDAR .npy files.
-    Preference order:
-      1) If 'lidar' is in the path, only search under that folder.
-      2) Otherwise search recursively for '*/lidar/*.npy'.
-      3) As a fallback, include any *.npy whose shape matches Nx3 when loaded.
-    """
-    if os.path.isfile(path) and path.endswith(".npy"):
-        return [path]
+    p = Path(path).expanduser()
 
-    paths = []  # candidates
-    if os.path.isdir(path):
-        # Prefer lidar subfolders
-        if "lidar" + os.sep in path or path.endswith("lidar"):
-            paths = glob.glob(os.path.join(path, "*.npy"))
+    if p.is_file() and p.suffix == ".npy":
+        return [str(p)]
+
+    candidates: List[str] = []
+    if p.is_dir():
+        if p.name == "lidar":
+            candidates = glob.glob(str(p / "*.npy"))
         else:
-            paths = glob.glob(os.path.join(path, "**", "lidar", "*.npy"), recursive=True)
+            candidates = glob.glob(str(p / "**" / "lidar" / "*.npy"), recursive=True)
+            if not candidates:
+                candidates = glob.glob(str(p / "**" / "*.npy"), recursive=True)
 
-        # Fallback: allow any *.npy (we'll filter by shape)
-        if not paths:
-            paths = glob.glob(os.path.join(path, "**", "*.npy"), recursive=True)
-
-    # Natural sort by timestamp-like filename
-    paths = sorted(paths)
-
-    # Filter to Nx3 point arrays
-    filtered = []
-    for p in paths:
+    files: List[str] = []
+    for f in candidates:
         try:
-            arr = np.load(p, mmap_mode="r")
+            arr = np.load(f, mmap_mode="r")
             if arr.ndim == 2 and arr.shape[1] == 3:
-                filtered.append(p)
+                files.append(f)
         except Exception:
-            # Non-numeric or incompatible .npy
             continue
 
-    return filtered
+    files.sort(key=lambda fp: _parse_timestamp_from_stem(Path(fp).stem))
+    return files
+
+
+def start_index_from_timestamp(files: List[str], start_ts_s: Optional[float]) -> int:
+    if not files or start_ts_s is None:
+        return 0
+
+    target = float(start_ts_s)
+
+    # If everything parseable, do binary search.
+    ts_list: List[float] = []
+    for f in files:
+        ts = _timestamp_from_filename(f)
+        if ts is None:
+            ts_list = []
+            break
+        ts_list.append(ts)
+
+    if not ts_list:
+        # Linear fallback
+        for i, f in enumerate(files):
+            ts = _timestamp_from_filename(f)
+            if ts is not None and ts >= target:
+                return i
+        return 0
+
+    lo, hi = 0, len(ts_list) - 1
+    best = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if ts_list[mid] >= target:
+            best = mid
+            hi = mid - 1
+        else:
+            lo = mid + 1
+
+    return best if best is not None else (len(files) - 1)
 
 
 def build_point_cloud(
     pts: np.ndarray,
-    voxel: Optional[float] = None,
-    min_range: Optional[float] = None,
-    max_range: Optional[float] = None,
+    voxel_m: Optional[float] = None,
+    min_range_m: Optional[float] = None,
+    max_range_m: Optional[float] = None,
 ) -> o3d.geometry.PointCloud:
-    """
-    Convert Nx3 numpy array to an Open3D point cloud with basic filtering and optional downsampling.
-    """
-    # Ensure float64 for Open3D
     pts = np.asarray(pts, dtype=np.float64)
 
-    # Remove NaNs/Infs
-    finite_mask = np.isfinite(pts).all(axis=1)
+    mask = np.isfinite(pts).all(axis=1)
 
-    # Range filtering
     ranges = np.linalg.norm(pts, axis=1)
-    if min_range is not None:
-        finite_mask &= ranges >= float(min_range)
-    if max_range is not None:
-        finite_mask &= ranges <= float(max_range)
+    if min_range_m is not None:
+        mask &= ranges >= float(min_range_m)
+    if max_range_m is not None:
+        mask &= ranges <= float(max_range_m)
 
-    pts = pts[finite_mask]
+    pts = pts[mask]
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
 
-    # Optional voxel downsample
-    if voxel and voxel > 0:
-        pcd = pcd.voxel_down_sample(voxel_size=float(voxel))
+    if voxel_m is not None and voxel_m > 0:
+        pcd = pcd.voxel_down_sample(voxel_size=float(voxel_m))
 
-    # Optional simple height-based coloring (Z axis)
+    # Simple Z-based coloring
     if len(pcd.points) > 0:
         z = np.asarray(pcd.points)[:, 2]
-        z_min, z_max = np.percentile(z, [5, 95]) if z.size > 100 else (z.min(), z.max() if z.max() > z.min() else z.min() + 1e-6)
-        z_clamped = np.clip((z - z_min) / (z_max - z_min + 1e-12), 0.0, 1.0)
-        colors = np.stack([z_clamped, 1.0 - z_clamped, 0.5 * np.ones_like(z_clamped)], axis=1)
+        if z.size > 100:
+            z_min, z_max = np.percentile(z, [5, 95])
+        else:
+            z_min, z_max = float(z.min()), float(z.max())
+        if z_max <= z_min:
+            z_max = z_min + 1e-6
+        t = np.clip((z - z_min) / (z_max - z_min), 0.0, 1.0)
+        colors = np.stack([t, 1.0 - t, 0.5 * np.ones_like(t)], axis=1)
         pcd.colors = o3d.utility.Vector3dVector(colors)
 
     return pcd
 
 
-def visualize_sequence(
-    files: List[str],
-    voxel: Optional[float],
-    min_range: Optional[float],
-    max_range: Optional[float],
-    play: bool,
-    fps: float,
-    frame_size: float,
-):
+def _key_equals(event_key, *candidates) -> bool:
     """
-    Visualize a sequence of LiDAR frames with keyboard controls.
+    Some Open3D builds use gui.KeyName enums; others may deliver int keycodes.
+    This helper checks both styles safely.
     """
-    if not files:
-        raise SystemExit("No LiDAR .npy files found.")
-
-    idx = 0
-    autoplay = play
-    dt = 1.0 / max(1e-6, fps)
-
-    # Load first frame
-    pts = np.load(files[idx])
-    pcd = build_point_cloud(pts, voxel=voxel, min_range=min_range, max_range=max_range)
-    frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size)
-
-    vis = o3d.visualization.VisualizerWithKeyCallback()
-    vis.create_window(window_name="Open3D LiDAR Viewer", width=1280, height=800)
-    vis.add_geometry(pcd)
-    vis.add_geometry(frame)
-
-    def set_title():
-        vis.get_render_option().point_size = 1.0
-        vis.get_view_control().set_zoom(0.8)
-        title = f"[{idx+1}/{len(files)}] {os.path.basename(files[idx])}"
+    for c in candidates:
         try:
-            vis.get_window().window_name = title  # works in newer Open3D
+            if event_key == c:
+                return True
         except Exception:
             pass
+    return False
 
-    set_title()
 
-    def load_index(new_idx: int):
-        nonlocal idx, pcd
-        idx = new_idx % len(files)
-        pts_local = np.load(files[idx])
-        new_pcd = build_point_cloud(pts_local, voxel=voxel, min_range=min_range, max_range=max_range)
-        pcd.points = new_pcd.points
-        pcd.colors = new_pcd.colors
-        vis.update_geometry(pcd)
-        set_title()
+class LidarPlayerApp:
+    def __init__(self, files: List[str], start_idx: int = 0):
+        if not files:
+            raise SystemExit("No LiDAR .npy files found.")
 
-    # Key callbacks
-    def on_next(vis_):
-        load_index(idx + 1)
+        self.files = files
+        self.idx = int(max(0, min(start_idx, len(files) - 1)))
+        self.dt = 1.0 / max(1e-6, float(FPS))
+
+        self._running = True
+        self._paused = False
+
+        app = gui.Application.instance
+        app.initialize()
+
+        title = f"Open3D LiDAR Player [{Path(self.files[self.idx]).name}]"
+        self.window = app.create_window(title, 1280, 800)
+
+        # Widgets
+        self.scene_widget = gui.SceneWidget()
+        self.scene_widget.scene = rendering.Open3DScene(self.window.renderer)
+        self.scene_widget.scene.set_background(BACKGROUND)
+
+        self.label = gui.Label("")
+        self._update_label_and_title()
+
+        self.window.set_on_layout(self._on_layout)
+        self.window.set_on_close(self._on_close)
+        self.window.set_on_key(self._on_key)
+
+        self.window.add_child(self.label)
+        self.window.add_child(self.scene_widget)
+
+        # Materials
+        self.pcd_mat = rendering.MaterialRecord()
+        self.pcd_mat.shader = "defaultUnlit"
+        self.pcd_mat.point_size = float(POINT_SIZE)
+
+        self.frame_mat = rendering.MaterialRecord()
+        self.frame_mat.shader = "defaultLit"
+
+        # Coordinate frame
+        self.frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=float(FRAME_SIZE_M))
+        self.scene_widget.scene.add_geometry("axes", self.frame, self.frame_mat)
+
+        # First frame (at start index)
+        self._load_and_show(self.idx, reset_camera=True)
+
+        # Start playback loop in background thread
+        gui.Application.instance.run_in_thread(self._player_loop)
+
+    def _on_layout(self, layout_context):
+        r = self.window.content_rect
+        em = int(self.window.theme.font_size)
+
+        label_h = int(1.6 * em)
+        self.label.frame = gui.Rect(r.x + 8, r.y + 6, r.width - 16, label_h)
+        self.scene_widget.frame = gui.Rect(r.x, r.y + label_h + 8, r.width, r.height - label_h - 8)
+
+    def _on_close(self):
+        self._running = False
+        return True
+
+    def _update_label_and_title(self):
+        name = Path(self.files[self.idx]).name
+        self.label.text = f"[{self.idx + 1}/{len(self.files)}] {name}"
+        self.window.title = f"Open3D LiDAR Player [{name}]"
+
+    def _load_and_show(self, new_idx: int, reset_camera: bool = False):
+        if not self._running:
+            return
+
+        self.idx = int(new_idx) % len(self.files)
+
+        pts = np.load(self.files[self.idx])
+        pcd = build_point_cloud(
+            pts,
+            voxel_m=VOXEL_M,
+            min_range_m=MIN_RANGE_M,
+            max_range_m=MAX_RANGE_M,
+        )
+
+        if self.scene_widget.scene.has_geometry("pcd"):
+            self.scene_widget.scene.remove_geometry("pcd")
+        self.scene_widget.scene.add_geometry("pcd", pcd, self.pcd_mat)
+
+        self._update_label_and_title()
+
+        if reset_camera:
+            bbox = pcd.get_axis_aligned_bounding_box()
+            if bbox.is_empty():
+                bbox = self.frame.get_axis_aligned_bounding_box()
+            self.scene_widget.setup_camera(60.0, bbox, bbox.get_center())
+
+    def _step(self, delta: int):
+        if not self.files:
+            return
+        self._load_and_show(self.idx + delta, reset_camera=False)
+
+    def _on_key(self, event: gui.KeyEvent) -> bool:
+        """
+        IMPORTANT: Must return a Python bool in some Open3D builds.
+        Returning EventCallbackResult can crash (pybind cast error + heap corruption).
+        """
+        if event.type != gui.KeyEvent.Type.DOWN:
+            return False
+
+        k = event.key
+
+        # Space: pause/resume
+        if _key_equals(k, gui.KeyName.SPACE, ord(" ")):
+            self._paused = not self._paused
+            return True
+
+        # D: next frame (and pause)
+        if _key_equals(k, gui.KeyName.D, ord("D"), ord("d")):
+            self._paused = True
+            self._step(+1)
+            return True
+
+        # A: previous frame (and pause)
+        if _key_equals(k, gui.KeyName.A, ord("A"), ord("a")):
+            self._paused = True
+            self._step(-1)
+            return True
+
+        # Q: quit
+        if _key_equals(k, gui.KeyName.Q, ord("Q"), ord("q")):
+            self._running = False
+            self.window.close()
+            return True
+
         return False
 
-    def on_prev(vis_):
-        load_index(idx - 1)
-        return False
+    def _player_loop(self):
+        # Background thread: sleep, then post UI updates onto the main thread.
+        while self._running:
+            time.sleep(self.dt)
 
-    def on_toggle_play(vis_):
-        nonlocal autoplay
-        autoplay = not autoplay
-        return False
+            if not self._running:
+                break
+            if self._paused:
+                continue
 
-    def on_save(vis_):
-        ply_path = os.path.splitext(files[idx])[0] + ".ply"
-        o3d.io.write_point_cloud(ply_path, pcd, write_ascii=False, compressed=True)
-        print(f"Saved: {ply_path}")
-        return False
+            next_idx = self.idx + 1
+            if next_idx >= len(self.files):
+                if LOOP:
+                    next_idx = 0
+                else:
+                    self._running = False
+                    gui.Application.instance.post_to_main_thread(self.window, self.window.close)
+                    break
 
-    vis.register_key_callback(ord('S'), on_save)
-    vis.register_key_callback(262, on_next)  # Right arrow
-    vis.register_key_callback(263, on_prev)  # Left arrow
-    vis.register_key_callback(32, on_toggle_play)  # Space
+            def _ui_update():
+                self._load_and_show(next_idx, reset_camera=False)
 
-    while True:
-        vis.poll_events()
-        vis.update_renderer()
-        if autoplay:
-            time.sleep(dt)
-            load_index(idx + 1)
-        else:
-            time.sleep(0.01)
-        # Close if window destroyed
-        if not vis.poll_events():
-            break
+            gui.Application.instance.post_to_main_thread(self.window, _ui_update)
 
-    vis.destroy_window()
-
-
-def visualize_single(
-    file_path: str,
-    voxel: Optional[float],
-    min_range: Optional[float],
-    max_range: Optional[float],
-    frame_size: float,
-):
-    pts = np.load(file_path)
-    pcd = build_point_cloud(pts, voxel=voxel, min_range=min_range, max_range=max_range)
-    frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size)
-    o3d.visualization.draw_geometries([pcd, frame], window_name=os.path.basename(file_path))
+    def run(self):
+        gui.Application.instance.run()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Open3D viewer for LiDAR .npy files (Nx3).")
-    parser.add_argument("path", help="Path to a LiDAR .npy file, a 'lidar' folder, a vehicle folder, or the dataset root.")
-    parser.add_argument("--voxel", type=float, default=0.0, help="Optional voxel size for downsampling (meters).")
-    parser.add_argument("--min", dest="min_range", type=float, default=None, help="Minimum range filter (meters).")
-    parser.add_argument("--max", dest="max_range", type=float, default=None, help="Maximum range filter (meters).")
-    parser.add_argument("--play", action="store_true", help="Autoplay through frames when a folder is given.")
-    parser.add_argument("--fps", type=float, default=10.0, help="Playback rate when --play is enabled.")
-    parser.add_argument("--frame-size", type=float, default=1.0, help="Coordinate frame size in meters.")
-    args = parser.parse_args()
-
-    files = find_npy_files(args.path)
-
+    files = find_npy_files(LIDAR_PATH)
     if not files:
-        raise SystemExit("No LiDAR .npy files found. Point the script to a file, a 'lidar' folder, a vehicle folder, or the dataset root.")
+        raise SystemExit(
+            "No LiDAR .npy files found.\n"
+            "Set LIDAR_PATH to a lidar folder, a vehicle folder, or a dataset root that contains **/lidar/*.npy."
+        )
 
-    if len(files) == 1:
-        visualize_single(files[0], args.voxel, args.min_range, args.max_range, args.frame_size)
-    else:
-        visualize_sequence(files, args.voxel, args.min_range, args.max_range, args.play, args.fps, args.frame_size)
+    start_idx = start_index_from_timestamp(files, START_TIMESTAMP_S)
+    app = LidarPlayerApp(files, start_idx=start_idx)
+    app.run()
 
 
 if __name__ == "__main__":

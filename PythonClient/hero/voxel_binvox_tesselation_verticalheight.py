@@ -37,13 +37,13 @@ def generate_voxel_patch(client, center, patch_size, resolution, output_file):
 # ---------- main ----------
 def main():
     # ---- User params ----
-    world_size   = 1000        # X/Y span (m), same as your working script
+    world_size   = 300        # X/Y span (m), same as your working script
     patch_size   = 100        # cube side (m)
-    stack_height = 100        # total height to cover (m)
+    stack_height = 30        # total height to cover (m)
     resolution   = 1.0        # voxel size (m)
     world_center = (0.0, 0.0, 0.0)    # ground (NED Z = 0)
-    output_dir   = "/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/ausenv_semanticrag_1mcubed/"
-    port         = 41452
+    output_dir   = "/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/spruceforest_0p5m/"
+    port         = 41451
     # ----------------------
     os.makedirs(output_dir, exist_ok=True)
     client = airsim.VehicleClient(port=port)

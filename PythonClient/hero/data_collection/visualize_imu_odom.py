@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 # USER PARAMETERS (EDIT ME)
 # =========================
 
-DATA_DIR = Path("/home/sgarimella34/Documents/raw_data_hercules/Husky2")
+DATA_DIR = Path("/home/sgarimella34/Documents/raw_data_hercules/Drone1")
 
 # Set to "" or None to disable that stream.
 IMU_FILENAME: Optional[str] = "recovered_odom.txt"

@@ -15,8 +15,8 @@ EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_r
 # WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/BEVP_convoy"
 
 # CSLAM random explore motion
-# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_dump/"
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test_thruroad_dump"
+WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_dump/"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test_thruroad_dump"
 # WAYPOINT_DIR="/home/dellg16ssg/multi-robot-coordination/trajectory_data/CSLAM_random_explore"
 
 # BEVP DAIR-V2X data collection in custom city:
@@ -26,6 +26,9 @@ WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity5"
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_forest"
 
+# WAYPOINT_DIR="/home/sgarimella34/Documents/trajectory_editor_sandbox/"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/test_drone/"
+
 # Default number of drones if none specified
 DEFAULT_NUM_DRONES=2
 
@@ -34,9 +37,9 @@ VELOCITY=1.2
 # VELOCITY=5.0
 
 # Default fly altitude. NOTE!!! This altitude is relative to the PlayerStart object's height in UE5, which is 1.5m above ground
-# for DAIR-V2X-style inf camera flying in city env; so -6.0 is 
-# FLY_ALTITUDE=-6.0 
-FLY_ALTITUDE=-3.0 
+# for DAIR-V2X-style inf camera flying in city env;
+FLY_ALTITUDE=-6.0 
+# FLY_ALTITUDE=-3.0 
 # FLY_ALTITUDE=-10.0 
 # FLY_ALTITUDE=-24.0
 

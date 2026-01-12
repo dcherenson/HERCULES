@@ -14,17 +14,20 @@ import cv2
 import cosysairsim as airsim
 
 # Configuration
-DURATION        = 1200.0        # seconds
+# DURATION        = 1200.0        # seconds
+DURATION        = 700.0        # seconds
 DT_RATE         = 200.0         # IMU rate (Hz)
+# DT_RATE         = 20.0         # setting this since we are using synthetic imu data anyway
 DT              = 1.0 / DT_RATE
-OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/forestenv_test2_1drone_1920x1080"
+# OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/forest_stereo_lodfix_centerseq_2ugvuav_752x480"
+OUTDIR = "/media/sgarimella34/SSD2/raw_data_hercules/ausenv_stereo_lidarfix_perimeterseq_2ugvuav_752x480"
 SAVE_DEPTH_PNG  = True          # if True, also write a visual 8-bit PNG
 
-# DRONE_NAMES   = ["Drone1", "Drone2"]
-# HUSKY_NAMES   = ["Husky1", "Husky2"]
+DRONE_NAMES   = ["Drone1", "Drone2"]
+HUSKY_NAMES   = ["Husky1", "Husky2"]
 
-DRONE_NAMES   = ["Drone1"]
-HUSKY_NAMES   = []
+# DRONE_NAMES   = ["Drone1"]
+# HUSKY_NAMES   = []
 
 # Use front_center only for depth/seg; stereo_* for RGB
 CAMERA_NAME          = "front_center"

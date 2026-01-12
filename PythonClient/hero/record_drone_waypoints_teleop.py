@@ -53,10 +53,10 @@ import cosysairsim as airsim
 # ============================================================
 # ====== USER PARAMETERS (edit these to your preferences) ====
 # ============================================================
-VEHICLE_NAME      = "Drone1"
+VEHICLE_NAME      = "Drone2"
 RPC_PORT          = 41451
 
-OUTFILE_PATH      = "/home/sgarimella34/multi-robot-coordination/trajectory_data/test_drone/Drone1_trajectory.txt"
+OUTFILE_PATH      = "/home/sgarimella34/multi-robot-coordination/trajectory_data/test_drone/Drone2_trajectory.txt"
 APPEND_MODE       = False
 
 # Recording
@@ -120,13 +120,6 @@ def dist3(a, b):
 
 
 def quat_to_yaw_rad(q):
-    """
-    Compute yaw (rotation about Z) from an AirSim quaternion.
-
-    q has fields: w_val, x_val, y_val, z_val.
-    Uses standard ZYX convention:
-      yaw = atan2(2(wz + xy), 1 - 2(y^2 + z^2))
-    """
     w = float(q.w_val)
     x = float(q.x_val)
     y = float(q.y_val)
@@ -184,9 +177,9 @@ def main():
     )
 
     # Teleop state (BODY-FRAME intent)
-    vx_body = 0.0     # forward (m/s)
-    vy_body = 0.0     # right (m/s)  (A will make this negative)
-    yaw_rate = 0.0    # deg/s
+    vx_body = 0.0
+    vy_body = 0.0
+    yaw_rate = 0.0
 
     vel_xy_step = float(VEL_XY_STEP_MPS)
     yaw_step = float(YAW_STEP_DEGPS)
@@ -201,6 +194,10 @@ def main():
 
     z_hold_ned = None
     z_takeoff_start_ned = None
+
+    # Distance tracking (in logged coordinates)
+    total_dist_m = 0.0
+    last_dist_pos = None
 
     def get_pose():
         return client.simGetVehiclePose(vehicle_name=VEHICLE_NAME)
@@ -220,7 +217,6 @@ def main():
         cy = math.cos(yaw)
         sy = math.sin(yaw)
 
-        # Body axes: x forward, y right
         vx_w = cy * vx_b - sy * vy_b
         vy_w = sy * vx_b + cy * vy_b
         return vx_w, vy_w
@@ -253,6 +249,24 @@ def main():
             yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate),
             vehicle_name=VEHICLE_NAME
         )
+
+    def update_total_distance():
+        nonlocal total_dist_m, last_dist_pos
+
+        pose = get_pose()
+        pos = pose.position
+        x = float(pos.x_val)
+        y = float(pos.y_val)
+        z_ned = float(pos.z_val)
+        z_out = -z_ned if OUTPUT_Z_UP else z_ned
+
+        cur = (x, y, z_out)
+        if last_dist_pos is None:
+            last_dist_pos = cur
+            return
+
+        total_dist_m += dist3(cur, last_dist_pos)
+        last_dist_pos = cur
 
     def maybe_record():
         nonlocal next_sample_t, last_saved_pos, sample_idx
@@ -313,6 +327,7 @@ def main():
             f"\r[{rec}] vxB={vx_body:6.2f} vyB={vy_body:6.2f} | yaw_rate={yaw_rate:6.1f} deg/s"
             f" | step={vel_xy_step:4.2f} maxXY={max_vxy:4.1f} yawStep={yaw_step:4.1f}"
             f" | altStep={alt_step_m:4.2f} zHold(NED)={zhold:7.2f}"
+            f" | dist={total_dist_m:9.2f} m"
             f" | {zmode} | speed={speed:6.2f} m/s   ",
             end="",
             flush=True
@@ -365,17 +380,17 @@ def main():
                     elif c == "s":
                         vx_body = clamp(vx_body - vel_xy_step, -max_vxy, max_vxy)
 
-                    elif c == "a":  # left => negative body Y
+                    elif c == "a":
                         vy_body = clamp(vy_body - vel_xy_step, -max_vxy, max_vxy)
-                    elif c == "d":  # right
+                    elif c == "d":
                         vy_body = clamp(vy_body + vel_xy_step, -max_vxy, max_vxy)
 
                     # Up/down adjusts altitude hold target (NED z)
-                    elif c == "r":  # up -> NED z decreases
+                    elif c == "r":
                         if z_hold_ned is None:
                             set_hold_to_current()
                         z_hold_ned -= alt_step_m
-                    elif c == "f":  # down -> NED z increases
+                    elif c == "f":
                         if z_hold_ned is None:
                             set_hold_to_current()
                         z_hold_ned += alt_step_m
@@ -427,16 +442,16 @@ def main():
                     elif c == ".":
                         vel_xy_step = clamp(vel_xy_step + 0.1, 0.1, 20.0)
 
-                    elif c == "k":  # max XY down
+                    elif c == "k":
                         max_vxy = clamp(max_vxy - 0.5, 0.5, 50.0)
                         vx_body = clamp(vx_body, -max_vxy, max_vxy)
                         vy_body = clamp(vy_body, -max_vxy, max_vxy)
-                    elif c == "i":  # max XY up
+                    elif c == "i":
                         max_vxy = clamp(max_vxy + 0.5, 0.5, 50.0)
 
-                    elif c == "u":  # alt step down
+                    elif c == "u":
                         alt_step_m = clamp(alt_step_m - 0.1, ALT_STEP_MIN_M, ALT_STEP_MAX_M)
-                    elif c == "o":  # alt step up
+                    elif c == "o":
                         alt_step_m = clamp(alt_step_m + 0.1, ALT_STEP_MIN_M, ALT_STEP_MAX_M)
 
                     elif c == "[":
@@ -446,8 +461,9 @@ def main():
 
                     ch = kbhit(timeout=0.0)
 
-                # Send command, record, print status
+                # Send command, update distance, record, print status
                 send_cmd()
+                update_total_distance()
                 maybe_record()
                 status_line()
 
@@ -481,6 +497,7 @@ def main():
 
         f.close()
         print(f"[drone_teleop_record] Saved {sample_idx} waypoints to {os.path.abspath(OUTFILE_PATH)}")
+        print(f"[drone_teleop_record] Total distance traveled: {total_dist_m:.2f} m")
 
 
 if __name__ == "__main__":

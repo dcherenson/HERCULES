@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-BT_DIR="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/ausenv_semanticrag_1mcubed/"
+BT_DIR="/home/sgarimella34/multi-robot-coordination/data_binvox_octomap/spruceforest_0p5m/"
 MERGE_TOOL="$HOME/octomap/bin/merge_octomaps"
 OUTPUT="$BT_DIR/combined.bt"
 
