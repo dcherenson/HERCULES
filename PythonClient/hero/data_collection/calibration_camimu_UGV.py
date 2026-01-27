@@ -8,6 +8,7 @@ from multiprocessing import Process
 
 # UGV names from settings.json
 UGV_NAMES = ["Husky1", "Husky2"]
+# UGV_NAMES = ["Husky1"]
 
 # Speed regulation parameters
 TARGET_SPEED = 0.3    # m/s magnitude

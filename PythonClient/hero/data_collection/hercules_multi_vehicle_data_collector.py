@@ -14,20 +14,19 @@ import cv2
 import cosysairsim as airsim
 
 # Configuration
-# DURATION        = 1200.0        # seconds
-DURATION        = 700.0        # seconds
+DURATION        = 2400.0        # seconds
+# DURATION        = 1100.0        # seconds  just for city slam
 DT_RATE         = 200.0         # IMU rate (Hz)
-# DT_RATE         = 20.0         # setting this since we are using synthetic imu data anyway
 DT              = 1.0 / DT_RATE
-# OUTDIR          = "/media/sgarimella34/hercules-collect/raw_data_hercules/forest_stereo_lodfix_centerseq_2ugvuav_752x480"
-OUTDIR = "/media/sgarimella34/SSD2/raw_data_hercules/ausenv_stereo_lidarfix_perimeterseq_2ugvuav_752x480"
+# OUTDIR = "/media/sgarimella34/SSD2/raw_data_hercules/ausenv_stereo_lidar10Hz_centerseq_2ugvuav_752x480"
+OUTDIR = "/media/sgarimella34/SSD2/raw_data_hercules/ausenv_roadseq_2ugvuav"
 SAVE_DEPTH_PNG  = True          # if True, also write a visual 8-bit PNG
 
 DRONE_NAMES   = ["Drone1", "Drone2"]
 HUSKY_NAMES   = ["Husky1", "Husky2"]
 
 # DRONE_NAMES   = ["Drone1"]
-# HUSKY_NAMES   = []
+# HUSKY_NAMES   = ["Husky1"]
 
 # Use front_center only for depth/seg; stereo_* for RGB
 CAMERA_NAME          = "front_center"
@@ -75,7 +74,9 @@ for v in all_vehicles:
 # Sampling rates
 odom_step  = int(round(DT_RATE / 20.0))  # 20 Hz
 cam_step   = odom_step                   # 20 Hz
-lidar_step = int(round(DT_RATE / 10.0))  # 10 Hz
+# lidar_step = int(round(DT_RATE / 10.0))  # 10 Hz
+lidar_step = int(round(DT_RATE / 20.0))  # 20 Hz
+
 
 total_steps = int(round(DURATION / DT))
 print(f"Collecting {total_steps} steps @ {DT_RATE:.0f} Hz…")

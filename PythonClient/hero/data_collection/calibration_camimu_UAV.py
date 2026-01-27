@@ -12,6 +12,11 @@ DRONE_NAMES = [
     "Drone2"
 ]
 
+# DRONE_NAMES = [
+#     "Drone1"
+# ]
+
+
 def parallel_join(futures):
     """Helper to wait for a list of AirSim futures."""
     for f in futures:

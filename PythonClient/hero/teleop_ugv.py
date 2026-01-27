@@ -3,7 +3,7 @@
 ugv_teleop.py — Terminal keyboard teleop for AirSim/Cosys-AirSim UGVs (Husky).
 
 Controls (hold or tap keys):
-  W/S : throttle up/down
+  W/S : throttle up/down (rate-limited so holding a key ramps smoothly)
   A/D : steer left/right
   SPACE: full brake (hold)
   C   : handbrake toggle
@@ -29,7 +29,6 @@ Notes:
 
 import sys, time, os, argparse, math, select, tty, termios, contextlib
 
-# --- Try Cosys-AirSim first (your setup), fall back to upstream 'airsim' ---
 import setup_path
 import cosysairsim as airsim
 
@@ -55,7 +54,8 @@ def kbhit(timeout=0.0):
             return None
     return None
 
-def clamp(x, lo, hi): return max(lo, min(hi, x))
+def clamp(x, lo, hi): 
+    return max(lo, min(hi, x))
 
 def print_help():
     print(__doc__.split("Controls")[1].split("Usage")[0].strip())
@@ -66,8 +66,10 @@ def main():
     ap.add_argument("--port", type=int, default=41452, help="RPC port for CarClient")
     ap.add_argument("--hz", type=float, default=30.0, help="Command update rate (Hz)")
     ap.add_argument("--steer-max", type=float, default=0.75, help="Initial max |steering|")
-    ap.add_argument("--throttle-step", type=float, default=0.05, help="Throttle increment per keypress")
+    ap.add_argument("--throttle-step", type=float, default=0.01, help="Throttle increment per bump")
     ap.add_argument("--steer-step", type=float, default=0.05, help="Steering increment per keypress")
+    ap.add_argument("--throttle-repeat-hz", type=float, default=8.0,
+                    help="When holding W/S, how many throttle bumps per second")
     args = ap.parse_args()
 
     client = airsim.CarClient(port=args.port)
@@ -82,10 +84,9 @@ def main():
     # If the sim is globally paused (common when using a stepper/collector), unpause:
     try:
         if client.simIsPaused():
-            print("Sim is paused → unpausing now (press 'P' to toggle).")
+            print("Sim is paused -> unpausing now (press 'P' to toggle).")
             client.simPause(False)
     except Exception:
-        # Older APIs may not have simIsPaused; ignore.
         pass
 
     # Command state
@@ -97,8 +98,13 @@ def main():
     manual_gear = 1
     steer_center_trim = 0.0
     steer_max = clamp(args.steer_max, 0.1, 1.0)
-    throttle_step = clamp(args.throttle_step, 0.01, 0.5)
+    throttle_step = clamp(args.throttle_step, 0.001, 0.5)
     steer_step = clamp(args.steer_step, 0.01, 0.5)
+
+    # Rate limiting so holding W/S doesn't ramp instantly due to key repeat
+    throttle_repeat_hz = max(0.5, float(args.throttle_repeat_hz))
+    throttle_repeat_dt = 1.0 / throttle_repeat_hz
+    last_throttle_bump = 0.0
 
     rate_dt = 1.0 / max(1e-6, args.hz)
     last_status = 0.0
@@ -121,11 +127,15 @@ def main():
             last_status = now
             state = client.getCarState(vehicle_name=vehicle)
             v = state.speed
-            print(f"\rthr={throttle:4.2f} brk={brake:4.2f} str={steering:5.2f} "
-                  f"trim={steer_center_trim:5.2f} | smax={steer_max:4.2f} "
-                  f"{'HB' if handbrake else '  '} "
-                  f"{'M' if is_manual_gear else 'A'}G{manual_gear} | "
-                  f"speed={v:5.2f} m/s   ", end="", flush=True)
+            print(
+                f"\rthr={throttle:4.2f} brk={brake:4.2f} str={steering:5.2f} "
+                f"trim={steer_center_trim:5.2f} | smax={steer_max:4.2f} "
+                f"{'HB' if handbrake else '  '} "
+                f"{'M' if is_manual_gear else 'A'}G{manual_gear} | "
+                f"speed={v:5.2f} m/s   ",
+                end="",
+                flush=True
+            )
 
     print("Teleop ready. Press 'Q' to quit. Press '?' for help.")
     print_help()
@@ -134,18 +144,27 @@ def main():
         with raw_keyboard():
             while True:
                 t0 = time.time()
+
                 ch = kbhit(timeout=0.0)
                 while ch:
                     c = ch.lower()
+                    now = time.time()
 
                     if c == 'q':
                         raise KeyboardInterrupt
 
+                    # Throttle: rate-limited bumps so holding W/S ramps smoothly
                     elif c == 'w':
-                        throttle = clamp(throttle + throttle_step, 0.0, 1.0)
-                        brake = 0.0
+                        if now - last_throttle_bump >= throttle_repeat_dt:
+                            throttle = clamp(throttle + throttle_step, 0.0, 1.0)
+                            brake = 0.0
+                            last_throttle_bump = now
+
                     elif c == 's':
-                        throttle = clamp(throttle - throttle_step, 0.0, 1.0)
+                        if now - last_throttle_bump >= throttle_repeat_dt:
+                            throttle = clamp(throttle - throttle_step, 0.0, 1.0)
+                            # Do not force brake here; SPACE is your brake
+                            last_throttle_bump = now
 
                     elif c == 'a':
                         steering = clamp(steering - steer_step, -1.0, 1.0)
@@ -171,7 +190,7 @@ def main():
                         try:
                             paused = client.simIsPaused()
                             client.simPause(not paused)
-                            print(f"\nSim pause → {not paused}")
+                            print(f"\nSim pause -> {not paused}")
                         except Exception:
                             print("\nSim pause toggle not supported by this API build.")
 
@@ -192,9 +211,9 @@ def main():
                         steer_max = clamp(steer_max + 0.05, 0.1, 1.0)
 
                     elif c == ',':
-                        throttle_step = clamp(throttle_step - 0.01, 0.01, 0.5)
+                        throttle_step = clamp(throttle_step - 0.005, 0.001, 0.5)
                     elif c == '.':
-                        throttle_step = clamp(throttle_step + 0.01, 0.01, 0.5)
+                        throttle_step = clamp(throttle_step + 0.005, 0.001, 0.5)
 
                     elif c == 'm':
                         is_manual_gear = not is_manual_gear
@@ -225,7 +244,6 @@ def main():
 
     finally:
         try:
-            # Safe stop
             controls = airsim.CarControls()
             controls.throttle = 0.0
             controls.brake = 1.0

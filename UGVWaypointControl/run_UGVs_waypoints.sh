@@ -25,8 +25,15 @@ EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_r
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity3"
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity5"
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_forest/"
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_dump/"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_dump/"
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test_thruroad_dump"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/city_test1/"
+
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/nuclearnev_test1/"
+
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/ausenv_short_seq/"
+WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/ausenv_road_seq/"
+
 
 # Default number of UGVs if none specified
 DEFAULT_NUM_UGVS=2
@@ -34,11 +41,11 @@ DEFAULT_NUM_UGVS=2
 # Default linear speed (in m/s) when no individual speed is provided
 # NOTE!!! Set speed to 0.35 when you are running in simpause clock based physics, do not remove below
 # DEFAULT_SPEED=0.35
-# DEFAULT_SPEED=0.5
-DEFAULT_SPEED=0.6
+DEFAULT_SPEED=0.45
+# DEFAULT_SPEED=0.3
 # DEFAULT_SPEED=0.6 # forest
 
-# DEFAULT_SPEED=5
+# DEFAULT_SPEED=5.0  # nuclearnev city test
 
 # Default control-loop frequency (in Hz)
 DEFAULT_CTRL_HZ=20

@@ -53,10 +53,10 @@ import cosysairsim as airsim
 # ============================================================
 # ====== USER PARAMETERS (edit these to your preferences) ====
 # ============================================================
-VEHICLE_NAME      = "Drone2"
+VEHICLE_NAME      = "Drone1"
 RPC_PORT          = 41451
 
-OUTFILE_PATH      = "/home/sgarimella34/multi-robot-coordination/trajectory_data/test_drone/Drone2_trajectory.txt"
+OUTFILE_PATH      = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/ausenv_road_seq/Drone1_trajectory.txt"
 APPEND_MODE       = False
 
 # Recording
@@ -72,7 +72,7 @@ OUTPUT_Z_UP       = True         # True: output Z as up-positive (flip NED z)
 TELEOP_HZ         = 30.0
 
 # Takeoff behavior
-TAKEOFF_ALT_M     = 3.0          # meters above starting altitude (positive up)
+TAKEOFF_ALT_M     = 3.5         # meters above starting altitude (positive up)
 TAKEOFF_SPEED_MPS = 2.0          # climb speed used by moveToZAsync
 
 # Speed tuning
