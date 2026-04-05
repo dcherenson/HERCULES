@@ -408,3 +408,5 @@ ros2/src/VINS-MONO-ROS2
 ./csv_data/depth_frame.npy
 *.png
 
+*.csv
+PythonClient/segmentation/*.csv
