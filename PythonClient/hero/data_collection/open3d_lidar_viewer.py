@@ -45,7 +45,7 @@ import open3d.visualization.rendering as rendering
 # ============================================================
 # USER SETTINGS (edit these only)
 # ============================================================
-LIDAR_PATH = "/media/sgarimella34/SSD2/raw_data_hercules/ausenv_lidarfix_TEST1_2ugvuav/Drone1/"
+LIDAR_PATH = "/media/sgarimella34/hercules-collect/raw_data_hercules/customforest_test1/Drone2/"
 
 # Start playing from the first frame whose timestamp >= this value (seconds).
 # Set to None to start from the beginning.

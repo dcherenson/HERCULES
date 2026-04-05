@@ -13,7 +13,7 @@ DRONE_NAMES = [
 ]
 
 # DRONE_NAMES = [
-#     "Drone1"
+#     "Drone2"
 # ]
 
 

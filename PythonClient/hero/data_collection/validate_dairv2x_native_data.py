@@ -43,14 +43,14 @@ DATA_ROOT = "/media/sgarimella34/hercules-collect/collaborative-perception-BEVP/
 
 # View mode: 'veh', 'infra', or 'cooperative_world'
 # The SIDE value is ignored in cooperative world mode
-VIEW_MODE = "veh"   # 'veh' | 'infra' | 'cooperative_world'
+VIEW_MODE = "infra"   # 'veh' | 'infra' | 'cooperative_world'
 
 # For side-only modes:
 SIDE = "veh"   # 'veh' or 'infra' (ignored for cooperative_world)
 
 # How many frames to show
-START_IDX = 21
-MAX_FRAMES = 20
+START_IDX = 29
+MAX_FRAMES = 200
 
 # Visualization toggles
 SHOW_OPENCV  = True          # used only by side-only modes
@@ -62,7 +62,18 @@ OUTPUT_DIR   = "/home/sgarimella34/vis_native_viewer"
 PROJECT_3D_ON_IMAGE = False
 
 # Open3D point size
-O3D_POINT_SIZE = 1.2
+O3D_POINT_SIZE = 3.0
+
+# --- Box thickness ---
+BOX_THICKNESS_2D  = 4       # cv2.rectangle / cv2.line thickness on image (was 2)
+O3D_LINE_WIDTH    = 4.0     # Open3D wireframe line width
+
+# --- Label type filter ---
+# Set to a list of types to show, e.g. ["Car"], ["Pedestrian"], or ["Car", "Pedestrian"].
+# Set to None (or empty list) to show ALL label types.
+# Matching is case-insensitive.
+# SHOW_LABEL_TYPES = ["Car", "Pedestrian"]
+SHOW_LABEL_TYPES = ["Car"]
 
 # ===== New format toggles =====
 # If True, prefer *.jpg (still falls back to *.png if jpg missing)
@@ -75,6 +86,14 @@ USE_PCD_LIDAR = True
 DRAW_PARAM_BOXES_IN_WORLD = True
 # ALSO draw world_8_points if label has it (as yellow wireframe in world):
 VIS_WORLD_8_POINTS = True
+
+# ===================== Label type filter helper =====================
+
+def _type_allowed(typ: str) -> bool:
+    """Return True if this label type should be shown given SHOW_LABEL_TYPES."""
+    if not SHOW_LABEL_TYPES:
+        return True
+    return typ.lower() in [t.lower() for t in SHOW_LABEL_TYPES]
 
 # ===================== Path helpers =====================
 
@@ -751,9 +770,11 @@ def visualize_frame_side(img_path: Path, lbl2_path: Path, lbl3_path: Path, pts: 
     img_vis = img.copy()
     objs2d = parse_2d_json(lbl2_path) if lbl2_path and lbl2_path.exists() else []
     for o in objs2d:
+        if not _type_allowed(o.get("type", "")):
+            continue
         x1,y1,x2,y2 = [int(round(v)) for v in o["bbox"]]
-        cv2.rectangle(img_vis, (x1,y1), (x2,y2), (0,255,0), 2)
-        cv2.putText(img_vis, o.get("type",""), (x1, max(0,y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+        cv2.rectangle(img_vis, (x1,y1), (x2,y2), (0,255,0), BOX_THICKNESS_2D)
+        cv2.putText(img_vis, o.get("type",""), (x1, max(0,y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2, cv2.LINE_AA)
 
     boxes3d = parse_3d_json(lbl3_path) if lbl3_path and lbl3_path.exists() else []
 
@@ -775,10 +796,12 @@ def visualize_frame_side(img_path: Path, lbl2_path: Path, lbl3_path: Path, pts: 
             print(f"[WARN] Could not load K/T for projection: {e}")
 
     for o in boxes3d:
+        if not _type_allowed(o.get("type", "")):
+            continue
         h,w,l = o["dims_hwl"]; c = o["center"]; yaw = o["yaw"]
         corners = lidar_box_corners(c, h, w, l, yaw)
         if PROJECT_3D_ON_IMAGE and (K is not None) and (T_cl is not None):
-            draw_projected_box_on_image(img_vis, corners, K, T_cl, color=(0,255,255), thickness=2)
+            draw_projected_box_on_image(img_vis, corners, K, T_cl, color=(0,255,255), thickness=BOX_THICKNESS_2D)
         if o3d is not None:
             o3d_boxes.append(make_open3d_box(corners, color=(1.0, 0.0, 0.0)))
 
@@ -786,16 +809,20 @@ def visualize_frame_side(img_path: Path, lbl2_path: Path, lbl3_path: Path, pts: 
         save_prefix.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(save_prefix.with_suffix(".jpg")), img_vis)
 
+    frame_stem = img_path.stem
     if SHOW_OPENCV:
-        cv2.imshow(f"{side_dir_name(side).upper()} 2D (native GT boxes)", img_vis)
+        win_2d = f"{side_dir_name(side).upper()} 2D"
+        cv2.imshow(win_2d, img_vis)
+        cv2.setWindowTitle(win_2d, f"{win_2d} — frame {frame_stem}")
         cv2.waitKey(1)
 
     if SHOW_OPEN3D and o3d is not None:
         vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name=f"{side_dir_name(side).upper()} LiDAR (native 3D GT)", width=1280, height=720, visible=True)
+        vis.create_window(window_name=f"{side_dir_name(side).upper()} LiDAR — frame {frame_stem}", width=1280, height=720, visible=True)
         opt = vis.get_render_option()
         if opt:
             opt.point_size = O3D_POINT_SIZE
+            opt.line_width = O3D_LINE_WIDTH
             # white background
             opt.background_color = np.array([1.0, 1.0, 1.0], dtype=float)
         if pcd is not None:
@@ -904,6 +931,8 @@ def visualize_frame_coop_world(root: str, stem: str):
     # world-frame boxes from params (red)
     if DRAW_PARAM_BOXES_IN_WORLD:
         for o in boxes_world:
+            if not _type_allowed(o.get("type", "")):
+                continue
             h, w, l = o["dims_hwl"]; c = o["center"]; yaw = o["yaw"]
             corners_w = lidar_box_corners(c, h, w, l, yaw)
             b = make_open3d_box(corners_w, color=(1.0, 0.0, 0.0))
@@ -913,6 +942,8 @@ def visualize_frame_coop_world(root: str, stem: str):
     # optional world_8_points overlays (yellow)
     if VIS_WORLD_8_POINTS:
         for o in boxes_world:
+            if not _type_allowed(o.get("type", "")):
+                continue
             w8 = o.get("world8", None)
             if w8 is not None and w8.shape == (8,3):
                 b8 = make_open3d_box(w8, color=(1.0, 1.0, 0.0))  # yellow
@@ -924,6 +955,7 @@ def visualize_frame_coop_world(root: str, stem: str):
     opt = vis.get_render_option()
     if opt:
         opt.point_size = O3D_POINT_SIZE
+        opt.line_width = O3D_LINE_WIDTH
         opt.background_color = np.array([0, 0, 0])
     for g in geoms:
         vis.add_geometry(g)

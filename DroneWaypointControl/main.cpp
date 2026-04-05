@@ -92,7 +92,7 @@ int main(int argc, char *argv[])
         }
 
         std::cout << "[" << drone_name << "] Moving to altitude " << -fly_altitude << " meters..." << std::endl;
-        client.moveToZAsync(fly_altitude, 5.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
+        client.moveToZAsync(fly_altitude, 2.5f, 30.0f, YawMode(true, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
 
         std::vector<Vector3r> waypoints = loadWaypoints(waypoint_file, fly_altitude);
         if (waypoints.empty())
@@ -130,7 +130,7 @@ int main(int argc, char *argv[])
             client.hoverAsync(drone_name)->waitOnLastTask();
             sleep_for_seconds(5);
 
-            client.moveToZAsync(-2.0f, 5.0f, 1000.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
+            client.moveToZAsync(-2.0f, 2.0f, 1000.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
             sleep_for_seconds(2);
 
             std::cout << "[" << drone_name << "] Initiating landing..." << std::endl;
@@ -143,7 +143,7 @@ int main(int argc, char *argv[])
             sleep_for_seconds(5);
 
             std::cout << "[" << drone_name << "] Descending vertically and landing..." << std::endl;
-            client.moveToZAsync(-2.0f, 5.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
+            client.moveToZAsync(-2.0f, 2.0f, 30.0f, YawMode(false, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
             sleep_for_seconds(2);
 
             client.landAsync(60.0f, drone_name)->waitOnLastTask();

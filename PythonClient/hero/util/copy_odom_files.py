@@ -8,7 +8,7 @@ import shutil
 # -----------------------------
 
 # Source root directory (where the new odom.txt files live)
-SRC_ROOT = "/media/sgarimella34/hercules-collect/raw_data_hercules/city_cslam_ugv1uav1_test1/"
+SRC_ROOT = "/media/sgarimella34/hercules-collect/raw_data_hercules/customforest_test1/"
 
 # Destination root directory (where you want to copy them to)
 DST_ROOT = "/home/sgarimella34/Documents/raw_data_hercules"

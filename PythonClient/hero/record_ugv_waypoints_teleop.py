@@ -46,10 +46,10 @@ import cosysairsim as airsim
 # ============================================================
 # ====== USER PARAMETERS (edit these to your preferences) ====
 # ============================================================
-VEHICLE_NAME      = "Husky1"
+VEHICLE_NAME      = "Husky2"
 RPC_PORT          = 41452
 
-OUTFILE_PATH      = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/ausenv_road_seq/Husky1_trajectory.txt"
+OUTFILE_PATH      = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/customforest_test1/Husky2_trajectory.txt"
 APPEND_MODE       = False
 
 # Teleop loop
