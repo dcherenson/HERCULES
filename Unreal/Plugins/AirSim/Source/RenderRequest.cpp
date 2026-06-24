@@ -152,28 +152,35 @@ void RenderRequest::ExecuteTask()
                 FRHICommandListImmediate& RHICmdList = GetImmediateCommandList_ForRenderCommand();
                 auto rt_resource = params_[i]->render_target->GetRenderTargetResource();
                 if (rt_resource != nullptr) {
-                    const FTexture2DRHIRef& rhi_texture = rt_resource->GetRenderTargetTexture();
-                    FIntPoint size;
-                    auto flags = setupRenderResource(rt_resource, params_[i].get(), results_[i].get(), size);
+                    // Take a value copy (not a const&) so the RHI texture is ref-counted and
+                    // cannot be released/reallocated mid-readback. The no-flush ReadSurface*
+                    // path below otherwise races the render target's RHI resource lifecycle,
+                    // causing an intermittent segfault in FVulkanTexture::Cast (a virtual call
+                    // on a freed texture). Also skip the read if the texture isn't valid yet.
+                    FTexture2DRHIRef rhi_texture = rt_resource->GetRenderTargetTexture();
+                    if (rhi_texture.IsValid()) {
+                        FIntPoint size;
+                        auto flags = setupRenderResource(rt_resource, params_[i].get(), results_[i].get(), size);
 
-                    //should we be using ENQUEUE_UNIQUE_RENDER_COMMAND_ONEPARAMETER which was in original commit by @saihv
-                    //https://github.com/Microsoft/AirSim/pull/162/commits/63e80c43812300a8570b04ed42714a3f6949e63f#diff-56b790f9394f7ca1949ddbb320d8456fR64
-                    if (!params_[i]->pixels_as_float) {
-                        //below is undocumented method that avoids flushing, but it seems to segfault every 2000 or so calls
-                        RHICmdList.ReadSurfaceData(
-                            rhi_texture,
-                            FIntRect(0, 0, size.X, size.Y),
-                            results_[i]->bmp,
-                            flags);
-                    }
-                    else {
-                        RHICmdList.ReadSurfaceFloatData(
-                            rhi_texture,
-                            FIntRect(0, 0, size.X, size.Y),
-                            results_[i]->bmp_float,
-                            CubeFace_PosX,
-                            0,
-                            0);
+                        //should we be using ENQUEUE_UNIQUE_RENDER_COMMAND_ONEPARAMETER which was in original commit by @saihv
+                        //https://github.com/Microsoft/AirSim/pull/162/commits/63e80c43812300a8570b04ed42714a3f6949e63f#diff-56b790f9394f7ca1949ddbb320d8456fR64
+                        if (!params_[i]->pixels_as_float) {
+                            //below is undocumented method that avoids flushing, but it seems to segfault every 2000 or so calls
+                            RHICmdList.ReadSurfaceData(
+                                rhi_texture,
+                                FIntRect(0, 0, size.X, size.Y),
+                                results_[i]->bmp,
+                                flags);
+                        }
+                        else {
+                            RHICmdList.ReadSurfaceFloatData(
+                                rhi_texture,
+                                FIntRect(0, 0, size.X, size.Y),
+                                results_[i]->bmp_float,
+                                CubeFace_PosX,
+                                0,
+                                0);
+                        }
                     }
                 }
             }
