@@ -2,7 +2,7 @@
 
 import time
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 
 def track_object_pose(client, object_name: str, interval: float = 0.1):
     """

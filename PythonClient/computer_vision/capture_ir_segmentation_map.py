@@ -6,7 +6,7 @@ import argparse
 import numpy as np
 import cv2
 import setup_path  # ensure this points to your Hercules/Cosys-AirSim PythonClient
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 
 # Aliases
 ImageRequest = airsim.ImageRequest

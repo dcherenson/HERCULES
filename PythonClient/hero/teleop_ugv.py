@@ -23,14 +23,14 @@ Usage:
   python3 ugv_teleop.py --vehicle Husky2 --port 41452 --hz 30
 
 Notes:
-- Works with both cosysairsim and upstream airsim Python APIs.
+- Works with both hercules_cosysairsim and upstream airsim Python APIs.
 - Sends commands at a fixed rate; keypresses adjust the current command.
 """
 
 import sys, time, os, argparse, math, select, tty, termios, contextlib
 
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 
 @contextlib.contextmanager
 def raw_keyboard():

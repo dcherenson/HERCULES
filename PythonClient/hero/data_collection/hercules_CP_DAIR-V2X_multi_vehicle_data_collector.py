@@ -23,7 +23,7 @@ import numpy as np
 import cv2
 
 import setup_path  # ensure AirSim / Cosys-AirSim is on PYTHONPATH
-import cosysairsim as airsim  # your custom fork
+import hercules_cosysairsim as airsim  # your custom fork
 
 # ------------------ USER CONFIG ------------------
 

@@ -3,7 +3,7 @@
 """Tests the method simAddSegmentationActor"""
 
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import cv2
 import numpy as np
 

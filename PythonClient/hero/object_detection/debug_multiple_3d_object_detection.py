@@ -12,7 +12,7 @@ Multi-actor version (fixed):
 import math
 import numpy as np
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import cv2
 import csv
 

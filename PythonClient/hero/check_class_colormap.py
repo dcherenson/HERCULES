@@ -8,7 +8,7 @@ Usage:
     3. Output `seg_colors.csv` will be written with a class -> RGB mapping
 """
 import setup_path 
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import numpy as np
 import csv
 

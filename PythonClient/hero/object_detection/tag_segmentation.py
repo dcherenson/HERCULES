@@ -4,7 +4,7 @@ import setup_path
 import hashlib
 import json
 import os
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import numpy as np
 import matplotlib.pyplot as plt
 

@@ -1,5 +1,5 @@
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import pprint
 
 def print_state():

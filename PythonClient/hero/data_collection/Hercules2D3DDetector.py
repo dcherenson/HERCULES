@@ -16,7 +16,7 @@ MOD: Also samples LiDAR in the SAME pause window and visualizes it in Open3D.
 import math, re
 import numpy as np
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import cv2
 import csv
 from collections import defaultdict

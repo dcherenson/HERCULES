@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import os
 import math
 import msgpackrpc.error

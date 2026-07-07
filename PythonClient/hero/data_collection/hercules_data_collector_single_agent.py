@@ -21,7 +21,7 @@ import os
 import argparse
 import numpy as np
 import cv2
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 
 def save_image(resp, out_dir, t, ext):
     """Save AirSim image with relative timestamp."""

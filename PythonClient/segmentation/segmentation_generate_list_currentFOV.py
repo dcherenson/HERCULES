@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import csv
 import numpy as np
 from datetime import datetime

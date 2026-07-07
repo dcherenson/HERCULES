@@ -11,7 +11,7 @@ import setup_path
 import os
 import numpy as np
 import cv2
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 
 # Configuration
 DURATION        = 1300.0        # seconds

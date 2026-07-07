@@ -15,8 +15,8 @@ Minimal script to:
 
 import math
 import numpy as np
-import setup_path                    # ensure cosysairsim is on PYTHONPATH
-import cosysairsim as airsim
+import setup_path                    # ensure hercules_cosysairsim is on PYTHONPATH
+import hercules_cosysairsim as airsim
 import cv2
 import csv
 from collections import defaultdict

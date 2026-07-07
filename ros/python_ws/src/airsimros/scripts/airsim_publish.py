@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import rospy
 import time
 import math

@@ -1,5 +1,5 @@
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import csv
 
 client = airsim.VehicleClient(port=41451)

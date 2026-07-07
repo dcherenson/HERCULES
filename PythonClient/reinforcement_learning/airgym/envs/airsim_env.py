@@ -1,5 +1,5 @@
 import numpy as np
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 
 import gym
 from gym import spaces

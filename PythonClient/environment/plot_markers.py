@@ -1,5 +1,5 @@
 import setup_path 
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 from airsim import Vector3r, Quaternionr, Pose
 from airsim.utils import to_quaternion
 import numpy as np

@@ -16,7 +16,7 @@ import sys
 from math import sqrt
 
 import setup_path
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 
 # ============================================================
 # ====== USER PARAMETERS (edit these to your preferences) ====

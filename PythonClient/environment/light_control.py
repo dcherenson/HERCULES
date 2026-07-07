@@ -1,4 +1,4 @@
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 import time
 
 client = airsim.VehicleClient()

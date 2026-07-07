@@ -2,7 +2,7 @@
 For connecting to the AirSim drone environment and testing API functionality
 """
 import setup_path 
-import cosysairsim as airsim
+import hercules_cosysairsim as airsim
 
 import os
 import tempfile
