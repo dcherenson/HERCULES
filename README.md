@@ -42,16 +42,82 @@ A novel autonomous waypoint-tracking UGV controller mirrors the UAV interface, e
 
 ## Table of Contents
 
+- [Getting Started](#getting-started)
 - [Environments](#environments)
 - [Sensors & Phenomena](#sensors--phenomena)
 - [Collaborative SLAM](#collaborative-slam)
 - [Cooperative Perception](#cooperative-perception)
 - [Multimodal Dataset](#multimodal-dataset)
-- [Getting Started](#getting-started)
 - [Dataset](#dataset)
 - [Citation](#citation)
 - [Acknowledgements](#acknowledgements)
 - [License](#license)
+
+---
+
+## Getting Started
+
+HERCULES is developed and tested on **Ubuntu 22.04** with **Unreal Engine 5.2.1** and **ROS 2 Humble**. It is distributed as an Unreal plugin that drops into an Unreal environment, plus lightweight Python and ROS 2 clients.
+
+### Requirements
+
+| Component | Version / Notes |
+|---|---|
+| OS | Ubuntu 22.04 (Linux); Windows also supported for the simulator |
+| Unreal Engine | **5.2.1** (source build recommended — [get UE from Epic](https://www.unrealengine.com/en-US/download)) |
+| Toolchain | clang-12, CMake ≥ 3.12 (installed by `setup.sh`) |
+| Python | 3.10 (see [`PythonClient/requirements-herculesvenv.txt`](PythonClient/requirements-herculesvenv.txt)) |
+| ROS 2 | Humble (for the ROS 2 wrappers) |
+
+### 1. Clone
+
+```bash
+git clone https://github.com/lunarlab-gatech/HERCULES.git
+cd HERCULES
+```
+
+### 2. Build the plugin
+
+`setup.sh` fetches dependencies (rpclib, Eigen) and toolchain; `build.sh` compiles the AirLib libraries and the Unreal plugin.
+
+```bash
+./setup.sh
+./build.sh
+```
+
+### 3. Run the simulator
+
+The build produces the `Cosys-AirSim` Unreal plugin. Drop it into an Unreal environment and open the project with **UE 5.2.1**. Two ready environments are included under [`Unreal/Environments/`](Unreal/Environments/): **`Blocks`** (minimal) and **`DynamicObjects`**. Detailed steps — including running from a packaged binary — are in the docs:
+
+- [Install & build on Linux](docs/install_linux.md) · [on Windows](docs/install_windows.md)
+- [Run a precompiled/packaged build](docs/install_precompiled.md)
+- [Simulation settings (`settings.json`)](docs/settings.md) — place your config at `~/Documents/AirSim/settings.json`
+
+### 4. Python client
+
+The Python API is packaged as **`hercules_cosysairsim`** (importable as `hercules_cosysairsim`, distributed as `hercules-cosys-airsim`). Recreate the reference environment:
+
+```bash
+python3 -m venv herculesvenv
+source herculesvenv/bin/activate
+pip install -r PythonClient/requirements-herculesvenv.txt
+
+# scripts locate the package via each folder's setup_path.py — just run one:
+cd PythonClient/car && python hello_car.py
+```
+
+See [`PythonClient/README.md`](PythonClient/README.md) for details.
+
+### 5. ROS 2 workspace
+
+Performance-optimized ROS 2 (Humble) wrappers live under [`ros2/`](ros2/). Build with `colcon` and see [the ROS 2 C++ docs](docs/ros_cplusplus.md):
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ros2
+colcon build
+source install/setup.bash
+```
 
 ---
 
@@ -187,72 +253,6 @@ HERCULES exports **time-synchronized multimodal data** for heterogeneous robot t
 <td width="50%"><img src="docs/media/Australia_Perimeter.gif" width="100%"><br><sub><b>Australia — Perimeter Coverage.</b> Perimeter trajectory across the team.</sub></td>
 </tr>
 </table>
-
----
-
-## Getting Started
-
-HERCULES is developed and tested on **Ubuntu 22.04** with **Unreal Engine 5.2.1** and **ROS 2 Humble**. It is distributed as an Unreal plugin that drops into an Unreal environment, plus lightweight Python and ROS 2 clients.
-
-### Requirements
-
-| Component | Version / Notes |
-|---|---|
-| OS | Ubuntu 22.04 (Linux); Windows also supported for the simulator |
-| Unreal Engine | **5.2.1** (source build recommended — [get UE from Epic](https://www.unrealengine.com/en-US/download)) |
-| Toolchain | clang-12, CMake ≥ 3.12 (installed by `setup.sh`) |
-| Python | 3.10 (see [`PythonClient/requirements-herculesvenv.txt`](PythonClient/requirements-herculesvenv.txt)) |
-| ROS 2 | Humble (for the ROS 2 wrappers) |
-
-### 1. Clone
-
-```bash
-git clone https://github.com/lunarlab-gatech/HERCULES.git
-cd HERCULES
-```
-
-### 2. Build the plugin
-
-`setup.sh` fetches dependencies (rpclib, Eigen) and toolchain; `build.sh` compiles the AirLib libraries and the Unreal plugin.
-
-```bash
-./setup.sh
-./build.sh
-```
-
-### 3. Run the simulator
-
-The build produces the `Cosys-AirSim` Unreal plugin. Drop it into an Unreal environment and open the project with **UE 5.2.1**. Two ready environments are included under [`Unreal/Environments/`](Unreal/Environments/): **`Blocks`** (minimal) and **`DynamicObjects`**. Detailed steps — including running from a packaged binary — are in the docs:
-
-- [Install & build on Linux](docs/install_linux.md) · [on Windows](docs/install_windows.md)
-- [Run a precompiled/packaged build](docs/install_precompiled.md)
-- [Simulation settings (`settings.json`)](docs/settings.md) — place your config at `~/Documents/AirSim/settings.json`
-
-### 4. Python client
-
-The Python API is packaged as **`hercules_cosysairsim`** (importable as `hercules_cosysairsim`, distributed as `hercules-cosys-airsim`). Recreate the reference environment:
-
-```bash
-python3 -m venv herculesvenv
-source herculesvenv/bin/activate
-pip install -r PythonClient/requirements-herculesvenv.txt
-
-# scripts locate the package via each folder's setup_path.py — just run one:
-cd PythonClient/car && python hello_car.py
-```
-
-See [`PythonClient/README.md`](PythonClient/README.md) for details.
-
-### 5. ROS 2 workspace
-
-Performance-optimized ROS 2 (Humble) wrappers live under [`ros2/`](ros2/). Build with `colcon` and see [the ROS 2 C++ docs](docs/ros_cplusplus.md):
-
-```bash
-source /opt/ros/humble/setup.bash
-cd ros2
-colcon build
-source install/setup.bash
-```
 
 ---
 
