@@ -1,114 +1,301 @@
-# Cosys-AirSim
+<div align="center">
 
-Cosys-AirSim is a simulator for drones, cars and more, with extensive API support, built on [Unreal Engine](https://www.unrealengine.com/). It is open-source, cross platform, and supports hardware-in-loop with popular flight controllers such as PX4 for physically and visually realistic simulations. It is developed as an Unreal plugin that can simply be dropped into any Unreal environment. 
+# HERCULES
 
-This fork is based on last public AirSim release from Microsoft's GitHub.
-Cosys-Lab made extensive modifications to the AirSim platform to support multiple projects and research goals. 
-Please contact a Cosys-Lab researcher to get more in depth information on our work or if you wish to collaborate. 
-The [original AirSim MIT license](https://github.com/Cosys-Lab/Cosys-AirSim/blob/main/LICENSE) applies to all native AirSim source files. 
-Please note that we use that same [MIT license](https://github.com/Cosys-Lab/Cosys-AirSim/blob/main/LICENSE) as which applies to all changes made by Cosys-Lab in case you plan to do anything within this repository.
-Do note that this repository is provided as is, will not be actively updated and comes without warranty or support. 
-Please contact a Cosys-Lab researcher to get more in depth information on which branch or version is best for your work.
+### An Open-Source Simulation Framework for Heterogeneous Multi-Robot SLAM, Collaborative Perception, and Exploration
 
-This branch is for Unreal [5.2.1](https://github.com/Cosys-Lab/Cosys-AirSim/tree/5.2.1), maintained for support, and is available for long term support builds in the [releases](https://github.com/Cosys-Lab/Cosys-AirSim/releases). The documentation is best read from [source](https://github.com/Cosys-Lab/Cosys-AirSim/tree/main/docs). 
-For more recent Unreal Engine versions check the other [releases](https://github.com/Cosys-Lab/Cosys-AirSim/releases) and the [main branch](https://github.com/Cosys-Lab/Cosys-AirSim) for the latest source code. 
+**[Sandilya Sai Garimella](#)<sup>1</sup> · [Daniel Chase Butterfield](#)<sup>1</sup> · [Sean Wilson](#)<sup>1,2</sup> · [Lu Gan](#)<sup>1</sup>**
 
-## Associated publications
+<sup>1</sup>Georgia Institute of Technology · <sup>2</sup>Georgia Tech Research Institute
 
-- [Cosys-AirSim: A Real-Time Simulation Framework Expanded for Complex Industrial Applications](https://arxiv.org/abs/2303.13381)
+[![arXiv](https://img.shields.io/badge/arXiv-2606.22756-b31b1b.svg)](https://arxiv.org/abs/2606.22756)
+[![Project Page](https://img.shields.io/badge/Project-Page-1f8ceb.svg)](https://github.com/lunarlab-gatech/HERCULES)
+[![Video](https://img.shields.io/badge/YouTube-Demo-ff0000.svg?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=Is3MmmMx2fw)
+[![Dataset](https://img.shields.io/badge/🤗%20HuggingFace-Dataset-yellow.svg)](https://huggingface.co/datasets/GeorgiaTech/HERCULES)
+[![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.2.1-0e1128.svg?logo=unrealengine)](https://www.unrealengine.com/)
+[![ROS 2](https://img.shields.io/badge/ROS%202-Humble-22314e.svg?logo=ros)](https://docs.ros.org/en/humble/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+*An open-source Unreal Engine 5 simulator for heterogeneous UAV–UGV teams in photorealistic, dynamic, large-scale environments.*
+
+</div>
+
+---
+
+## Overview
+
+**HERCULES** is a simulation platform for heterogeneous multi-robot autonomy that lets unmanned ground vehicles (UGVs) and unmanned aerial vehicles (UAVs) **collaboratively explore and understand large-scale, complex environments**. Built as an advanced fork of [AirSim](https://github.com/microsoft/AirSim) / [Cosys-AirSim](https://github.com/Cosys-Lab/Cosys-AirSim) on **Unreal Engine 5**, it provides a unified autonomy pipeline for concurrent UAV–UGV operation, high-fidelity sensing, and large-scale environmental interaction — including offline trajectory generation, kinodynamically feasible motion for both platforms, and complementary coverage and leader–follower patterns for dataset collection.
+
+A novel autonomous waypoint-tracking UGV controller mirrors the UAV interface, enabling unified high-level research in exploration and multi-robot coordination. As a benchmark sandbox, HERCULES ships ready-to-run baselines for **collaborative SLAM** ([ROMAN](https://github.com/mit-acl/ROMAN)) and **collaborative perception** ([DAIR-V2X](https://github.com/AIR-THU/DAIR-V2X)-style multi-view 3D detection). Optimized ROS 2 wrappers and lightweight APIs let you develop SLAM, perception, and learning-based algorithms directly on top of the infrastructure.
+
+<div align="center">
+<img src="docs/media/system_overview.png" width="92%" alt="System overview of HERCULES">
+</div>
+
+### Highlights
+
+- **Integrated heterogeneous autonomy stack.** We re-architect the AirSim/Cosys-AirSim SimMode layer to enable **concurrent UAV–UGV operation within a single simulation session**, resolving a fundamental physics-engine conflict that previously restricted each session to one vehicle type. On top of it: a unified waypoint-level command interface, an autonomous UGV controller, an end-to-end planning pipeline, and coordinated multi-robot sensor logging.
+- **New sensor modalities & dynamic environments.** Two sensors not in Cosys-AirSim — a **long-wave infrared (LWIR)** thermal camera based on Planck-law spectral radiance, and a **night-vision (NVG)** camera with empirical photometric transfer. Parameterized dynamic-environment modules (**wildfire spread, flood inundation, crop-disease transmission**) and dynamic-agent Blueprints (MetaHuman pedestrians, VehicleAI traffic, AnimalAI wildlife) update the shared world state at runtime.
+- **Open benchmarks & reproducible release.** Evaluation suites for collaborative SLAM (ROMAN) and multi-view 3D object detection (DAIR-V2X-style), a dataset-collection pipeline exporting synchronized multimodal data in standard formats (KITTI-style layouts, ROS 2 bags), and performance-optimized ROS 2 wrappers for direct integration with existing autonomy stacks.
+
+---
+
+## Table of Contents
+
+- [Environments](#environments)
+- [Sensors & Phenomena](#sensors--phenomena)
+- [Collaborative SLAM](#collaborative-slam)
+- [Cooperative Perception](#cooperative-perception)
+- [Multimodal Dataset](#multimodal-dataset)
+- [Getting Started](#getting-started)
+- [Dataset](#dataset)
+- [Citation](#citation)
+- [Acknowledgements](#acknowledgements)
+- [License](#license)
+
+---
+
+## Environments
+
+HERCULES ships with three photorealistic worlds — **desert, forest, and city** — each engineered to stress a different class of perception and planning failure: sparse landmarks and long-range visibility (desert), perceptual aliasing from repetitive geometry (forest), and dense occlusions with dynamic agents (city). Georeferenced real-world scenes can be imported via [Cesium for Unreal](https://cesium.com/platform/cesium-for-unreal/).
+
+<table>
+<tr>
+<td width="50%"><img src="docs/media/auskangaroo1.gif" width="100%"><br><sub><b>Australian Outback — Wildlife.</b> Kangaroos roaming the outback world.</sub></td>
+<td width="50%"><img src="docs/media/auskang_uavugv1.gif" width="100%"><br><sub><b>Australian Outback — UAV + UGV.</b> Heterogeneous team traversing the outback.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/forestdeer1.gif" width="100%"><br><sub><b>Forest — Wildlife.</b> Deer in the forest world.</sub></td>
+<td width="50%"><img src="docs/media/forestdeer_uavugv1.gif" width="100%"><br><sub><b>Forest — UAV + UGV.</b> Heterogeneous team traversing the forest.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/citycarspeds1.gif" width="100%"><br><sub><b>City — Traffic.</b> Vehicle traffic through the urban world.</sub></td>
+<td width="50%"><img src="docs/media/city_uavugv1.gif" width="100%"><br><sub><b>City — UAV + UGV.</b> Heterogeneous team traversing the city.</sub></td>
+</tr>
+</table>
+
+---
+
+## Sensors & Phenomena
+
+Beyond the inherited Cosys-AirSim sensor suite (RGB, depth, semantic segmentation, LiDAR, GPU-LiDAR, echo/radar, IMU, GPS…), HERCULES adds **physics-based LWIR thermal** and **night-vision** cameras, plus three classes of dynamic environmental phenomena that update the shared world state at runtime.
+
+### New Sensor Modalities
+
+<table>
+<tr>
+<td width="50%"><img src="docs/media/nvg.png" width="100%"><br><sub><b>Night-Vision (NVG).</b> Low-light photometric transfer, desert scene.</sub></td>
+<td width="50%"><img src="docs/media/lwir.png" width="100%"><br><sub><b>LWIR Thermal.</b> Planck-law spectral radiance — kangaroos near a fire read hot.</sub></td>
+</tr>
+</table>
+
+### Dynamic Environmental Phenomena
+
+<table>
+<tr>
+<td width="50%"><img src="docs/media/forestfire1.gif" width="100%"><br><sub><b>Wildfire Spread.</b> Fire propagating through a forest environment.</sub></td>
+<td width="50%"><img src="docs/media/caltech_fire_1drone_night.gif" width="100%"><br><sub><b>Pasadena Fire.</b> Fire over a Cesium 3D model of Pasadena, from a UAV at night.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/Atlanta_hercules_flooding_demo1.gif" width="100%"><br><sub><b>Atlanta Flood.</b> Flood inundation over a Cesium 3D model of Atlanta.</sub></td>
+<td width="50%"><img src="docs/media/jungleenv_flooding_1.gif" width="100%"><br><sub><b>Jungle Flood.</b> Flood inundation in a dense jungle environment.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/phenom_cropdisease.png" width="100%"><br><sub><b>Crop Disease.</b> Disease transmission across agricultural terrain (still).</sub></td>
+<td width="50%"></td>
+</tr>
+</table>
+
+---
+
+## Collaborative SLAM
+
+We benchmark [**ROMAN**](https://github.com/mit-acl/ROMAN) collaborative SLAM on a *City Block* sequence with **two UAVs and two UGVs**. Each robot runs LIO-SAM odometry with an open-set ROMAN object map; inter-robot loop closures are registered pairwise via [CLIPPER](https://github.com/mit-acl/clipper).
+
+### Live Mapping
+
+<table>
+<tr>
+<td width="50%"><img src="docs/media/V2.4.C-Drone1-LiveMapping.gif" width="100%"><br><sub><b>UAV 1.</b> Live trajectory, camera pose, and object map.</sub></td>
+<td width="50%"><img src="docs/media/V2.4.C-Drone2-LiveMapping.gif" width="100%"><br><sub><b>UAV 2.</b> Live trajectory, camera pose, and object map.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/V2.4.C-Husky1-LiveMapping.gif" width="100%"><br><sub><b>UGV 1 (Husky).</b> Live trajectory, camera pose, and object map.</sub></td>
+<td width="50%"><img src="docs/media/V2.4.C-Husky2-LiveMapping.gif" width="100%"><br><sub><b>UGV 2 (Husky).</b> Live trajectory, camera pose, and object map.</sub></td>
+</tr>
+</table>
+
+### Final Maps
+
+<table>
+<tr>
+<td width="50%"><img src="docs/media/V2.4.C-Drone1-FinalMapViz.gif" width="100%"><br><sub><b>UAV 1.</b> LIO-SAM final map with ROMAN object map.</sub></td>
+<td width="50%"><img src="docs/media/V2.4.C-Drone2-FinalMapViz.gif" width="100%"><br><sub><b>UAV 2.</b> LIO-SAM final map with ROMAN object map.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/V2.4.C-Husky1-FinalMapViz.gif" width="100%"><br><sub><b>UGV 1.</b> LIO-SAM final map with ROMAN object map.</sub></td>
+<td width="50%"><img src="docs/media/V2.4.C-Husky2-FinalMapViz.gif" width="100%"><br><sub><b>UGV 2.</b> LIO-SAM final map with ROMAN object map.</sub></td>
+</tr>
+</table>
+
+### Loop-Closure Alignment
+
+<div align="center">
+<img src="docs/media/V2.4.C-Husky1Husky2-Alignment.gif" width="70%"><br>
+<sub><b>ROMAN loop closure.</b> UGV 1 and UGV 2 submaps aligned pairwise via CLIPPER.</sub>
+</div>
+
+---
+
+## Cooperative Perception
+
+HERCULES supports **V2X-style collaborative perception**: a **vehicle-side** agent (a UGV on the sidewalk) and an **infrastructure-side** agent (an overhead UAV) observe a shared city intersection from complementary viewpoints. Each exports time-synchronized RGB and LiDAR, providing the overlapping multi-view coverage that cooperative detection and fusion methods rely on.
+
+<div align="center">
+<img src="docs/media/cp_rgb_sidebyside.gif" width="92%"><br>
+<sub><b>Cooperative RGB.</b> Shared intersection from the vehicle-side UGV (left) and infrastructure-side UAV (right).</sub>
+</div>
+
+<table>
+<tr>
+<td width="50%"><img src="docs/media/cp_lidar_vehicle.gif" width="100%"><br><sub><b>Vehicle-Side LiDAR.</b> Point cloud from the UGV on the sidewalk.</sub></td>
+<td width="50%"><img src="docs/media/cp_lidar_infra.gif" width="100%"><br><sub><b>Infrastructure-Side LiDAR.</b> Point cloud from the UAV overhead.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/cp_collage_vehicle_rgb.png" width="100%"><br><sub><b>Vehicle-Side RGB.</b> Sampled across the sequence.</sub></td>
+<td width="50%"><img src="docs/media/cp_collage_infra_rgb.png" width="100%"><br><sub><b>Infrastructure-Side RGB.</b> Sampled across the sequence.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/cp_collage_vehicle_lidar.png" width="100%"><br><sub><b>Vehicle-Side LiDAR.</b> Sampled across the sequence.</sub></td>
+<td width="50%"><img src="docs/media/cp_collage_infra_lidar.png" width="100%"><br><sub><b>Infrastructure-Side LiDAR.</b> Sampled across the sequence.</sub></td>
+</tr>
+</table>
+
+---
+
+## Multimodal Dataset
+
+HERCULES exports **time-synchronized multimodal data** for heterogeneous robot teams. Each dashboard shows, per robot, the **RGB**, **depth**, **semantic segmentation**, and **LiDAR** streams captured along a coverage or leader–follower trajectory.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/media/City_Block.gif" width="100%"><br><sub><b>City Block.</b> Urban sequence — RGB, depth, semantic, LiDAR per robot.</sub></td>
+<td width="50%"><img src="docs/media/Forest.gif" width="100%"><br><sub><b>Forest.</b> Forest sequence — RGB, depth, semantic, LiDAR per robot.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/Australia_Center.gif" width="100%"><br><sub><b>Australia — Center Coverage.</b> Coverage trajectory across the team.</sub></td>
+<td width="50%"><img src="docs/media/Australia_Perimeter.gif" width="100%"><br><sub><b>Australia — Perimeter Coverage.</b> Perimeter trajectory across the team.</sub></td>
+</tr>
+</table>
+
+---
+
+## Getting Started
+
+HERCULES is developed and tested on **Ubuntu 22.04** with **Unreal Engine 5.2.1** and **ROS 2 Humble**. It is distributed as an Unreal plugin that drops into an Unreal environment, plus lightweight Python and ROS 2 clients.
+
+### Requirements
+
+| Component | Version / Notes |
+|---|---|
+| OS | Ubuntu 22.04 (Linux); Windows also supported for the simulator |
+| Unreal Engine | **5.2.1** (source build recommended — [get UE from Epic](https://www.unrealengine.com/en-US/download)) |
+| Toolchain | clang-12, CMake ≥ 3.12 (installed by `setup.sh`) |
+| Python | 3.10 (see [`PythonClient/requirements-herculesvenv.txt`](PythonClient/requirements-herculesvenv.txt)) |
+| ROS 2 | Humble (for the ROS 2 wrappers) |
+
+### 1. Clone
+
+```bash
+git clone https://github.com/lunarlab-gatech/HERCULES.git
+cd HERCULES
 ```
-@inproceedings{cosysairsim2023jansen,
-  author={Jansen, Wouter and Verreycken, Erik and Schenck, Anthony and Blanquart, Jean-Edouard and Verhulst, Connor and Huebel, Nico and Steckel, Jan},
-  booktitle={2023 Annual Modeling and Simulation Conference (ANNSIM)}, 
-  title={COSYS-AIRSIM: A Real-Time Simulation Framework Expanded for Complex Industrial Applications}, 
-  year={2023},
-  volume={},
-  number={},
-  pages={37-48},
-  doi={}}
+
+### 2. Build the plugin
+
+`setup.sh` fetches dependencies (rpclib, Eigen) and toolchain; `build.sh` compiles the AirLib libraries and the Unreal plugin.
+
+```bash
+./setup.sh
+./build.sh
 ```
 
-You can also find the presentation of the live tutorial of Cosys-AirSim at ANNSIM '23 conference [here](https://github.com/Cosys-Lab/Cosys-AirSim/tree/main/docs/annsim23_tutorial) together with the associated videos.
+### 3. Run the simulator
 
+The build produces the `Cosys-AirSim` Unreal plugin. Drop it into an Unreal environment and open the project with **UE 5.2.1**. Two ready environments are included under [`Unreal/Environments/`](Unreal/Environments/): **`Blocks`** (minimal) and **`DynamicObjects`**. Detailed steps — including running from a packaged binary — are in the docs:
 
-- [Physical LiDAR Simulation in Real-Time Engine](https://arxiv.org/abs/2208.10295)
+- [Install & build on Linux](docs/install_linux.md) · [on Windows](docs/install_windows.md)
+- [Run a precompiled/packaged build](docs/install_precompiled.md)
+- [Simulation settings (`settings.json`)](docs/settings.md) — place your config at `~/Documents/AirSim/settings.json`
+
+### 4. Python client
+
+The Python API is packaged as **`hercules_cosysairsim`** (importable as `hercules_cosysairsim`, distributed as `hercules-cosys-airsim`). Recreate the reference environment:
+
+```bash
+python3 -m venv herculesvenv
+source herculesvenv/bin/activate
+pip install -r PythonClient/requirements-herculesvenv.txt
+
+# scripts locate the package via each folder's setup_path.py — just run one:
+cd PythonClient/car && python hello_car.py
 ```
-@inproceedings{lidarsim2022jansen,
-  author={Jansen, Wouter and Huebel, Nico and Steckel, Jan},
-  booktitle={2022 IEEE Sensors}, 
-  title={Physical LiDAR Simulation in Real-Time Engine}, 
-  year={2022},
-  volume={},
-  number={},
-  pages={1-4},
-  doi={10.1109/SENSORS52175.2022.9967197}}
+
+See [`PythonClient/README.md`](PythonClient/README.md) for details.
+
+### 5. ROS 2 workspace
+
+Performance-optimized ROS 2 (Humble) wrappers live under [`ros2/`](ros2/). Build with `colcon` and see [the ROS 2 C++ docs](docs/ros_cplusplus.md):
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ros2
+colcon build
+source install/setup.bash
+```
+
+---
+
+## Dataset
+
+Time-synchronized, multimodal sequences (RGB, depth, semantic segmentation, LiDAR, poses) for heterogeneous UAV–UGV teams across the desert, forest, and city worlds are hosted on Hugging Face:
+
+**➡️ [huggingface.co/datasets/GeorgiaTech/HERCULES](https://huggingface.co/datasets/GeorgiaTech/HERCULES)**
+
+Data is exported in standard formats (KITTI-style layouts and ROS 2 bags) via the built-in dataset-collection pipeline.
+
+---
+
+## Citation
+
+If you use HERCULES in your research, please cite:
+
+```bibtex
+@misc{garimella2026hercules,
+  title         = {HERCULES: An Open-Source Simulation Framework for Heterogeneous Multi-Robot SLAM, Collaborative Perception, and Exploration},
+  author        = {Garimella, Sandilya Sai and Butterfield, Daniel Chase and Wilson, Sean and Gan, Lu},
+  year          = {2026},
+  eprint        = {2606.22756},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.RO},
+  url           = {https://arxiv.org/abs/2606.22756}
 }
 ```
-- [Simulation of Pulse-Echo Radar for Vehicle Control and SLAM](https://www.mdpi.com/1424-8220/21/2/523)
-```
-@Article{echosim2021schouten,
-  author={Schouten, Girmi and Jansen, Wouter and Steckel, Jan},
-  title={Simulation of Pulse-Echo Radar for Vehicle Control and SLAM},
-  JOURNAL={Sensors},
-  volume={21},
-  year={2021},
-  number={2},
-  article-number={523},
-  doi={10.3390/s21020523}
-}
-```
 
-## Cosys-Lab Modifications
-* Updated for Unreal 5.
-* Added [multi-layer annotation](https://cosys-lab.github.io/annotation) for groundtruth label generation with RGB, greyscale and texture options. Extensive API integration and available for camera and GPU-LiDAR sensors.
-* Added [Instance Segmentation](https://cosys-lab.github.io/instance_segmentation). 
-* Added [Echo sensor type](https://cosys-lab.github.io/echo) for simulation of sensors like sonar and radar.
-* Added [GPU LIDAR sensor type](https://cosys-lab.github.io/gpulidar): Uses GPU acceleration to simulate a LiDAR sensor. Can support much higher point density then normal LiDAR and behaves more authentic and has realistic intensity generation.
-* Added [skid steering SimMode and vehicle type](https://cosys-lab.github.io/skid_steer_vehicle). ClearPath Husky and Pioneer P3DX implemented as vehicle types using this new vehicle model. 
-* Added [Matlab API Client](https://cosys-lab.github.io/matlab) implementation as an easy to install Matlab toolbox.
-* Added various [random but deterministic dynamic object types and world configuration options](https://cosys-lab.github.io/dynamic_objects).
-* Added BoxCar vehicle model to the Car SimMode to have a smaller vehicle to use in indoor spaces.
-* Updated [ComputerVision mode](https://cosys-lab.github.io/image_apis#computer-vision-mode-1): Now has full API and Simulation just like other vehicle types. It mostly means it can now have sensors attached (outside of IMU). Improved handling and camera operation.
-* Updated [LIDAR sensor type](https://cosys-lab.github.io/lidar): Fixed not tracing correctly, added ground truth (point labels) generation, added range-noise generation. Improved API pointcloud delivery to be full scan instead of being frame-rate dependent and partial.
-* Updated the camera, Echo and (GPU-)LiDAR sensors to be uncoupled from the vehicle and be placed as external world sensors.
-* Updated sensors like cameras, Echo sensor and GPU-LiDAR to ignore certain objects with the _MarkedIgnore_ Unreal tag and enabling the "IgnoreMarked" setting in [the settings file](https://cosys-lab.github.io/settings).
-* Updated cameras sensor with more distortion features such as chromatic aberration, motion blur and lens distortion. 
-* Updated Python [ROS implementation](https://cosys-lab.github.io/ros_python) with completely new implementation and feature set.
-* Updated C++ [ROS2 implementation](https://cosys-lab.github.io/ros_cplusplus) to support custom Cosys-AirSim features.
-* Dropped support for Unity Environments.
+---
 
-Some more details on our changes can be found in the [changelog](https://github.com/Cosys-Lab/Cosys-AirSim/blob/main/CHANGELOG.md).
+## Acknowledgements
 
-## How to Get It
-#### Download and run from packaged binary - Windows/Linux
-* [Download and run it](https://cosys-lab.github.io/run_packaged)
-#### Download and install from precompiled plugin - Windows/Linux
-* [Download and install it](https://cosys-lab.github.io/install_precompiled)
-#### Install and use from source - Windows
-* [Install/Build it](https://cosys-lab.github.io/install_windows)
-#### Install and use from source - Linux
-* [Install/Build it](https://cosys-lab.github.io/install_linux)
+HERCULES builds on the shoulders of excellent open-source work:
 
-## How to Use It
+- [**AirSim**](https://github.com/microsoft/AirSim) (Microsoft) — the original high-fidelity simulator this project extends.
+- [**Cosys-AirSim**](https://github.com/Cosys-Lab/Cosys-AirSim) (Cosys-Lab, University of Antwerp) — the UE5 fork that adds annotation, instance segmentation, GPU-LiDAR, echo/radar, skid-steer vehicles, and more, which HERCULES is built upon.
+- [**ROMAN**](https://github.com/mit-acl/ROMAN) & [**CLIPPER**](https://github.com/mit-acl/clipper) (MIT-ACL) — collaborative SLAM and robust registration baselines.
+- [**DAIR-V2X**](https://github.com/AIR-THU/DAIR-V2X) — cooperative perception benchmark design.
+- [**Cesium for Unreal**](https://cesium.com/platform/cesium-for-unreal/) — georeferenced real-world 3D environments.
 
-### Documentation
-
-View our [detailed documentation](https://cosys-lab.github.io/) on all aspects of Cosys-AirSim.
-
-## Original AirSim Paper
-
-More technical details are available in [AirSim paper (FSR 2017 Conference)](https://arxiv.org/abs/1705.05065). Please cite this as:
-```
-@inproceedings{airsim2017fsr,
-  author = {Shital Shah and Debadeepta Dey and Chris Lovett and Ashish Kapoor},
-  title = {AirSim: High-Fidelity Visual and Physical Simulation for Autonomous Vehicles},
-  year = {2017},
-  booktitle = {Field and Service Robotics},
-  eprint = {arXiv:1705.05065},
-  url = {https://arxiv.org/abs/1705.05065}
-}
-```
+Developed at [**LunarLab**](https://sites.gatech.edu/lunarlab/), Georgia Institute of Technology.
 
 ## License
 
-This project is released under the MIT License. Please review the [License file](https://github.com/Cosys-Lab/Cosys-AirSim/blob/main/LICENSE) for more details.
+Released under the **MIT License** — see [LICENSE](LICENSE). The original [AirSim MIT license](https://github.com/microsoft/AirSim/blob/main/LICENSE) applies to all native AirSim source files, and the same license covers modifications by Cosys-Lab and by LunarLab.

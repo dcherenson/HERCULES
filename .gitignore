@@ -408,5 +408,8 @@ ros2/src/VINS-MONO-ROS2
 ./csv_data/depth_frame.npy
 *.png
 
+# HERCULES README demo media — keep tracked despite the global *.png ignore above
+!docs/media/**
+
 *.csv
 PythonClient/segmentation/*.csv
