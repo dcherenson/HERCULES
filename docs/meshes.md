@@ -1,6 +1,6 @@
-# How to Access Meshes in AIRSIM
+# How to Access Meshes in HERCULES
 
-Cosys-AirSim supports the ability to access the static meshes that make up the scene.
+HERCULES supports the ability to access the static meshes that make up the scene.
 
 
 ## Mesh structure

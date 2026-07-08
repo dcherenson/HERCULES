@@ -1,6 +1,6 @@
-# How to Use Echo sensor modalities in Cosys-AirSim
+# How to Use Echo sensor modalities in HERCULES
 
-Cosys-AirSim supports Echo sensors for multirotors and cars.  Echo sensors can be configured to behave like sonar, radar or other echo-based sensor types.
+HERCULES supports Echo sensors for multirotors and cars.  Echo sensors can be configured to behave like sonar, radar or other echo-based sensor types.
 
 The enablement of an echo sensor and the other settings can be configured via AirSimSettings json.
 Please see [general sensors](sensors.md) for information on configuration of general/shared sensor settings.
@@ -55,7 +55,7 @@ DrawSensor                 | Draw the physical sensor in the world on the vehicl
 e.g.,
 ```
 {
-    "SeeDocsAt": "https://cosys-lab.github.io/settings/",
+    "SeeDocsAt": "https://lunarlab-gatech.github.io/HERCULES/settings/",
     "SettingsVersion": 2.0,
     "SimMode": "SkidVehicle",
 	"Vehicles": {
@@ -129,7 +129,7 @@ DrawDebugDuration         | Duration in seconds that the debug points and lines 
 In the settings file this can look like this example : 
 ```
 {
-  "SeeDocsAt": "https://cosys-lab.github.io/settings/",
+  "SeeDocsAt": "https://lunarlab-gatech.github.io/HERCULES/settings/",
   "SettingsVersion": 2.0,
   "SimMode": "SkidVehicle",
   "ViewMode": "",

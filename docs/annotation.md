@@ -1,6 +1,6 @@
-# Annotation in Cosys-AirSim
+# Annotation in HERCULES
 
-A multi-layer annotation system is implemented into Cosys-AirSim. It uses Proxy Mesh rendering to allow for each object in the world to be annotated by a greyscale value, an RGB color or a texture that fits the mesh.
+A multi-layer annotation system is implemented into HERCULES. It uses Proxy Mesh rendering to allow for each object in the world to be annotated by a greyscale value, an RGB color or a texture that fits the mesh.
 An annotation layer allows the user to tag individual actors and/or their child-components with a certain annotation component. This can be used to create ground truth data for machine learning models or to create a visual representation of the environment.
 
 Let's say you want to train a model to detect cars or pedestrians, you create an RGB annotation layer where  you can tag all the cars and pedestrians in the environment with a certain RGB color respectively. 

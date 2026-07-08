@@ -1,13 +1,13 @@
-# How to use AirSim with Robot Operating System (ROS)
+# How to use HERCULES with Robot Operating System (ROS)
 
-AirSim and ROS can be integrated using Python. Some example ROS node are provided demonstrating how to publish data from AirSim as ROS topics.
+HERCULES and ROS can be integrated using Python. Some example ROS node are provided demonstrating how to publish data from HERCULES as ROS topics.
 
 ## Prerequisites
 
-These instructions are for Ubuntu 20.04, ROS Noetic, UE 5.X+ and latest Cosys-AirSim release.
+These instructions are for Ubuntu 20.04, ROS Noetic, UE 5.X+ and latest HERCULES release.
 You should have these components installed and working before proceeding.
 
-**Note that you need to install the Python module first for this to work. More information [here](apis.md) in the section 'Installing AirSim Package'.**
+**Note that you need to install the Python module first for this to work. More information [here](apis.md) in the section 'Installing HERCULES Package'.**
 
 ## Publish node
 There is one single Python script `airsim_publish.py` that can be used as a ROS Node. It can be used in two ways:
@@ -22,11 +22,11 @@ Some basic launch files are available for the ROS node in these two configuratio
 
 ## Setup
 
-## Setup workspace and Airsim package
+## Setup workspace and HERCULES package
 
 #### Option A: Create a new ROS package in your catkin workspace following these instructions.  
 
-[Create a new ROS package](http://wiki.ros.org/ROS/Tutorials/CreatingPackage) called AirSim or whatever you like.
+[Create a new ROS package](http://wiki.ros.org/ROS/Tutorials/CreatingPackage) called HERCULES or whatever you like.
 If you don't already have a catkin workspace, you should first work through the ROS beginner tutorials.
 
 In the ROS package directory you made, copy the ROS node scripts from the _AirSim/ros/python_ws/src/airsimros_ directory to your ROS package. Change the code below to match your AirSim and catkin workspace paths.
@@ -38,16 +38,16 @@ cp AirSim/ros/python_ws/src/airsim/scripts ../catkin_ws/src/airsimros
 #### Option B: Use provided workspace
 _Airsim/ros/python_ws_ itself is already a workspace which can be used out of the box after building. For building see below.
 
-## Build ROS AirSim package
+## Build ROS HERCULES package
 
 Change directory to your top level catkin workspace folder i.e. ```cd ~/catkin_ws```  and run ```catkin_make```
-This will build the AirSim package.  Next, run ```source devel/setup.bash``` so ROS can find the new package.
+This will build the HERCULES package.  Next, run ```source devel/setup.bash``` so ROS can find the new package.
 You can add this command to your _~/.bashrc_ to load your catkin workspace automatically.
 
-s## How to run ROS AirSim nodes
+## How to run ROS HERCULES nodes
 
-First make sure you are running an AirSim project and that the simulation is playing.
+First make sure you are running a HERCULES project and that the simulation is playing.
 
-The implemented AirSim node can be run using ```rosrun airsimros airsim_publish.py```.
+The implemented HERCULES node can be run using ```rosrun airsimros airsim_publish.py```.
 
 Or alternatively you can use launch files such as the example ones that can be found in _AirSim/ros/python_ws/src/airsim/launch_ like ```rosrun airsimros airsim_publish.launch```.

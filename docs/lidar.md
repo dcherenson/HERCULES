@@ -1,6 +1,6 @@
-# How to Use Lidar in AirSim
+# How to Use Lidar in HERCULES
 
-AirSim supports Lidar for multirotors and cars. 
+HERCULES supports Lidar for multirotors and cars. 
 
 The enablement of lidar and the other lidar settings can be configured via AirSimSettings json.
 Please see [general sensors](sensors.md) for information on configruation of general/shared sensor settings.
@@ -45,7 +45,7 @@ External                  | Uncouple the sensor from the vehicle. If enabled, th
 ExternalLocal             | When in external mode, if this is enabled the retrieved pose of the sensor will be in Local NED coordinates(from starting position from vehicle) and not converted Unreal NED coordinates which is default
 ```
 {
-    "SeeDocsAt": "https://cosys-lab.github.io/settings/",
+    "SeeDocsAt": "https://lunarlab-gatech.github.io/HERCULES/settings/",
     "SettingsVersion": 2.0,
 
     "SimMode": "Multirotor",

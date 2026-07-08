@@ -1,12 +1,12 @@
-# How to use AirSim with Matlab
+# How to use HERCULES with Matlab
 
-AirSim and Matlab can be integrated using Python. an example Matlab client is provided demonstrating how to interact with AirSim from Matlab.
+HERCULES and Matlab can be integrated using Python. an example Matlab client is provided demonstrating how to interact with HERCULES from Matlab.
 This can be used from source or installed as a toolbox (install from [File Exchange](https://nl.mathworks.com/matlabcentral/fileexchange/168061-cosys-airsim-matlab-api-client), or from source by double-clicking or dragging into Matlab the file _Cosys-AirSim Matlab API Client.mltbx_)
 
 ## Prerequisites
 
-These instructions are for Matlab 2024a (with toolboxes for the client: Computer Vision, Aerospace, Signal Processing Toolbox) UE 5.X and latest Cosys-AirSim release.
-It also requires the AirSim python package to be installed. 
+These instructions are for Matlab 2024a (with toolboxes for the client: Computer Vision, Aerospace, Signal Processing Toolbox) UE 5.X and latest HERCULES release.
+It also requires the HERCULES python package to be installed. 
 For this go into the _PythonClient_ folder and use pip to install it to your python environment that is also used in Matlab with `pip install .`
 You can find out in Matlab what Python version is used with 
 ```matlab
@@ -18,12 +18,12 @@ You should have these components installed and working before proceeding.
 
 ## Usage
 
-This a client implementation of the RPC API for Matlab for the Cosys\-AirSim simulation framework. A main class AirSimClient is available which implements all API calls.
+This a client implementation of the RPC API for Matlab for the HERCULES simulation framework. A main class AirSimClient is available which implements all API calls.
 Do note that at this point not all functions have been tested and most function documentation was auto\-generated. This is still a WIP client.
 
 ### **Initial setup**
 
-When starting with this wrapper, first try to make a connection to the Cosys\-AirSim simulation. 
+When starting with this wrapper, first try to make a connection to the HERCULES simulation. 
 
 ```matlab
 vehicle_name = "airsimvehicle";
@@ -36,13 +36,13 @@ Now the client object can be used to run API methods from. All functions have so
 
 This example will:
 
--  Connect to AirSim 
+-  Connect to HERCULES 
 -  Get/set vehicle pose 
 -  Get instance segmentation groundtruth table 
 -  Get object pose(s) 
 -  Get sensor data (imu, echo (active/passive), (gpu)LiDAR, camera (info, rgb, depth, segmentation, annotation)) 
 
-Do note that the AirSim matlab client has almost all API functions available but not all are listed in this test script. For a full list see the source code fo the AirSimClient class. 
+Do note that the HERCULES matlab client has almost all API functions available but not all are listed in this test script. For a full list see the source code fo the AirSimClient class. 
 
 
 Do note the test script requires next to the toolboxes listed above in the Prerequisites the following Matlab toolboxes:

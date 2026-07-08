@@ -1,6 +1,6 @@
-# Instance Segmentation in Cosys-AirSim
+# Instance Segmentation in HERCULES
 
-An Instance segmentation system is implemented into Cosys-AirSim. It uses Proxy Mesh rendering to allow for each object in the world to get its own color.
+An Instance segmentation system is implemented into HERCULES. It uses Proxy Mesh rendering to allow for each object in the world to get its own color.
 
 ## Limitations
 * 2744000 different colors are currently available to be assigned to unique objects. If your environment during a run requires more colors, you will generate errors and new objects will be assigned color [0,0,0].
@@ -20,9 +20,9 @@ For a script that generates a full list of objects and their associated color, p
 
 When a new object is spawned in your environment by for example a c++ or blueprint extension you made,
 and you want it to work with the instance segmentation system, you can use the extended function `ASimModeBase::AddNewActorToSegmentation(AActor)` which is also available in blueprints.
-When controlling AirSim via RPC, the actor name must first be registered using `simAddSegmentationActor` before calling `simSetSegmentationObjectID` on that actor.
+When controlling HERCULES via RPC, the actor name must first be registered using `simAddSegmentationActor` before calling `simSetSegmentationObjectID` on that actor.
 
-Make sure to provide human-readable names to your objects in your environment as the ground truth tables that the AirSim API can provide will use your object naming to create the table.
+Make sure to provide human-readable names to your objects in your environment as the ground truth tables that the HERCULES API can provide will use your object naming to create the table.
 
 If you want to not label specific components/meshes of an actor, you can add the Unreal Tag `InstanceSegmentation_disable` to the components/meshes you want to ignore.
 

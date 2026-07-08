@@ -1,6 +1,6 @@
 # Image APIs
 
-Please read [general API doc](apis.md) first if you are not familiar with AirSim APIs.
+Please read [general API doc](apis.md) first if you are not familiar with HERCULES APIs.
 
 ## Getting a Single Image
 
@@ -58,7 +58,7 @@ responses = client.simGetImages([
  # do something with response which contains image data, pose, timestamp etc
 ```
 
-#### Using AirSim Images with NumPy
+#### Using HERCULES Images with NumPy
 
 If you plan to use numpy for image manipulation, you should get uncompressed RGB image and then convert to numpy like this:
 
@@ -126,9 +126,9 @@ int getStereoAndDepthImages()
 
 ### C++
 
-For a more complete ready to run sample code please see [sample code in HelloDrone project](https://github.com/Cosys-Lab/Cosys-AirSim/tree/main/HelloDrone/main.cpp) for multirotors or [HelloCar project](https://github.com/Cosys-Lab/Cosys-AirSim/tree/main/HelloCar/main.cpp). 
+For a more complete ready to run sample code please see [sample code in HelloDrone project](https://github.com/lunarlab-gatech/HERCULES/tree/main/HelloDrone/main.cpp) for multirotors or [HelloCar project](https://github.com/lunarlab-gatech/HERCULES/tree/main/HelloCar/main.cpp). 
 
-See also [other example code](https://github.com/Cosys-Lab/Cosys-AirSim/tree/main/Examples/DataCollection/StereoImageGenerator.hpp) that generates specified number of stereo images along with ground truth depth and disparity and saving it to [pfm format](pfm.md).
+See also [other example code](https://github.com/lunarlab-gatech/HERCULES/tree/main/Examples/DataCollection/StereoImageGenerator.hpp) that generates specified number of stereo images along with ground truth depth and disparity and saving it to [pfm format](pfm.md).
 
 ## Available Cameras
 
@@ -146,8 +146,8 @@ Before AirSim v1.2, cameras were accessed using ID numbers instead of names. For
 
 ## "Computer Vision" Mode
 
-You can use AirSim in so-called "Computer Vision" mode. In this mode, physics engine is disabled and there is no vehicle, just cameras (If you want to have the vehicle but without its kinematics, you can use the Multirotor mode with the Physics Engine [ExternalPhysicsEngine](settings.md##physicsenginename)). You can move around using keyboard (use F1 to see help on keys). You can press Record button to continuously generate images. Or you can call APIs to move cameras around and take images.
-You can use AirSim in so-called "Computer Vision" mode. In this mode, physics engine is disabled. It has a standard set of cameras and can have any sensor added similar to other vehicles.  You can move around using keyboard (use F1 to see help on keys, additionally use left shift to go faster and spacebar to hold in place (handy for when moving camera manually). You can press Record button to continuously generate images. Or you can call APIs to move cameras around and take images.
+You can use HERCULES in so-called "Computer Vision" mode. In this mode, physics engine is disabled and there is no vehicle, just cameras (If you want to have the vehicle but without its kinematics, you can use the Multirotor mode with the Physics Engine [ExternalPhysicsEngine](settings.md##physicsenginename)). You can move around using keyboard (use F1 to see help on keys). You can press Record button to continuously generate images. Or you can call APIs to move cameras around and take images.
+You can use HERCULES in so-called "Computer Vision" mode. In this mode, physics engine is disabled. It has a standard set of cameras and can have any sensor added similar to other vehicles.  You can move around using keyboard (use F1 to see help on keys, additionally use left shift to go faster and spacebar to hold in place (handy for when moving camera manually). You can press Record button to continuously generate images. Or you can call APIs to move cameras around and take images.
 
 To active this mode, edit [settings.json](settings.md) that you can find in your `Documents\AirSim` folder (or `~/Documents/AirSim` on Linux) and make sure following values exist at root level:
 
@@ -242,7 +242,7 @@ When you specify `ImageType = DepthVis` in `ImageRequest`, you get an image that
 You normally want to retrieve disparity image as float (i.e. set `pixels_as_float = true` and specify `ImageType = DisparityNormalized` in `ImageRequest`) in which case each pixel is `(Xl - Xr)/Xmax`, which is thereby normalized to values between 0 to 1.
 
 ### Segmentation
-When you specify `ImageType = Segmentation` in `ImageRequest`, you get an image that gives you ground truth instance segmentation of the scene. At the startup, AirSim assigns a random color index to each mesh available in environment. You can disable this by setting the main parameter `InitialInstanceSegmentation` to false in the settings.json file. The RGB values for each color index ID can be retrieved from the API.
+When you specify `ImageType = Segmentation` in `ImageRequest`, you get an image that gives you ground truth instance segmentation of the scene. At the startup, HERCULES assigns a random color index to each mesh available in environment. You can disable this by setting the main parameter `InitialInstanceSegmentation` to false in the settings.json file. The RGB values for each color index ID can be retrieved from the API.
 
 You can assign a specific value to a specific mesh using APIs. For example, below Python code sets the object ID for the mesh called "Ground" to 20 in Blocks environment and hence changes its color in Segmentation view to the 20th color of the instance segmentation colormap:
 Note that this will not do a check if this color is already assigned to a different object! 
@@ -252,7 +252,7 @@ success = client.simSetSegmentationObjectID("Ground", 20)
 
 The return value is a boolean type that lets you know if the mesh was found.
 
-Notice that typical Unreal environments, like Blocks, usually have many other meshes that comprises of same object, for example, "Ground_2", "Ground_3" and so on. As it is tedious to set object ID for all of these meshes, AirSim also supports regular expressions. For example, the code below sets all meshes which have names starting with "ground" (ignoring case) to 21 with just one line:
+Notice that typical Unreal environments, like Blocks, usually have many other meshes that comprises of same object, for example, "Ground_2", "Ground_3" and so on. As it is tedious to set object ID for all of these meshes, HERCULES also supports regular expressions. For example, the code below sets all meshes which have names starting with "ground" (ignoring case) to 21 with just one line:
 
 ```python
 success = client.simSetSegmentationObjectID("ground[\w]*", 21, True)
@@ -291,10 +291,10 @@ An extension to `simListInstanceSegmentationObjects()` is `simListInstanceSegmen
 Once you decide on the meshes you are interested, note down their names and use above API to set their object IDs. T
 
 #### Changing Colors for Object IDs
-At present the color for each object ID is fixed as in [this pallet](https://github.com/Cosys-Lab/Cosys-AirSim/blob/main/Unreal/Plugins/AirSim/Content/HUDAssets/seg_color_palette.png). We will be adding ability to change colors for object IDs to desired values shortly. In the meantime you can open the segmentation image in your favorite image editor and get the RGB values you are interested in.
+At present the color for each object ID is fixed as in [this pallet](https://github.com/lunarlab-gatech/HERCULES/blob/main/Unreal/Plugins/AirSim/Content/HUDAssets/seg_color_palette.png). We will be adding ability to change colors for object IDs to desired values shortly. In the meantime you can open the segmentation image in your favorite image editor and get the RGB values you are interested in.
 
 #### Startup Object IDs
-At the start, AirSim assigns color indexes to each object found in environment of type `UStaticMeshComponent` or `USkinnedMeshComponent`. It then makes an understandable naming depending on the hierarchy the object belong to in the Unreal World (example _box_2_fullpalletspawner_5_pallet_4_ or _door_window_door_38_ ).
+At the start, HERCULES assigns color indexes to each object found in environment of type `UStaticMeshComponent` or `USkinnedMeshComponent`. It then makes an understandable naming depending on the hierarchy the object belong to in the Unreal World (example _box_2_fullpalletspawner_5_pallet_4_ or _door_window_door_38_ ).
 
 #### Getting Object ID for Mesh
 The `simGetSegmentationObjectID` API allows you get object ID for given mesh name.
@@ -309,7 +309,7 @@ Currently, this is just a map from object ID to grey scale 0-255. So any mesh wi
 These image types return information about motion perceived by the point of view of the camera. OpticalFlow returns a 2-channel image where the channels correspond to vx and vy respectively. OpticalFlowVis is similar to OpticalFlow but converts flow data to RGB for a more 'visual' output.
 
 ### Object Detection
-This feature lets you generate object detection using existing cameras in AirSim, find more info [here](object_detection.md).
+This feature lets you generate object detection using existing cameras in HERCULES, find more info [here](object_detection.md).
 
 ### Annotation
 The annotation system allows you to choose different groundtruth labeling techniques to create more data from your simulation. Find more info [here](annotation.md).

@@ -1,13 +1,13 @@
 # Creating and Setting Up Unreal Environment
-This page contains the complete instructions start to finish for setting up Unreal environment with AirSim. The Unreal Marketplace has [several environment](https://www.unrealengine.com/marketplace/content-cat/assets/environments) available that you can start using in just few minutes. It is also possible to use environments available on websites such as [turbosquid.com](https://www.turbosquid.com/) or [cgtrader.com](https://www.cgtrader.com/) with bit more effort (here's [tutorial video](https://www.youtube.com/watch?v=y09VbdQWvQY&feature)). In addition, there also several [free environments](https://github.com/Microsoft/AirSim/issues/424) available.
+This page contains the complete instructions start to finish for setting up Unreal environment with HERCULES. The Unreal Marketplace has [several environment](https://www.unrealengine.com/marketplace/content-cat/assets/environments) available that you can start using in just few minutes. It is also possible to use environments available on websites such as [turbosquid.com](https://www.turbosquid.com/) or [cgtrader.com](https://www.cgtrader.com/) with bit more effort (here's [tutorial video](https://www.youtube.com/watch?v=y09VbdQWvQY&feature)). In addition, there also several [free environments](https://github.com/Microsoft/AirSim/issues/424) available.
 
 Below we will use a freely downloadable environment from Unreal Marketplace called Landscape Mountain but the steps are same for any other environments.
 
 ## Note for Linux Users
 There is no `Epic Games Launcher` for Linux which means that if you need to create custom environment, you will need Windows machine to do that. Once you have Unreal project folder, just copy it over to your Linux machine.
 
-## Step-by-Step Instructions when using Cosys-AirSim from Precompiled Binaries
-1. It is assumed you downloaded the right precompiled Cosys-AirSim plugin from the [GitHub releases page](https://github.com/Cosys-Lab/Cosys-AirSim/releases) for the right Unreal version.
+## Step-by-Step Instructions when using HERCULES from Precompiled Binaries
+1. It is assumed you downloaded the right precompiled Cosys-AirSim plugin from the [GitHub releases page](https://github.com/lunarlab-gatech/HERCULES/releases) for the right Unreal version.
 2. In `Epic Games Launcher` click the Samples tab then scroll down and find `Landscape Mountains`. Click the `Create Project` and download this content (~2GB download). 
 
     ![current version](images/landscape_mountains.png)
@@ -65,9 +65,9 @@ There is no `Epic Games Launcher` for Linux which means that if you need to crea
 
 11. Be sure to `Save` these edits. Hit the Play button in the Unreal Editor. See the other documentation pages for how to use it.
 
-## Step-by-Step Instructions when using Cosys-AirSim from Source Build
+## Step-by-Step Instructions when using HERCULES from Source Build
 
-1. Make sure AirSim is built and Unreal 5.X is installed as described in [the installation instructions](install_windows.md).
+1. Make sure HERCULES is built and Unreal 5.X is installed as described in [the installation instructions](install_windows.md).
 2. In `Epic Games Launcher` click the Samples tab then scroll down and find `Landscape Mountains`. Click the `Create Project` and download this content (~2GB download). 
 
     ![current version](images/landscape_mountains.png)
@@ -82,11 +82,11 @@ There is no `Epic Games Launcher` for Linux which means that if you need to crea
 
 4. From the `File menu` select `New C++ class`, leave default `None` on the type of class, click `Next`, leave default name `MyClass`, and click `Create Class`. We need to do this because Unreal requires at least one source file in project. It should trigger compile and open up Visual Studio solution `LandscapeMountains.sln`.
 
-5. Go to your folder for AirSim repo and copy `Unreal\Plugins` folder in to your `LandscapeMountains` folder. This way now your own Unreal project has AirSim plugin.
+5. Go to your folder for HERCULES repo and copy `Unreal\Plugins` folder in to your `LandscapeMountains` folder. This way now your own Unreal project has AirSim plugin.
 
     !!!note
 
-        If the AirSim installation is fresh, i.e, hasn't been built before, make sure that you run `build.cmd` from the root directory once before copying `Unreal\Plugins` folder so that `AirLib` files are also included. If you have made some changes in the Blocks environment, make sure to run `update_to_git.bat` from `Unreal\Environments\Blocks` to update the files in `Unreal\Plugins`.
+        If the HERCULES installation is fresh, i.e, hasn't been built before, make sure that you run `build.cmd` from the root directory once before copying `Unreal\Plugins` folder so that `AirLib` files are also included. If you have made some changes in the Blocks environment, make sure to run `update_to_git.bat` from `Unreal\Environments\Blocks` to update the files in `Unreal\Plugins`.
 
 6. Edit the `LandscapeMountains.uproject` so that it looks like this
 
@@ -161,18 +161,18 @@ There is no `Epic Games Launcher` for Linux which means that if you need to crea
 
 14. Be sure to `Save` these edits. Hit the Play button in the Unreal Editor. See the other documentation pages for how to use it.
 
-Congratulations! You are now running AirSim in your own Unreal environment.
+Congratulations! You are now running HERCULES in your own Unreal environment.
 
-#### Updating Your Environment to Latest Version of AirSim
-Once you have your environment using above instructions, you should frequently update your local AirSim code to latest version from GitHub. Below are the instructions to do this:
+#### Updating Your Environment to Latest Version of HERCULES
+Once you have your environment using above instructions, you should frequently update your local HERCULES code to latest version from GitHub. Below are the instructions to do this:
 
-1. First put [clean.bat](https://github.com/Cosys-Lab/Cosys-AirSim/blob/main/Unreal/Environments/Blocks/clean.bat) (or [clean.sh](https://github.com/Cosys-Lab/Cosys-AirSim/blob/main/Unreal/Environments/Blocks/clean.sh) for Linux users) in the root folder of your environment. Run this file to clean up all intermediate files in your Unreal project.
-2. Do `git pull` in your AirSim repo followed by `build.cmd` (or `./build.sh` for Linux users).
+1. First put [clean.bat](https://github.com/lunarlab-gatech/HERCULES/blob/main/Unreal/Environments/Blocks/clean.bat) (or [clean.sh](https://github.com/lunarlab-gatech/HERCULES/blob/main/Unreal/Environments/Blocks/clean.sh) for Linux users) in the root folder of your environment. Run this file to clean up all intermediate files in your Unreal project.
+2. Do `git pull` in your HERCULES repo followed by `build.cmd` (or `./build.sh` for Linux users).
 3. Replace [your project]/Plugins folder with AirSim/Unreal/Plugins folder.
 4. Right-click on your .uproject file and chose "Generate Visual Studio project files" option. This is not required for Linux.
 
 ## Choosing Your Vehicle: Car or Multirotor
-By default, AirSim prompts user for which vehicle to use. You can easily change this by setting [SimMode](settings.md#SimMode). Please see [using car](using_car.md) guide.
+By default, HERCULES prompts user for which vehicle to use. You can easily change this by setting [SimMode](settings.md#SimMode). Please see [using car](using_car.md) guide.
 
 ## Unreal Scene camera bug
 Note that Unreal 5.3 and higher breaks camera scene rendering when Effects is not set to the Epic scalability preset. You can use the console command r.DetailMode 2 to fix this at runtime!
@@ -206,7 +206,7 @@ but you can use any environment. Another free environment is [Infinity Blade ser
 #### When I press Play button some kind of video starts instead of my vehicle.
 If the environment comes with MatineeActor, delete it to avoid any startup demo sequences. There might be other ways to remove it as well, for example, click on Blueprints button, then Level Blueprint and then look at Begin Play event in Event Graph. You might want to disconnect any connections that may be starting "matinee".
 
-#### Is there easy way to sync code in my Unreal project with code in AirSim repo?
+#### Is there easy way to sync code in my Unreal project with code in HERCULES repo?
 Sure, there is! You can find a bunch of `.bat` files (for linux, `.sh`) in `AirSim\Unreal\Environments\Blocks`. Just copy them over to your own Unreal project. Most of these are quite simple and self-explanatory.
 
 #### I get some error about map.
@@ -215,7 +215,7 @@ You might have to set default map for your project. For example, if you are usin
 #### I see "Add to project" option for environment but not "Create project" option.
 In this case, create a new blank C++ project with no Starter Content and add your environment in to it.
 
-#### I already have my own Unreal project. How do I use AirSim with it?
+#### I already have my own Unreal project. How do I use HERCULES with it?
 Copy the `Unreal\Plugins` folder from the build you did in the above section into the root of your Unreal project's folder. In your Unreal project's .uproject file, add the key `AdditionalDependencies` to the "Modules" object
 as we showed in the `LandscapeMountains.uproject` above.
 ```json

@@ -1,4 +1,4 @@
-# Setup Dynamic Objects for Scenario Environments for Cosys-AirSim
+# Setup Dynamic Objects for Scenario Environments for HERCULES
 
 The available environments often feature some custom-made dynamic blueprints that can be used to create random but deterministic change in your environment. 
 
@@ -34,7 +34,7 @@ The seed and these other settings can be controlled both in standalone(build pac
 
 
 ### Start Point
-In order for your environment to have multiple starting points, the _Dynamic World Master_ can be configured to teleport the AirSim vehicle after launch to one of several manually defined starting points.
+In order for your environment to have multiple starting points, the _Dynamic World Master_ can be configured to teleport the HERCULES vehicle after launch to one of several manually defined starting points.
 To define a new startpoint in your environment, place objects of the type _Target Point_ in your environment. At launch these will be marked as potential staring points for the simulator.
 They are used in order that they appear in the World Outliner.
 
