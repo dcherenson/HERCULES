@@ -88,7 +88,11 @@ nav:
     - "Heterogeneous UAV–UGV Autonomy": 'heterogeneous_autonomy.md'
     - "LWIR Thermal Camera": 'lwir_camera.md'
     - "Night-Vision Camera": 'night_vision.md'
-    - "Dynamic Environmental Phenomena": 'dynamic_phenomena.md'
+    - "Dynamic Environmental Phenomena":
+      - "Overview": 'dynamic_phenomena.md'
+      - "Wildfire Blueprint": 'blueprint_wildfire.md'
+      - "Flood Blueprint": 'blueprint_flood.md'
+      - "Crop Disease Blueprint": 'blueprint_crop_disease.md'
     - "Collaborative SLAM (ROMAN)": 'collaborative_slam.md'
     - "Cooperative Perception (DAIR-V2X)": 'cooperative_perception.md'
     - "Multimodal Dataset": 'dataset.md'

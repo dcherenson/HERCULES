@@ -49,6 +49,7 @@ A novel autonomous waypoint-tracking UGV controller mirrors the UAV interface, e
 - [Cooperative Perception](#cooperative-perception)
 - [Multimodal Dataset](#multimodal-dataset)
 - [Dataset](#dataset)
+- [Roadmap](#roadmap)
 - [Citation](#citation)
 - [Acknowledgements](#acknowledgements)
 - [License](#license)
@@ -172,6 +173,16 @@ Beyond the inherited Cosys-AirSim sensor suite (RGB, depth, semantic segmentatio
 </tr>
 </table>
 
+**Download & use the custom Blueprints** — each phenomenon ships as a parameterized Unreal Blueprint you can drop into your own project:
+
+<div align="center">
+
+[![Wildfire Blueprint](https://img.shields.io/badge/Wildfire-Blueprint%20Guide-e25822?style=for-the-badge&logo=unrealengine&logoColor=white)](https://lunarlab-gatech.github.io/HERCULES/blueprint_wildfire/)
+[![Flood Blueprint](https://img.shields.io/badge/Flood-Blueprint%20Guide-1f6feb?style=for-the-badge&logo=unrealengine&logoColor=white)](https://lunarlab-gatech.github.io/HERCULES/blueprint_flood/)
+[![Crop Disease Blueprint](https://img.shields.io/badge/Crop%20Disease-Blueprint%20Guide-3fb950?style=for-the-badge&logo=unrealengine&logoColor=white)](https://lunarlab-gatech.github.io/HERCULES/blueprint_crop_disease/)
+
+</div>
+
 ---
 
 ## Collaborative SLAM
@@ -263,6 +274,21 @@ Time-synchronized, multimodal sequences (RGB, depth, semantic segmentation, LiDA
 **➡️ [huggingface.co/datasets/GeorgiaTech/HERCULES](https://huggingface.co/datasets/GeorgiaTech/HERCULES)**
 
 Data is exported in standard formats (KITTI-style layouts and ROS 2 bags) via the built-in dataset-collection pipeline.
+
+---
+
+## Roadmap
+
+HERCULES is under active development — here's what's in progress and coming next:
+
+- [ ] **Custom phenomenon Blueprints** — publish the downloadable wildfire, flood, and crop-disease Blueprints (the linked pages above are placeholders for now).
+- [ ] **Collaborative SLAM benchmark** — release the ROMAN evaluation scripts and configs.
+- [ ] **Cooperative perception baselines** — release the DAIR-V2X-style multi-view 3D detection code.
+- [ ] **Multimodal dataset** — upload the full desert / forest / city sequences to Hugging Face.
+- [ ] **Sensor setup docs** — expand the LWIR and night-vision configuration and parameter references.
+- [ ] **Additional dynamic agents & environments** — more MetaHuman / VehicleAI / AnimalAI presets.
+
+Suggestions or bugs? [Open an issue](https://github.com/lunarlab-gatech/HERCULES/issues).
 
 ---
 

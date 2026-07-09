@@ -4,12 +4,16 @@ HERCULES exposes parameterized **dynamic-environment modules** and **dynamic-age
 
 ## Phenomena
 
+Each phenomenon is packaged as a downloadable, parameterized Unreal **Blueprint** you can drop into your own project — see the per-phenomenon pages below for download and usage.
+
 === "Wildfire spread"
 
     Fire propagates through the environment over time, coupling naturally with the [LWIR thermal](lwir_camera.md) and [night-vision](night_vision.md) sensors for detection and monitoring scenarios.
 
     ![Wildfire spreading through a forest](media/forestfire1.gif)
     ![Fire over a Cesium model of Pasadena at night](media/caltech_fire_1drone_night.gif)
+
+    [:material-download: Wildfire Blueprint — download & usage](blueprint_wildfire.md){ .md-button .md-button--primary }
 
 === "Flood inundation"
 
@@ -18,11 +22,15 @@ HERCULES exposes parameterized **dynamic-environment modules** and **dynamic-age
     ![Flood inundation over a Cesium model of Atlanta](media/Atlanta_hercules_flooding_demo1.gif)
     ![Flood inundation in a dense jungle](media/jungleenv_flooding_1.gif)
 
+    [:material-download: Flood Blueprint — download & usage](blueprint_flood.md){ .md-button .md-button--primary }
+
 === "Crop-disease transmission"
 
     Disease spreads across agricultural terrain, driving precision-agriculture and monitoring scenarios.
 
     ![Crop disease transmission across farmland](media/phenom_cropdisease.png)
+
+    [:material-download: Crop Disease Blueprint — download & usage](blueprint_crop_disease.md){ .md-button .md-button--primary }
 
 ## Dynamic agents
 
