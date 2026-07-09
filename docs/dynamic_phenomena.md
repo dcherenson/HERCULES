@@ -34,10 +34,14 @@ Each phenomenon is packaged as a downloadable, parameterized Unreal **Blueprint*
 
 ## Dynamic agents
 
-Dynamic-agent Blueprints populate the world with moving entities that update the shared state at runtime:
+Dynamic-agent Blueprints populate the world with moving entities that update the shared state at runtime — each is a downloadable, parameterized Blueprint:
 
-- **MetaHuman pedestrians** — realistic walking agents.
-- **VehicleAI traffic** — autonomous vehicle traffic in the city world.
-- **AnimalAI wildlife** — kangaroos, deer, and other wildlife in the natural worlds.
+- **[Animal behavior](blueprint_animal_behavior.md)** (AnimalAI) — kangaroos, deer, and other wildlife in the natural worlds.
+- **[Pedestrian behavior](blueprint_pedestrian_behavior.md)** (MetaHuman) — realistic walking agents.
+- **[Vehicle behavior](blueprint_vehicle_behavior.md)** (VehicleAI) — autonomous vehicle traffic in the city world.
+
+[:material-download: Animal Behavior](blueprint_animal_behavior.md){ .md-button .md-button--primary }
+[:material-download: Pedestrian Behavior](blueprint_pedestrian_behavior.md){ .md-button .md-button--primary }
+[:material-download: Vehicle Behavior](blueprint_vehicle_behavior.md){ .md-button .md-button--primary }
 
 These integrate with the [environments](index.md#environments) and are designed to stress perception and planning under dynamic obstacles.

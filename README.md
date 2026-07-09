@@ -141,6 +141,16 @@ HERCULES ships with three photorealistic worlds — **desert, forest, and city**
 </tr>
 </table>
 
+**Populate any world with dynamic agents** — each ships as a custom behavior Blueprint you can drop into your own project:
+
+<div align="center">
+
+[![Animal Behavior](https://img.shields.io/badge/Animal-Behavior%20Blueprint-2ea043?style=for-the-badge&logo=unrealengine&logoColor=white)](https://lunarlab-gatech.github.io/HERCULES/blueprint_animal_behavior/)
+[![Pedestrian Behavior](https://img.shields.io/badge/Pedestrian%2FHuman-Behavior%20Blueprint-8957e5?style=for-the-badge&logo=unrealengine&logoColor=white)](https://lunarlab-gatech.github.io/HERCULES/blueprint_pedestrian_behavior/)
+[![Vehicle Behavior](https://img.shields.io/badge/Vehicle-Behavior%20Blueprint-db6d28?style=for-the-badge&logo=unrealengine&logoColor=white)](https://lunarlab-gatech.github.io/HERCULES/blueprint_vehicle_behavior/)
+
+</div>
+
 ---
 
 ## Sensors & Phenomena

@@ -93,6 +93,10 @@ nav:
       - "Wildfire Blueprint": 'blueprint_wildfire.md'
       - "Flood Blueprint": 'blueprint_flood.md'
       - "Crop Disease Blueprint": 'blueprint_crop_disease.md'
+    - "Dynamic Agents":
+      - "Animal Behavior Blueprint": 'blueprint_animal_behavior.md'
+      - "Pedestrian Behavior Blueprint": 'blueprint_pedestrian_behavior.md'
+      - "Vehicle Behavior Blueprint": 'blueprint_vehicle_behavior.md'
     - "Collaborative SLAM (ROMAN)": 'collaborative_slam.md'
     - "Cooperative Perception (DAIR-V2X)": 'cooperative_perception.md'
     - "Multimodal Dataset": 'dataset.md'
