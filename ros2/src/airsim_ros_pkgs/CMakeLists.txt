@@ -16,6 +16,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(rosgraph_msgs REQUIRED)
 find_package(mavros_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(ament_cmake REQUIRED)
@@ -119,8 +120,24 @@ ament_target_dependencies(airsim_ros
 # hercules node______
 add_executable(hercules_node src/airsim_node_hercules.cpp)
 target_link_libraries(hercules_node hercules_ros AirLib)
-ament_target_dependencies(hercules_node 
+ament_target_dependencies(hercules_node
   rclcpp
+)
+# _______________________________
+
+# hercules SYNCED node (atomic / lockstep, DepthPlanar, shared-stamp) ______
+# Self-contained: drives AirLib directly, re-derives the same topic/TF interface as
+# hercules_node so hercules_nav_bridge works unchanged. Does NOT use hercules_ros.
+add_executable(hercules_synced_node src/airsim_node_hercules_synced.cpp)
+target_link_libraries(hercules_synced_node AirLib)
+ament_target_dependencies(hercules_synced_node
+  rclcpp
+  tf2
+  tf2_ros
+  geometry_msgs
+  nav_msgs
+  sensor_msgs
+  rosgraph_msgs
 )
 # _______________________________
 
@@ -149,7 +166,7 @@ ament_target_dependencies(pd_position_controller_simple_node
 # rosidl_target_interfaces(pd_position_controller_simple_node
 #   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
-install(TARGETS airsim_node hercules_node pd_position_controller_simple_node
+install(TARGETS airsim_node hercules_node hercules_synced_node pd_position_controller_simple_node
   DESTINATION lib/${PROJECT_NAME})
 
 install(TARGETS airsim_ros hercules_ros pd_position_controller_simple
