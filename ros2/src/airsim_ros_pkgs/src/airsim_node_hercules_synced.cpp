@@ -37,6 +37,7 @@ STRICT_MODE_ON
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -73,6 +74,12 @@ public:
         cam_roll_ = declare_parameter<double>("camera_roll_deg", 0.0);
         cam_pitch_ = declare_parameter<double>("camera_pitch_deg", 0.0);
         cam_yaw_ = declare_parameter<double>("camera_yaw_deg", 0.0);
+        // Drive support: in lockstep, only the node's own client can move the car, so the
+        // node applies /cmd_vel-derived controls itself each step (external setCarControls
+        // is ignored while the sim is paused between steps).
+        enable_drive_ = declare_parameter<bool>("enable_drive", false);
+        max_forward_speed_ = declare_parameter<double>("max_forward_speed", 2.0);
+        max_yaw_rate_ = declare_parameter<double>("max_yaw_rate", 1.2);
 
         const std::string prefix = "/hercules_node/" + vehicle_name_;
         odom_frame_id_ = vehicle_name_ + "/ground_truth/odom_local";
@@ -101,6 +108,19 @@ public:
         connect();
         precompute_camera_tf();
 
+        if (enable_drive_) {
+            try { client_->enableApiControl(true, vehicle_name_); } catch (...) {}
+            cmd_vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
+                "/cmd_vel", 10,
+                [this](geometry_msgs::msg::Twist::SharedPtr m) {
+                    double t = m->linear.x / std::max(1e-6, max_forward_speed_);
+                    double s = m->angular.z / std::max(1e-6, max_yaw_rate_);
+                    cmd_throttle_.store(std::max(-1.0, std::min(1.0, t)));
+                    cmd_steering_.store(std::max(-1.0, std::min(1.0, s)));
+                });
+            RCLCPP_INFO(get_logger(), "hercules_synced_node: drive enabled, applying /cmd_vel each step.");
+        }
+
         if (sync_mode_ == "lockstep") {
             RCLCPP_WARN(get_logger(),
                         "hercules_synced_node: LOCKSTEP mode pauses and single-steps the sim (dt=%.4f).", sync_dt_);
@@ -121,11 +141,38 @@ public:
             lockstep_thread_.join();
         }
         try {
+            if (client_ && enable_drive_) {
+                msr::airlib::CarApiBase::CarControls stop;
+                stop.throttle = 0.0;
+                stop.brake = 1.0;
+                client_->setCarControls(stop, vehicle_name_);
+                client_->enableApiControl(false, vehicle_name_);
+            }
             if (client_ && sync_mode_ == "lockstep") {
                 client_->simPause(false);
             }
         } catch (...) {
         }
+    }
+
+    void apply_controls()
+    {
+        if (!enable_drive_) {
+            return;
+        }
+        msr::airlib::CarApiBase::CarControls ctrl;
+        double t = cmd_throttle_.load();
+        ctrl.steering = cmd_steering_.load();
+        if (t >= 0.0) {
+            ctrl.throttle = t;
+            ctrl.brake = 0.0;
+        } else {
+            ctrl.is_manual_gear = true;
+            ctrl.manual_gear = -1;
+            ctrl.throttle = -t;
+            ctrl.brake = 0.0;
+        }
+        try { client_->setCarControls(ctrl, vehicle_name_); } catch (...) {}
     }
 
 private:
@@ -146,6 +193,7 @@ private:
     void atomic_cycle()
     {
         try {
+            apply_controls();
             const auto car_state = client_->getCarState(vehicle_name_);
             const rclcpp::Time stamp(static_cast<int64_t>(car_state.timestamp));
             publish_all(car_state, stamp);
@@ -157,14 +205,20 @@ private:
 
     void lockstep_loop()
     {
-        uint64_t step = 0;
+        // Drive-freeze-capture: a PhysXCar needs RUNNING physics to move, so simply
+        // stepping (simContinueForTime) can't drive it. Instead we unpause for a short
+        // window (car drives with the running physics), then freeze and read every sensor
+        // at that single frozen instant -> pose/depth/seg/lidar share one true sim time
+        // (0 skew), but the vehicle still moves between captures. Stamp everything with
+        // the frozen car_state.timestamp (real sim time, monotonic -> valid /clock).
         while (running_ && rclcpp::ok()) {
             try {
-                client_->simContinueForTime(sync_dt_);
-                step++;
-                const int64_t ns = static_cast<int64_t>(static_cast<double>(step) * sync_dt_ * 1e9);
-                const rclcpp::Time stamp(ns);
+                apply_controls();
+                client_->simPause(false);
+                std::this_thread::sleep_for(std::chrono::duration<double>(sync_dt_));
+                client_->simPause(true);
                 const auto car_state = client_->getCarState(vehicle_name_);
+                const rclcpp::Time stamp(static_cast<int64_t>(car_state.timestamp));
                 publish_all(car_state, stamp);
             } catch (rpc::rpc_error &e) {
                 RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "RPC error: %s",
@@ -416,6 +470,11 @@ private:
     double sync_dt_, fov_degrees_;
     bool publish_clock_, is_rgb_;
     double cam_x_, cam_y_, cam_z_, cam_roll_, cam_pitch_, cam_yaw_;
+    bool enable_drive_ = false;
+    double max_forward_speed_ = 2.0, max_yaw_rate_ = 1.2;
+    std::atomic<double> cmd_throttle_{0.0};
+    std::atomic<double> cmd_steering_{0.0};
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
 
     // frame ids
     std::string odom_frame_id_, lidar_frame_id_, camera_body_frame_id_, camera_optical_frame_id_;
