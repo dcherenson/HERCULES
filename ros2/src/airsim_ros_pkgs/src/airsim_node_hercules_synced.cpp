@@ -2,14 +2,21 @@
 //
 // A synchronized sibling to hercules_node. Instead of the async wrapper's independent
 // per-stream timers against a free-running sim, this node reads pose/odom, DepthPlanar,
-// segmentation and LiDAR in ONE RPC cycle and stamps every message + TF with a single
-// shared timestamp. This removes the pose/image temporal skew (root cause A) and it
+// segmentation and LiDAR in ONE RPC render cycle and stamps every message + TF with a
+// single shared timestamp. This removes the pose/image temporal skew (root cause A) and it
 // requests DepthPlanar (planar Z), so the mappers need no perspective->planar conversion
 // (root cause B).
 //
-//   sync_mode = "atomic"   : one RPC cycle per wall-timer tick, shared capture stamp.
-//   sync_mode = "lockstep" : simPause + simContinueForTime(dt) per tick; everything is
-//                            stamped with monotonic sim time t = step*dt. STEPS THE SIM.
+//   sync_mode = "atomic"   : one best-effort RPC cycle per wall-timer tick (legacy async).
+//   sync_mode = "lockstep" : mirrors PythonClient/hero/data_collection/
+//                            hercules_multi_vehicle_data_collector.py. Pause once, then per
+//                            tick simContinueForTime(dt) to advance SIM time, and BLOCK
+//                            (re-request the same simGetImages / getLidarData without
+//                            stepping) until every image + the lidar are non-empty. Sim time
+//                            NEVER advances without complete valid data, so "sync drops" are
+//                            structurally impossible. Wall-clock time is irrelevant; running
+//                            slower than real time is expected. Everything is stamped with
+//                            monotonic sim time t = step*dt.
 //
 // It re-derives the SAME topic/TF interface hercules_node exposes so hercules_nav_bridge
 // works unchanged. It does NOT touch hercules_ros_wrapper / hercules_node.
@@ -24,10 +31,13 @@ STRICT_MODE_ON
 
 #include "vehicles/car/api/CarRpcLibClient.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -50,6 +60,13 @@ using ImageRequest = ImageCaptureBase::ImageRequest;
 using ImageResponse = ImageCaptureBase::ImageResponse;
 using ImageType = ImageCaptureBase::ImageType;
 
+// Thrown when blocking acquisition exceeds the retry ceiling. The lockstep loop catches it,
+// logs it, and shuts the node down -- it must NEVER step the sim past incomplete data.
+struct AcquisitionTimeout : public std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
 class HerculesSyncedNode : public rclcpp::Node
 {
 public:
@@ -62,7 +79,8 @@ public:
         camera_name_ = declare_parameter<std::string>("camera_name", "front_center");
         lidar_name_ = declare_parameter<std::string>("lidar_name", "LidarSensor1");
         sync_mode_ = declare_parameter<std::string>("sync_mode", "atomic");
-        sync_dt_ = declare_parameter<double>("sync_dt", 0.05);
+        // dt is SIM time per tick, not wall time. Default 0.1 -> 10 Hz sim-rate data.
+        sync_dt_ = declare_parameter<double>("sync_dt", 0.1);
         publish_clock_ = declare_parameter<bool>("publish_clock", true);
         is_rgb_ = declare_parameter<bool>("is_vulkan", true); // Vulkan renderer -> rgb8
         fov_degrees_ = declare_parameter<double>("fov_degrees", 90.0);
@@ -74,12 +92,19 @@ public:
         cam_roll_ = declare_parameter<double>("camera_roll_deg", 0.0);
         cam_pitch_ = declare_parameter<double>("camera_pitch_deg", 0.0);
         cam_yaw_ = declare_parameter<double>("camera_yaw_deg", 0.0);
-        // Drive support: in lockstep, only the node's own client can move the car, so the
-        // node applies /cmd_vel-derived controls itself each step (external setCarControls
-        // is ignored while the sim is paused between steps).
+        // Drive support: apply /cmd_vel-derived controls before each step so the car drives
+        // during the simContinueForTime window.
         enable_drive_ = declare_parameter<bool>("enable_drive", false);
         max_forward_speed_ = declare_parameter<double>("max_forward_speed", 2.0);
         max_yaw_rate_ = declare_parameter<double>("max_yaw_rate", 1.2);
+        // Optional Scene RGB in the same render request vector (same frame as depth+seg).
+        include_scene_rgb_ = declare_parameter<bool>("include_scene_rgb", false);
+        // Blocking-acquisition safety ceiling. If a render never produces a valid frame we
+        // ABORT with a clear error instead of skipping data. ~2000 tries / 10 s.
+        retry_ceiling_ = declare_parameter<int>("retry_ceiling", 2000);
+        retry_timeout_s_ = declare_parameter<double>("retry_timeout_s", 10.0);
+        retry_sleep_ = declare_parameter<double>("retry_sleep_s", 0.003);
+        diag_interval_ = declare_parameter<int>("diag_interval_ticks", 50);
 
         const std::string prefix = "/hercules_node/" + vehicle_name_;
         odom_frame_id_ = vehicle_name_ + "/ground_truth/odom_local";
@@ -100,6 +125,9 @@ public:
         depth_pub_ = create_publisher<sensor_msgs::msg::Image>(prefix + "/" + camera_name_ + "_DepthPlanar/image", sensor);
         depth_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(prefix + "/" + camera_name_ + "_DepthPlanar/camera_info", latched);
         seg_pub_ = create_publisher<sensor_msgs::msg::Image>(prefix + "/" + camera_name_ + "_Segmentation/image", sensor);
+        if (include_scene_rgb_) {
+            scene_pub_ = create_publisher<sensor_msgs::msg::Image>(prefix + "/" + camera_name_ + "_Scene/image", sensor);
+        }
         if (publish_clock_) {
             clock_pub_ = create_publisher<rosgraph_msgs::msg::Clock>("/clock", rclcpp::QoS(rclcpp::KeepLast(1)));
         }
@@ -123,7 +151,9 @@ public:
 
         if (sync_mode_ == "lockstep") {
             RCLCPP_WARN(get_logger(),
-                        "hercules_synced_node: LOCKSTEP mode pauses and single-steps the sim (dt=%.4f).", sync_dt_);
+                        "hercules_synced_node: LOCKSTEP (collector pattern). simContinueForTime(dt=%.4f) "
+                        "then BLOCK until every image+lidar is valid. Runs at whatever real-time factor "
+                        "acquisition allows; sim time never advances past incomplete data.", sync_dt_);
             client_->simPause(true);
             lockstep_thread_ = std::thread(&HerculesSyncedNode::lockstep_loop, this);
         } else {
@@ -188,38 +218,130 @@ private:
         }
     }
 
-    // ---- one shared-timestamp cycle: pose+odom, DepthPlanar, segmentation, LiDAR ----
-
-    void atomic_cycle()
+    // ---- request vector: [Scene?, DepthPlanar(float), Segmentation], one render frame ----
+    std::vector<ImageRequest> image_requests() const
     {
-        try {
-            apply_controls();
-            const auto car_state = client_->getCarState(vehicle_name_);
-            const rclcpp::Time stamp(static_cast<int64_t>(car_state.timestamp));
-            publish_all(car_state, stamp);
-        } catch (rpc::rpc_error &e) {
-            RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "RPC error: %s",
-                                  e.get_error().as<std::string>().c_str());
+        std::vector<ImageRequest> reqs;
+        if (include_scene_rgb_) {
+            reqs.emplace_back(camera_name_, ImageType::Scene, false, false);
         }
+        reqs.emplace_back(camera_name_, ImageType::DepthPlanar, true, false); // pixels_as_float
+        reqs.emplace_back(camera_name_, ImageType::Segmentation, false, false);
+        return reqs;
     }
 
+    static bool image_valid(const ImageResponse &r)
+    {
+        if (r.width == 0 || r.height == 0) {
+            return false;
+        }
+        return r.pixels_as_float ? !r.image_data_float.empty() : !r.image_data_uint8.empty();
+    }
+
+    // Returns the name of the first empty image in the response set, "" if all valid.
+    std::string first_missing_image(const std::vector<ImageResponse> &responses, size_t expected) const
+    {
+        if (responses.size() != expected) {
+            return "response-count-mismatch";
+        }
+        size_t idx = 0;
+        if (include_scene_rgb_) {
+            if (!image_valid(responses[idx])) return "Scene";
+            idx++;
+        }
+        if (!image_valid(responses[idx])) return "DepthPlanar";
+        idx++;
+        if (!image_valid(responses[idx])) return "Segmentation";
+        return "";
+    }
+
+    // Collector-style get_nonempty_images: ONE request vector, re-request WITHOUT stepping the
+    // sim until every image is non-empty. Rendering continues while paused, so this converges.
+    std::vector<ImageResponse> acquire_images_blocking(int &out_retries)
+    {
+        const auto reqs = image_requests();
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int attempt = 0; running_ && rclcpp::ok(); ++attempt) {
+            std::vector<ImageResponse> responses = client_->simGetImages(reqs, vehicle_name_);
+            const std::string missing = first_missing_image(responses, reqs.size());
+            if (missing.empty()) {
+                out_retries = attempt;
+                return responses;
+            }
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (attempt + 1 >= retry_ceiling_ || elapsed >= retry_timeout_s_) {
+                throw AcquisitionTimeout(
+                    "image type '" + missing + "' still empty after " + std::to_string(attempt + 1)
+                    + " retries / " + std::to_string(elapsed) + " s -- render never produced a valid "
+                    "frame. Aborting rather than stepping the sim past incomplete data.");
+            }
+            std::this_thread::sleep_for(std::chrono::duration<double>(retry_sleep_));
+        }
+        throw AcquisitionTimeout("image acquisition interrupted before a valid frame arrived.");
+    }
+
+    // Collector-style get_nonempty_lidar: re-request WITHOUT stepping until non-empty.
+    msr::airlib::LidarData acquire_lidar_blocking(int &out_retries)
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int attempt = 0; running_ && rclcpp::ok(); ++attempt) {
+            msr::airlib::LidarData ld = client_->getLidarData(lidar_name_, vehicle_name_);
+            if (ld.point_cloud.size() >= 3) {
+                out_retries = attempt;
+                return ld;
+            }
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (attempt + 1 >= retry_ceiling_ || elapsed >= retry_timeout_s_) {
+                throw AcquisitionTimeout(
+                    "LiDAR '" + lidar_name_ + "' empty after " + std::to_string(attempt + 1)
+                    + " retries / " + std::to_string(elapsed) + " s. Aborting rather than stepping "
+                    "the sim past incomplete data.");
+            }
+            std::this_thread::sleep_for(std::chrono::duration<double>(retry_sleep_));
+        }
+        throw AcquisitionTimeout("lidar acquisition interrupted before a valid sweep arrived.");
+    }
+
+    // ---- lockstep: mirror the collector's step-then-block-until-complete loop ----
     void lockstep_loop()
     {
-        // Drive-freeze-capture: a PhysXCar needs RUNNING physics to move, so simply
-        // stepping (simContinueForTime) can't drive it. Instead we unpause for a short
-        // window (car drives with the running physics), then freeze and read every sensor
-        // at that single frozen instant -> pose/depth/seg/lidar share one true sim time
-        // (0 skew), but the vehicle still moves between captures. Stamp everything with
-        // the frozen car_state.timestamp (real sim time, monotonic -> valid /clock).
+        // Sim is already paused (constructor). From here sim time only advances via
+        // simContinueForTime; acquisition never steps it. dt is SIM seconds per tick.
+        uint64_t step = 0;
         while (running_ && rclcpp::ok()) {
+            const auto tick_t0 = std::chrono::steady_clock::now();
             try {
                 apply_controls();
-                client_->simPause(false);
-                std::this_thread::sleep_for(std::chrono::duration<double>(sync_dt_));
-                client_->simPause(true);
+                client_->simContinueForTime(sync_dt_); // advance SIM by dt, then frozen
+                step++;
+                const int64_t t_ns = static_cast<int64_t>(static_cast<double>(step) * sync_dt_ * 1e9);
+                const rclcpp::Time stamp(t_ns);
+
+                int img_retries = 0;
+                std::vector<ImageResponse> images = acquire_images_blocking(img_retries);
+                int lidar_retries = 0;
+                msr::airlib::LidarData lidar = acquire_lidar_blocking(lidar_retries);
                 const auto car_state = client_->getCarState(vehicle_name_);
-                const rclcpp::Time stamp(static_cast<int64_t>(car_state.timestamp));
-                publish_all(car_state, stamp);
+
+                if (publish_clock_) {
+                    rosgraph_msgs::msg::Clock clk;
+                    clk.clock = stamp;
+                    clock_pub_->publish(clk);
+                }
+                publish_odom_and_tf(car_state, stamp);
+                publish_images(images, stamp);
+                publish_lidar(lidar, stamp);
+
+                const double tick_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - tick_t0).count();
+                record_tick_diag(step, img_retries + lidar_retries, tick_ms);
+            } catch (const AcquisitionTimeout &e) {
+                RCLCPP_FATAL(get_logger(),
+                             "hercules_synced_node: %s Shutting down.", e.what());
+                rclcpp::shutdown();
+                return;
             } catch (rpc::rpc_error &e) {
                 RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "RPC error: %s",
                                       e.get_error().as<std::string>().c_str());
@@ -227,16 +349,52 @@ private:
         }
     }
 
-    void publish_all(const msr::airlib::CarApiBase::CarState &car_state, const rclcpp::Time &stamp)
+    void record_tick_diag(uint64_t step, int retries, double tick_ms)
     {
-        if (publish_clock_) {
-            rosgraph_msgs::msg::Clock clk;
-            clk.clock = stamp;
-            clock_pub_->publish(clk);
+        tick_ms_window_.push_back(tick_ms);
+        total_retries_ += retries;
+        if (static_cast<int>(tick_ms_window_.size()) < std::max(1, diag_interval_)) {
+            return;
         }
-        publish_odom_and_tf(car_state, stamp);
-        publish_images(stamp);
-        publish_lidar(stamp);
+        std::vector<double> w = tick_ms_window_;
+        std::sort(w.begin(), w.end());
+        const double med = w[w.size() / 2];
+        const double p95 = w[std::min(w.size() - 1, static_cast<size_t>(w.size() * 0.95))];
+        double wall_ms = 0.0;
+        for (double v : w) wall_ms += v;
+        const double sim_ms = static_cast<double>(w.size()) * sync_dt_ * 1000.0;
+        const double rtf = wall_ms > 0.0 ? sim_ms / wall_ms : 0.0;
+        RCLCPP_INFO(get_logger(),
+                    "lockstep tick %lu | wall/tick median %.0f ms p95 %.0f ms | %d retries over %d ticks "
+                    "| real-time factor %.2fx",
+                    static_cast<unsigned long>(step), med, p95, total_retries_,
+                    static_cast<int>(w.size()), rtf);
+        tick_ms_window_.clear();
+        total_retries_ = 0;
+    }
+
+    // ---- atomic: legacy async one best-effort cycle per wall-timer tick ----
+    void atomic_cycle()
+    {
+        try {
+            apply_controls();
+            const auto car_state = client_->getCarState(vehicle_name_);
+            const rclcpp::Time stamp(static_cast<int64_t>(car_state.timestamp));
+            std::vector<ImageResponse> images = client_->simGetImages(image_requests(), vehicle_name_);
+            msr::airlib::LidarData lidar;
+            try { lidar = client_->getLidarData(lidar_name_, vehicle_name_); } catch (...) {}
+            if (publish_clock_) {
+                rosgraph_msgs::msg::Clock clk;
+                clk.clock = stamp;
+                clock_pub_->publish(clk);
+            }
+            publish_odom_and_tf(car_state, stamp);
+            publish_images(images, stamp);
+            publish_lidar(lidar, stamp);
+        } catch (rpc::rpc_error &e) {
+            RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "RPC error: %s",
+                                  e.get_error().as<std::string>().c_str());
+        }
     }
 
     void publish_odom_and_tf(const msr::airlib::CarApiBase::CarState &car_state, const rclcpp::Time &stamp)
@@ -368,44 +526,77 @@ private:
         cam_opt_qx_ = q_opt.x(); cam_opt_qy_ = q_opt.y(); cam_opt_qz_ = q_opt.z(); cam_opt_qw_ = q_opt.w();
     }
 
-    void publish_images(const rclcpp::Time &stamp)
+    // Publish images from a pre-acquired response vector (order: [Scene?, Depth, Seg]).
+    void publish_images(const std::vector<ImageResponse> &responses, const rclcpp::Time &stamp)
     {
-        std::vector<ImageRequest> requests = {
-            ImageRequest(camera_name_, ImageType::DepthPlanar, true),      // pixels_as_float
-            ImageRequest(camera_name_, ImageType::Segmentation, false, false),
-        };
-        const std::vector<ImageResponse> responses = client_->simGetImages(requests, vehicle_name_);
-        for (const auto &r : responses) {
-            if (r.width == 0 || r.height == 0) {
-                continue;
+        size_t idx = 0;
+        if (include_scene_rgb_) {
+            if (idx < responses.size()) {
+                publish_scene(responses[idx], stamp);
             }
-            if (r.pixels_as_float) {
-                sensor_msgs::msg::Image depth;
-                depth.header.stamp = stamp;
-                depth.header.frame_id = camera_optical_frame_id_;
-                depth.height = r.height;
-                depth.width = r.width;
-                depth.encoding = "32FC1";
-                depth.is_bigendian = 0;
-                depth.step = r.width * sizeof(float);
-                depth.data.resize(r.image_data_float.size() * sizeof(float));
-                std::memcpy(depth.data.data(), r.image_data_float.data(),
-                            r.image_data_float.size() * sizeof(float));
-                depth_pub_->publish(depth);
-                publish_camera_info(stamp, r.width, r.height);
-            } else {
-                sensor_msgs::msg::Image seg;
-                seg.header.stamp = stamp;
-                seg.header.frame_id = camera_optical_frame_id_;
-                seg.height = r.height;
-                seg.width = r.width;
-                seg.encoding = is_rgb_ ? "rgb8" : "bgr8";
-                seg.is_bigendian = 0;
-                seg.step = r.width * 3;
-                seg.data = r.image_data_uint8;
-                seg_pub_->publish(seg);
-            }
+            idx++;
         }
+        if (idx < responses.size()) {
+            publish_depth(responses[idx], stamp);
+        }
+        idx++;
+        if (idx < responses.size()) {
+            publish_seg(responses[idx], stamp);
+        }
+    }
+
+    void publish_depth(const ImageResponse &r, const rclcpp::Time &stamp)
+    {
+        if (r.width == 0 || r.height == 0 || r.image_data_float.empty()) {
+            return;
+        }
+        sensor_msgs::msg::Image depth;
+        depth.header.stamp = stamp;
+        depth.header.frame_id = camera_optical_frame_id_;
+        depth.height = r.height;
+        depth.width = r.width;
+        depth.encoding = "32FC1";
+        depth.is_bigendian = 0;
+        depth.step = r.width * sizeof(float);
+        depth.data.resize(r.image_data_float.size() * sizeof(float));
+        std::memcpy(depth.data.data(), r.image_data_float.data(),
+                    r.image_data_float.size() * sizeof(float));
+        depth_pub_->publish(depth);
+        publish_camera_info(stamp, r.width, r.height);
+    }
+
+    void publish_seg(const ImageResponse &r, const rclcpp::Time &stamp)
+    {
+        if (r.width == 0 || r.height == 0 || r.image_data_uint8.empty()) {
+            return;
+        }
+        sensor_msgs::msg::Image seg;
+        seg.header.stamp = stamp;
+        seg.header.frame_id = camera_optical_frame_id_;
+        seg.height = r.height;
+        seg.width = r.width;
+        seg.encoding = is_rgb_ ? "rgb8" : "bgr8";
+        seg.is_bigendian = 0;
+        seg.step = r.width * 3;
+        seg.data = r.image_data_uint8;
+        seg_pub_->publish(seg);
+    }
+
+    void publish_scene(const ImageResponse &r, const rclcpp::Time &stamp)
+    {
+        if (!scene_pub_ || r.width == 0 || r.height == 0 || r.image_data_uint8.empty()) {
+            return;
+        }
+        sensor_msgs::msg::Image rgb;
+        rgb.header.stamp = stamp;
+        rgb.header.frame_id = camera_optical_frame_id_;
+        rgb.height = r.height;
+        rgb.width = r.width;
+        rgb.encoding = is_rgb_ ? "rgb8" : "bgr8";
+        rgb.is_bigendian = 0;
+        rgb.step = r.width * 3;
+        rgb.data = r.image_data_uint8;
+        scene_pub_->publish(rgb);
     }
 
     void publish_camera_info(const rclcpp::Time &stamp, int width, int height)
@@ -424,14 +615,8 @@ private:
         depth_info_pub_->publish(info);
     }
 
-    void publish_lidar(const rclcpp::Time &stamp)
+    void publish_lidar(const msr::airlib::LidarData &ld, const rclcpp::Time &stamp)
     {
-        msr::airlib::LidarData ld;
-        try {
-            ld = client_->getLidarData(lidar_name_, vehicle_name_);
-        } catch (...) {
-            return;
-        }
         if (ld.point_cloud.size() < 3) {
             return;
         }
@@ -472,9 +657,18 @@ private:
     double cam_x_, cam_y_, cam_z_, cam_roll_, cam_pitch_, cam_yaw_;
     bool enable_drive_ = false;
     double max_forward_speed_ = 2.0, max_yaw_rate_ = 1.2;
+    bool include_scene_rgb_ = false;
+    int retry_ceiling_ = 2000;
+    double retry_timeout_s_ = 10.0;
+    double retry_sleep_ = 0.003;
+    int diag_interval_ = 50;
     std::atomic<double> cmd_throttle_{0.0};
     std::atomic<double> cmd_steering_{0.0};
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
+
+    // diagnostics (not a control mechanism)
+    std::vector<double> tick_ms_window_;
+    int total_retries_ = 0;
 
     // frame ids
     std::string odom_frame_id_, lidar_frame_id_, camera_body_frame_id_, camera_optical_frame_id_;
@@ -497,6 +691,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
     rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr depth_info_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr seg_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr scene_pub_;
     rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr clock_pub_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
