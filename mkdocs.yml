@@ -90,6 +90,7 @@ nav:
     - "Night-Vision Camera": 'night_vision.md'
     - "Dynamic Environmental Phenomena":
       - "Overview": 'dynamic_phenomena.md'
+      - "Using Blueprint Packages": 'blueprint_packages.md'
       - "Wildfire Blueprint": 'blueprint_wildfire.md'
       - "Flood Blueprint": 'blueprint_flood.md'
       - "Crop Disease Blueprint": 'blueprint_crop_disease.md'

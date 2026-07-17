@@ -4,7 +4,7 @@ HERCULES exposes parameterized **dynamic-environment modules** and **dynamic-age
 
 ## Phenomena
 
-Each phenomenon is packaged as a downloadable, parameterized Unreal **Blueprint** you can drop into your own project — see the per-phenomenon pages below for download and usage.
+Each phenomenon is packaged as a downloadable, parameterized Unreal **Blueprint** you can drop into your own project — see the per-phenomenon pages below for download and usage, and [Using Blueprint Packages](blueprint_packages.md) for the packaging/licensing model, install steps, and how to make Blueprints visible to the HERCULES sensors.
 
 === "Wildfire spread"
 

@@ -12,4 +12,12 @@ HERCULES adds a configurable **night-vision (NVG) camera** with an empirical pho
 
 ## Usage
 
-The night-vision camera is captured through the standard [Image APIs](image_apis.md) and configured via the [settings file](settings.md). See [Sensors](sensors.md) for the complete sensor list and [Camera Views](camera_views.md) for viewport configuration.
+The night-vision camera is exposed as camera image type **`NightVision = 12`**, synthesized server-side from Scene + Segmentation captures rendered in the same `simGetImages` batch (same frame, lockstep-safe) and captured through the standard [Image APIs](image_apis.md):
+
+```python
+responses = client.simGetImages([
+    airsim.ImageRequest("front_center", airsim.ImageType.NightVision, False, False)
+])
+```
+
+For the fused scene-luminance look, the Scene and Segmentation captures must share the same resolution in the [settings file](settings.md) (otherwise the camera falls back to a pure thermal-map view). Gain, blend, and seed are configurable via the `SyntheticCameraSettings` block — see **[Synthetic IR / NVG Cameras](synthetic_cameras.md)** for the full reference and troubleshooting. See [Sensors](sensors.md) for the complete sensor list and [Camera Views](camera_views.md) for viewport configuration.

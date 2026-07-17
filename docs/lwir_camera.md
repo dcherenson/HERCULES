@@ -12,4 +12,12 @@ HERCULES adds a **physics-based long-wave infrared (LWIR) thermal camera** that 
 
 ## Usage
 
-The LWIR camera is exposed as a camera image type, captured through the same [Image APIs](image_apis.md) as the RGB, depth, and segmentation streams, and configured in the [settings file](settings.md). See [Sensors](sensors.md) for the full sensor suite and the [Infrared Camera](InfraredCamera.md) page for the related inherited thermal tooling.
+The LWIR camera is exposed as camera image type **`ThermalIR = 11`**, synthesized server-side from Segmentation + DepthPlanar captures rendered in the same `simGetImages` batch (same frame, lockstep-safe) and captured through the same [Image APIs](image_apis.md) as the RGB, depth, and segmentation streams:
+
+```python
+responses = client.simGetImages([
+    airsim.ImageRequest("front_center", airsim.ImageType.ThermalIR, False, False)
+])
+```
+
+Object temperatures come from mesh-name keyword classification plus optional per-object `Overrides` in the [settings file](settings.md). See **[Synthetic IR / NVG Cameras](synthetic_cameras.md)** for setup requirements, the keyword table, the settings reference, and troubleshooting (including "object not showing up"). See [Sensors](sensors.md) for the full sensor suite and the [Infrared Camera](InfraredCamera.md) page for the related inherited thermal tooling.
