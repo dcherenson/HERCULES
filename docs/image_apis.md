@@ -228,8 +228,10 @@ To change resolution, FOV etc, you can use [settings.json](settings.md). For exa
   SurfaceNormals = 6,
   Infrared = 7,
   OpticalFlow = 8,
-  OpticalFlowVis = 9
-  Annotation = 10
+  OpticalFlowVis = 9,
+  Annotation = 10,
+  ThermalIR = 11,
+  NightVision = 12
 ```                
 
 ### DepthPlanar and DepthPerspective
@@ -307,6 +309,9 @@ Currently, this is just a map from object ID to grey scale 0-255. So any mesh wi
 
 ### OpticalFlow and OpticalFlowVis
 These image types return information about motion perceived by the point of view of the camera. OpticalFlow returns a 2-channel image where the channels correspond to vx and vy respectively. OpticalFlowVis is similar to OpticalFlow but converts flow data to RGB for a more 'visual' output.
+
+### ThermalIR and NightVision
+These are synthetic image types composed on CPU inside the plugin from underlying captures rendered in the same `simGetImages` batch (same frame, lockstep-safe): `ThermalIR = 11` produces a FLIR-style LWIR thermal view from Segmentation + DepthPlanar, and `NightVision = 12` produces a green-phosphor intensifier view from Scene + Segmentation. Both return RGB8. See [Synthetic IR / NVG Cameras](synthetic_cameras.md) for setup requirements, per-object thermal overrides, and troubleshooting.
 
 ### Object Detection
 This feature lets you generate object detection using existing cameras in HERCULES, find more info [here](object_detection.md).
