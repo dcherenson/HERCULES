@@ -1,0 +1,159 @@
+site_name: HERCULES
+site_description: 'HERCULES — an open-source Unreal Engine 5 simulation framework for heterogeneous multi-robot SLAM, collaborative perception, and exploration with UAV–UGV teams.'
+site_author: 'LunarLab, Georgia Institute of Technology'
+site_url: https://lunarlab-gatech.github.io/HERCULES/
+
+repo_url: https://github.com/lunarlab-gatech/HERCULES
+repo_name: lunarlab-gatech/HERCULES
+edit_uri: edit/main/docs/
+
+copyright: Copyright &copy; 2026 LunarLab, Georgia Institute of Technology — built on Cosys-AirSim and AirSim (MIT).
+
+theme:
+  name: material
+  language: en
+  logo: media/favicon.svg
+  favicon: media/favicon.svg
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/lunarlab-gatech/HERCULES
+    - icon: fontawesome/solid/flask
+      link: https://sites.gatech.edu/lunarlab/
+
+extra_javascript:
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - "Home": 'index.md'
+  - "Getting Started":
+    - "Download and run": 'run_packaged.md'
+    - "Download and install from precompiled plugin": 'install_precompiled.md'
+    - "Install from Source on Linux": 'install_linux.md'
+    - "Install from Source on Windows": 'install_windows.md'
+    - "Using Docker on Ubuntu": 'docker_ubuntu.md'
+    - "Building and Packaging": 'packaging.md'
+    - "Custom Unreal Environment": 'unreal_custenv.md'
+    - "Blocks Environment": 'unreal_blocks.md'
+    - "Settings": 'settings.md'
+  - "HERCULES Features":
+    - "Heterogeneous UAV–UGV Autonomy": 'heterogeneous_autonomy.md'
+    - "LWIR Thermal Camera": 'lwir_camera.md'
+    - "Night-Vision Camera": 'night_vision.md'
+    - "Dynamic Environmental Phenomena":
+      - "Overview": 'dynamic_phenomena.md'
+      - "Using Blueprint Packages": 'blueprint_packages.md'
+      - "Wildfire Blueprint": 'blueprint_wildfire.md'
+      - "Flood Blueprint": 'blueprint_flood.md'
+      - "Crop Disease Blueprint": 'blueprint_crop_disease.md'
+    - "Dynamic Agents":
+      - "Animal Behavior Blueprint": 'blueprint_animal_behavior.md'
+      - "Pedestrian Behavior Blueprint": 'blueprint_pedestrian_behavior.md'
+      - "Vehicle Behavior Blueprint": 'blueprint_vehicle_behavior.md'
+    - "Collaborative SLAM (ROMAN)": 'collaborative_slam.md'
+    - "Cooperative Perception (DAIR-V2X)": 'cooperative_perception.md'
+    - "Multimodal Dataset": 'dataset.md'
+  - "Simulator":
+    - "Core APIs": 'apis.md'
+    - "Image APIs": 'image_apis.md'
+    - "C++ APIs": 'apis_cpp.md'
+    - "Instance Segmentation": 'instance_segmentation.md'
+    - "Synthetic IR / NVG Cameras": 'synthetic_cameras.md'
+    - "Annotation": 'annotation.md'
+    - "Camera Views": 'camera_views.md'
+    - "Car Mode": 'using_car.md'
+    - "Remote Control": 'remote_control.md'
+    - "XBox Controller": 'xbox_controller.md'
+    - "Steering Wheel": 'steering_wheel_installation.md'
+    - "Multiple Vehicles": 'multi_vehicle.md'
+    - "Skid Steer Vehicles": 'skid_steer_vehicle.md'
+    - "Dynamic Objects": 'dynamic_objects.md'
+    - "Import Gazebo models": "gazebo_drone.md"
+    - "Domain Randomization": "retexturing.md"
+    - "Mesh Vertex Buffers": "meshes.md"
+    - "Sensors":
+      - "Sensors": 'sensors.md'
+      - "LIDAR": 'lidar.md'
+      - "GPU LIDAR": 'gpulidar.md'
+      - "Pulse Echo": 'echo.md'
+      - "Infrared Camera": "InfraredCamera.md"
+      - "Distance Sensor": 'distance_sensor.md'
+    - "ROS":
+      - "ROS Python Wrapper": "ros_python.md"
+      - "ROS 2 C++ Wrapper": "ros_cplusplus.md"
+    - "Matlab": 'matlab.md'
+    - "Playing Logs": 'playback.md'
+    - "Voxel Grid Generator": "voxel_grid.md"
+    - "Event camera": "event_sim.md"
+    - "Object Detection": "object_detection.md"
+  - "Design":
+    - "Modifying Recording Data": 'modify_recording_data.md'
+    - "Flight Controller": 'flight_controller.md'
+    - "Adding new APIs": 'adding_new_apis.md'
+    - "Simple Flight": 'simple_flight.md'
+  - "Flight Controllers":
+    - "MavLink and PX4":
+      - "PX4 Setup": 'px4_setup.md'
+      - "PX4 in SITL": 'px4_sitl.md'
+      - "PX4 SITL with WSL 2": 'px4_sitl_wsl2.md'
+      - "PX4 Lockstep": 'px4_lockstep.md'
+      - "PX4 Multi-vehicle in SITL": 'px4_multi_vehicle.md'
+      - "Building PX4": "px4_build.md"
+      - "PX4/MavLink Logging": 'px4_logging.md'
+      - "MavLink LogViewer": "log_viewer.md"
+      - "MavLinkCom": 'mavlinkcom.md'
+      - "MavLink MoCap": 'mavlinkcom_mocap.md'
+  - "Misc":
+    - "Real Drones": 'custom_drone.md'
+    - "Installing cmake on Linux": 'cmake_linux.md'
+    - "pfm format": 'pfm.md'
+    - "Setting up Unreal Environment": 'unreal_proj.md'
+    - "Working with UE Plugin Contents": 'working_with_plugin_contents.md'

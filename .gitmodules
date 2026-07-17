@@ -1,0 +1,3 @@
+[submodule "ros2/src/rosbag_manipulation"]
+	path = ros2/src/rosbag_manipulation
+	url = https://github.com/lunarlab-gatech/rosbag_manipulation.git

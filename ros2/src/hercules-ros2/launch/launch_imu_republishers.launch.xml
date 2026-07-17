@@ -1,0 +1,13 @@
+<launch>
+  <node
+    pkg="hercules-ros2"
+    exec="imu_republisher_node"
+    name="imu_republisher_node"
+    output="screen">
+    <param name="imu_topics" value="
+      ['/hercules_node/Husky1/imu/imu',
+       '/hercules_node/Husky2/imu/imu',
+       '/hercules_node/Drone1/imu/imu',
+       '/hercules_node/Drone2/imu/imu']"/>
+  </node>
+</launch>

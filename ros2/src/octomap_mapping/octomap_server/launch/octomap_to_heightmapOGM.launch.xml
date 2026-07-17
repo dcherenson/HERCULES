@@ -1,0 +1,7 @@
+<launch>
+    <node
+        pkg="octomap_server"
+        exec="octomap_to_heightmapOGM"
+        name="octomap_to_heightmapOGM_node"
+        output="screen" />
+</launch>

@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<launch>
+    <node
+        pkg="octomap_server"
+        exec="octomap_slicer_gridmap"
+        name="octomap_slicer"
+        output="screen">
+        
+        <!-- Define parameters -->
+
+        <!-- for ground level, 1m octomap resolution -->
+        <!-- <param name="slice_altitude" type="float" value="0.5"/> -->
+
+        <!-- for ground level, 0.5m octomap resolution -->
+        <!-- original -->
+        <param name="slice_altitude" type="float" value="0"/>
+        <!-- <param name="slice_altitude" type="float" value="-0.25"/> -->
+
+        <!-- for altitude, both (0.5m and 1m) octomap resolutions -->
+        <!-- <param name="slice_altitude" type="float" value="35.0"/> -->
+
+        <param name="inflation_radius" type="float" value="0.0"/>
+        <param name="unknown_flag" type="bool" value="true"/>
+
+    </node>
+</launch>
