@@ -274,6 +274,10 @@ def get_camera_type(cameraType):
         cameraTypeClass = ImageType.OpticalFlowVis
     elif cameraType == "Annotation":
         cameraTypeClass = ImageType.Annotation
+    elif cameraType == "ThermalIR":
+        cameraTypeClass = ImageType.ThermalIR
+    elif cameraType == "NightVision":
+        cameraTypeClass = ImageType.NightVision
     else:
         cameraTypeClass = ImageType.Scene
     return cameraTypeClass
@@ -301,6 +305,10 @@ def is_pixels_as_float(cameraType):
     elif cameraType == "OpticalFlowVis":
         return False
     elif cameraType == "Annotation":
+        return False
+    elif cameraType == "ThermalIR":
+        return False
+    elif cameraType == "NightVision":
         return False
     else:
         return False
@@ -336,6 +344,10 @@ def get_image_bytes(data, cameraType):
     elif cameraType == "OpticalFlowVis":
         img_rgb_string = data.image_data_uint8
     elif cameraType == "Annotation":
+        img_rgb_string = data.image_data_uint8
+    elif cameraType == "ThermalIR":
+        img_rgb_string = data.image_data_uint8
+    elif cameraType == "NightVision":
         img_rgb_string = data.image_data_uint8
 
     else:

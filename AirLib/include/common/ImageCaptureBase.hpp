@@ -29,6 +29,8 @@ namespace airlib
             OpticalFlow,
             OpticalFlowVis,
             Annotation,
+            ThermalIR, //synthesized on CPU from Segmentation + DepthPlanar, no capture component
+            NightVision, //synthesized on CPU from Scene + Segmentation, no capture component
             Count //must be last
         };
 

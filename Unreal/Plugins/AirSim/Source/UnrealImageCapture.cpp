@@ -3,6 +3,8 @@
 #include "ImageUtils.h"
 
 #include "RenderRequest.h"
+#include "SyntheticCameraProcessor.h"
+#include "AirBlueprintLib.h"
 #include "common/ClockFactory.hpp"
 
 UnrealImageCapture::UnrealImageCapture(const common_utils::UniqueValueMap<std::string, APIPCamera*>* cameras)
@@ -24,9 +26,143 @@ void UnrealImageCapture::getImages(const std::vector<msr::airlib::ImageCaptureBa
             responses.push_back(ImageResponse());
             responses[responses.size() - 1].message = "camera is not set";
         }
+        return;
     }
-    else
+
+    bool has_synthetic = false;
+    for (const auto& request : requests) {
+        if (request.image_type == ImageType::ThermalIR || request.image_type == ImageType::NightVision) {
+            has_synthetic = true;
+            break;
+        }
+    }
+    if (!has_synthetic) {
         getSceneCaptureImage(requests, responses, false);
+        return;
+    }
+
+    //Synthetic types (ThermalIR, NightVision) are composed on CPU from hidden
+    //sub-requests rendered in the SAME RenderRequest batch as the user's normal
+    //requests: one render pass, same frame, lockstep-safe.
+    std::vector<ImageRequest> render_requests;
+    struct Slot
+    {
+        bool synthetic = false;
+        size_t normal_idx = 0; //normal requests: index into render_requests
+        size_t sub_a = 0; //ThermalIR: Segmentation; NightVision: Scene
+        size_t sub_b = 0; //ThermalIR: DepthPlanar;  NightVision: Segmentation
+    };
+    std::vector<Slot> slots(requests.size());
+
+    //pass 1: forward all normal requests untouched (order within render_requests is
+    //free; the 1:1 output order is restored from slots below)
+    for (size_t i = 0; i < requests.size(); ++i) {
+        const ImageRequest& request = requests.at(i);
+        if (request.image_type == ImageType::ThermalIR || request.image_type == ImageType::NightVision)
+            continue;
+        render_requests.push_back(request);
+        slots[i].normal_idx = render_requests.size() - 1;
+    }
+
+    //pass 2: append the hidden sub-requests, deduped against identical captures
+    //already in the batch (user-requested or from another synthetic request)
+    auto find_or_append = [&render_requests](const std::string& camera_name, ImageType image_type, bool pixels_as_float) -> size_t {
+        for (size_t j = 0; j < render_requests.size(); ++j) {
+            const ImageRequest& existing = render_requests[j];
+            if (existing.camera_name == camera_name && existing.image_type == image_type &&
+                existing.pixels_as_float == pixels_as_float && (pixels_as_float || !existing.compress) &&
+                existing.annotation_name.empty())
+                return j;
+        }
+        render_requests.push_back(ImageRequest(camera_name, image_type, pixels_as_float, false, ""));
+        return render_requests.size() - 1;
+    };
+    for (size_t i = 0; i < requests.size(); ++i) {
+        const ImageRequest& request = requests.at(i);
+        if (request.image_type == ImageType::ThermalIR) {
+            slots[i].synthetic = true;
+            slots[i].sub_a = find_or_append(request.camera_name, ImageType::Segmentation, false);
+            slots[i].sub_b = find_or_append(request.camera_name, ImageType::DepthPlanar, true);
+        }
+        else if (request.image_type == ImageType::NightVision) {
+            slots[i].synthetic = true;
+            slots[i].sub_a = find_or_append(request.camera_name, ImageType::Scene, false);
+            slots[i].sub_b = find_or_append(request.camera_name, ImageType::Segmentation, false);
+        }
+    }
+
+    //single batched render for the union of underlying captures
+    std::vector<ImageResponse> render_responses;
+    getSceneCaptureImage(render_requests, render_responses, false);
+    if (render_responses.size() != render_requests.size())
+        return; //no viewport (getSceneCaptureImage bailed out)
+
+    //assemble responses 1:1 with the incoming request order; hidden sub-responses
+    //are consumed here and never surfaced
+    for (size_t i = 0; i < requests.size(); ++i) {
+        const ImageRequest& request = requests.at(i);
+        if (!slots[i].synthetic) {
+            responses.push_back(render_responses.at(slots[i].normal_idx));
+            continue;
+        }
+
+        const ImageResponse& sub_a = render_responses.at(slots[i].sub_a);
+        const ImageResponse& sub_b = render_responses.at(slots[i].sub_b);
+        //both pipelines consume a segmentation capture; use it as the metadata source
+        const ImageResponse& seg_response = (request.image_type == ImageType::ThermalIR) ? sub_a : sub_b;
+
+        ImageResponse response;
+        response.camera_name = request.camera_name;
+        response.image_type = request.image_type;
+        response.pixels_as_float = false;
+        response.annotation_name = "";
+        response.width = seg_response.width;
+        response.height = seg_response.height;
+        response.time_stamp = seg_response.time_stamp;
+        response.camera_position = seg_response.camera_position;
+        response.camera_orientation = seg_response.camera_orientation;
+
+        const size_t expected_size = static_cast<size_t>(seg_response.width) * seg_response.height * 3;
+
+        std::vector<uint8_t> composed;
+        if (expected_size == 0) {
+            response.message = "Can't compose synthetic image because underlying captures failed";
+        }
+        else if (request.image_type == ImageType::ThermalIR) {
+            if (sub_a.image_data_uint8.size() != expected_size)
+                response.message = "Can't compose synthetic image because the segmentation capture failed";
+            else
+                SyntheticCameraProcessor::instance().composeThermalIR(
+                    sub_a.image_data_uint8, sub_b.image_data_float, seg_response.width, seg_response.height, composed);
+        }
+        else { //NightVision
+            //a scene capture of a different resolution than the segmentation is
+            //tolerated: the processor then falls back to the pure thermal map,
+            //matching the ROS node's behavior on mismatched topic sizes
+            if (sub_b.image_data_uint8.size() != expected_size)
+                response.message = "Can't compose synthetic image because the segmentation capture failed";
+            else
+                SyntheticCameraProcessor::instance().composeNightVision(
+                    sub_a.image_data_uint8, sub_b.image_data_uint8, seg_response.width, seg_response.height, composed);
+        }
+
+        if (!composed.empty() && request.compress) {
+            //reuse the same PNG path RenderRequest uses for compressed uint8 captures
+            TArray<FColor> bmp;
+            bmp.SetNumUninitialized(response.width * response.height);
+            for (int32 p = 0; p < response.width * response.height; ++p)
+                bmp[p] = FColor(composed[p * 3 + 0], composed[p * 3 + 1], composed[p * 3 + 2], 255);
+            TArray<uint8_t> png;
+            UAirBlueprintLib::CompressImageArray(response.width, response.height, bmp, png);
+            response.image_data_uint8 = std::vector<uint8_t>(png.GetData(), png.GetData() + png.Num());
+            response.compress = true;
+        }
+        else {
+            response.image_data_uint8 = std::move(composed);
+            response.compress = false;
+        }
+        responses.push_back(response);
+    }
 }
 
 void UnrealImageCapture::getSceneCaptureImage(const std::vector<msr::airlib::ImageCaptureBase::ImageRequest>& requests,

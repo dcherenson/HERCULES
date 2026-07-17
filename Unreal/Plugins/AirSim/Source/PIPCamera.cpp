@@ -11,6 +11,11 @@
 #include <exception>
 #include "AirBlueprintLib.h"
 
+//number of trailing ImageType entries that never get a fixed scene capture component:
+//Annotation (capture cameras are added dynamically per annotator) and the
+//CPU-synthesized ThermalIR / NightVision types (composed from other captures)
+static constexpr int kNonCaptureImageTypes = 3;
+
 //CinemAirSim
 APIPCamera::APIPCamera(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer
@@ -66,6 +71,8 @@ APIPCamera::APIPCamera(const FObjectInitializer& ObjectInitializer)
     image_type_to_pixel_format_map_.Add(Utils::toNumeric(ImageType::Infrared), EPixelFormat::PF_B8G8R8A8);
     image_type_to_pixel_format_map_.Add(Utils::toNumeric(ImageType::OpticalFlow), EPixelFormat::PF_B8G8R8A8);
     image_type_to_pixel_format_map_.Add(Utils::toNumeric(ImageType::OpticalFlowVis), EPixelFormat::PF_B8G8R8A8);
+    image_type_to_pixel_format_map_.Add(Utils::toNumeric(ImageType::ThermalIR), EPixelFormat::PF_B8G8R8A8); // synthetic, no capture component
+    image_type_to_pixel_format_map_.Add(Utils::toNumeric(ImageType::NightVision), EPixelFormat::PF_B8G8R8A8); // synthetic, no capture component
 
     object_filter_ = FObjectFilter();
 
@@ -108,6 +115,9 @@ void APIPCamera::PostInitializeComponents()
         UAirBlueprintLib::GetActorComponent<USceneCaptureComponent2D>(this, TEXT("OpticalFlowVisCaptureComponent"));
 
     for (unsigned int i = 0; i < imageTypeCount(); ++i) {
+        //synthetic image types (ThermalIR, NightVision) have no capture component; leave their slots null
+        if (!captures_[i])
+            continue;
         detections_[i] = NewObject<UDetectionComponent>(this);
         if (detections_[i]) {
             detections_[i]->SetupAttachment(captures_[i]);
@@ -134,6 +144,9 @@ void APIPCamera::BeginPlay()
     camera_type_enabled_.assign(imageTypeCount(), false);
 
     for (unsigned int image_type = 0; image_type < imageTypeCount(); ++image_type) {
+        //synthetic image types (ThermalIR, NightVision) have no capture component or render target
+        if (!captures_[image_type])
+            continue;
         //use final color for all calculations
         if(image_type == Utils::toNumeric(ImageType::Scene)) {
             captures_[image_type]->CaptureSource = ESceneCaptureSource::SCS_FinalToneCurveHDR;
@@ -271,7 +284,7 @@ void APIPCamera::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     int image_count_to_delete = static_cast<int>(Utils::toNumeric(ImageType::Count));
     if (noise_materials_.Num()) {
-        for (int image_type = 0; image_type < image_count_to_delete - 3; ++image_type) {
+        for (int image_type = 0; image_type < image_count_to_delete - kNonCaptureImageTypes - 2; ++image_type) {
             if (noise_materials_[image_type + 1])
                 captures_[image_type]->PostProcessSettings.RemoveBlendable(noise_materials_[image_type + 1]);
         }
@@ -280,7 +293,7 @@ void APIPCamera::EndPlay(const EEndPlayReason::Type EndPlayReason)
     }
 
 	if (lens_distortion_materials_.Num()) {
-		for (int image_type = 0; image_type < image_count_to_delete - 3; ++image_type) {
+		for (int image_type = 0; image_type < image_count_to_delete - kNonCaptureImageTypes - 2; ++image_type) {
 			if (lens_distortion_materials_[image_type + 1])
 				captures_[image_type]->PostProcessSettings.RemoveBlendable(lens_distortion_materials_[image_type + 1]);
 		}
@@ -296,7 +309,7 @@ void APIPCamera::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	lens_distortion_materials_.Empty();
 
     if (distortion_materials_.Num()) {
-        for (int image_type = 0; image_type < image_count_to_delete - 3; ++image_type) {
+        for (int image_type = 0; image_type < image_count_to_delete - kNonCaptureImageTypes - 2; ++image_type) {
             if (distortion_materials_[image_type + 1])
                 captures_[image_type]->PostProcessSettings.RemoveBlendable(distortion_materials_[image_type + 1]);
         }
@@ -314,9 +327,11 @@ void APIPCamera::EndPlay(const EEndPlayReason::Type EndPlayReason)
     int camera_full_count = static_cast<int>(cameraCaptureCount());
     for (int current_camera = 0; current_camera < camera_full_count; ++current_camera) {
         //use final color for all calculations
-        if (current_camera == Utils::toNumeric(ImageType::Segmentation) || current_camera >= image_count_to_delete - 2) {
+        //synthetic type slots (ThermalIR, NightVision) hold nullptr and must be skipped
+        if (captures_[current_camera] != nullptr &&
+            (current_camera == Utils::toNumeric(ImageType::Segmentation) || current_camera >= image_count_to_delete - kNonCaptureImageTypes - 1)) {
             captures_[current_camera]->ShowOnlyComponents.Empty();
-        }        
+        }
         captures_[current_camera] = nullptr;
         render_targets_[current_camera] = nullptr;
         detections_[current_camera] = nullptr;
@@ -357,8 +372,11 @@ bool APIPCamera::getCameraTypeEnabled(ImageType type, std::string annotation_nam
         return camera_type_enabled_[annotator_name_to_index_map_[FString(annotation_name.c_str())]];
     }
     else {
+        //synthetic types (ThermalIR, NightVision) have no capture component and are never enabled
+        if (Utils::toNumeric(type) >= imageTypeCount())
+            return false;
         return camera_type_enabled_[Utils::toNumeric(type)];
-    }    
+    }
 }
 
 bool APIPCamera::GetAnnotationNameExist(std::string annotation_name)
@@ -420,7 +438,9 @@ void APIPCamera::setCameraPose(const msr::airlib::Pose& relative_pose)
 void APIPCamera::setCameraFoV(float fov_degrees)
 {
     for (unsigned int image_type = 0; image_type < cameraCaptureCount(); ++image_type) {
-        captures_[image_type]->FOVAngle = fov_degrees;
+        //synthetic type slots (ThermalIR, NightVision) hold nullptr
+        if (captures_[image_type])
+            captures_[image_type]->FOVAngle = fov_degrees;
     }
     camera_->SetFieldOfView(fov_degrees);
 }
@@ -589,7 +609,9 @@ void APIPCamera::setupCameraFromSettings(const APIPCamera::CameraSetting& camera
 
 
     int image_count = static_cast<int>(Utils::toNumeric(ImageType::Count));
-    for (int image_type = -1; image_type < image_count - 1; ++image_type) {
+    //loop covers -1 (camera component) and Scene..OpticalFlowVis; the trailing
+    //non-capture types (Annotation, ThermalIR, NightVision) have no fixed capture component
+    for (int image_type = -1; image_type < image_count - kNonCaptureImageTypes; ++image_type) {
         const auto& capture_setting = camera_setting.capture_settings.at(image_type);
         const auto& noise_setting = camera_setting.noise_settings.at(image_type);
 
@@ -614,6 +636,8 @@ void APIPCamera::setupCameraFromSettings(const APIPCamera::CameraSetting& camera
                 updateCaptureComponentSetting(captures_[image_type], render_targets_[image_type], true, pixel_format, capture_setting, ned_transform, true);
                 break;
             case ImageType::Annotation:
+            case ImageType::ThermalIR:
+            case ImageType::NightVision:
                 break;
             default:
                 updateCaptureComponentSetting(captures_[image_type], render_targets_[image_type], true, pixel_format, capture_setting, ned_transform, false);
@@ -852,9 +876,12 @@ UTextureRenderTarget2D* APIPCamera::getRenderTarget(const APIPCamera::ImageType 
             return render_targets_[annotator_name_to_index_map_[FString(annotation_name.c_str())]];
     }
     else {
+        //synthetic types can index one past the fixed slots (NightVision == imageTypeCount())
+        if (image_type >= imageTypeCount())
+            return nullptr;
         if (!if_active || camera_type_enabled_[image_type])
             return render_targets_[image_type];
-    }    
+    }
     return nullptr;
 }
 
@@ -866,6 +893,9 @@ UDetectionComponent* APIPCamera::getDetectionComponent(const ImageType type, boo
     }
     else {
         unsigned int image_type = Utils::toNumeric(type);
+        //synthetic types can index one past the fixed slots (NightVision == imageTypeCount())
+        if (image_type >= imageTypeCount())
+            return nullptr;
         if (!if_active || camera_type_enabled_[image_type])
             return detections_[image_type];
     }
@@ -880,6 +910,9 @@ USceneCaptureComponent2D* APIPCamera::getCaptureComponent(const APIPCamera::Imag
     }
     else {
         unsigned int image_type = Utils::toNumeric(type);
+        //synthetic types can index one past the fixed slots (NightVision == imageTypeCount())
+        if (image_type >= imageTypeCount())
+            return nullptr;
         if (!if_active || camera_type_enabled_[image_type])
             return captures_[image_type];
     }
