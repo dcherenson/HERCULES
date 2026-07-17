@@ -59,18 +59,23 @@ private:
 
     std::mutex mutex_;
 
-    //NightVision state: seg-gray label -> thermal count
-    bool nvg_lut_initialized_ = false;
+    //NightVision state: seg-gray label -> radiance cache and normalized thermal count.
+    //Labels unseen so far get a radiance on first encounter (deterministic draw from
+    //nvg_rng_) and the LUT is renormalized, so late-appearing objects still show up.
+    std::map<uint8_t, double> nvg_rad_cache_;
     std::map<uint8_t, uint8_t> nvg_lut_;
+    bool nvg_rng_initialized_ = false;
+    std::mt19937_64 nvg_rng_;
     //noise stream persists across frames so the grain varies per frame while the
     //whole sequence stays reproducible for a fixed seed
     bool noise_rng_initialized_ = false;
     std::mt19937_64 noise_rng_;
 
-    //ThermalIR state: 0x00RRGGBB color key -> profile / thermal count
+    //ThermalIR state: 0x00RRGGBB color key -> profile / radiance cache / thermal
+    //count; same incremental scheme as NVG for colors that first appear mid-run
     bool profile_map_initialized_ = false;
     std::unordered_map<uint32_t, ThermalProfile> color_to_profile_;
-    bool flir_lut_initialized_ = false;
+    std::unordered_map<uint32_t, double> flir_rad_cache_;
     std::unordered_map<uint32_t, uint8_t> flir_lut_;
     std::vector<double> band_;
     std::vector<double> resp_;

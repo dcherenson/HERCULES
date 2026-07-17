@@ -329,13 +329,17 @@ SyntheticCameraProcessor& SyntheticCameraProcessor::instance()
 
 //port of thermal_image_node.cpp initLUT (lines 301-349): per-label random
 //temperature/emissivity, Planck LWIR integral, normalized to [0,255].
-//Uses a fixed seed (settings) instead of std::random_device for reproducibility.
+//Uses a fixed seed (settings) instead of std::random_device for reproducibility,
+//and extends the LUT incrementally when labels first appear mid-run (the ROS node
+//mapped unknown labels to 0 forever).
 void SyntheticCameraProcessor::ensureNightVisionLut(const std::vector<uint8_t>& seg_gray)
 {
-    if (nvg_lut_initialized_)
-        return;
-
     const auto& cfg = AirSimSettings::singleton().synthetic_camera.night_vision;
+
+    if (!nvg_rng_initialized_) {
+        nvg_rng_.seed(static_cast<uint64_t>(cfg.seed));
+        nvg_rng_initialized_ = true;
+    }
 
     std::set<uint8_t> labels(seg_gray.begin(), seg_gray.end());
 
@@ -347,24 +351,30 @@ void SyntheticCameraProcessor::ensureNightVisionLut(const std::vector<uint8_t>& 
         resp.push_back(std::exp(-0.5 * std::pow((lambda - mu) / sigma, 2)));
     }
 
-    double max_rad = 0.0;
-    std::map<uint8_t, double> rads;
-
-    std::mt19937_64 rng(static_cast<uint64_t>(cfg.seed));
     std::uniform_real_distribution<double> dT(cfg.temp_min, cfg.temp_max);
     std::uniform_real_distribution<double> dE(cfg.eps_min, cfg.eps_max);
 
+    bool changed = false;
     for (uint8_t L : labels) {
-        double T = dT(rng);
-        double eps = dE(rng);
-        double sum = planckBandRadiance(band, resp, T, eps);
-        rads[L] = sum;
-        max_rad = std::max(max_rad, sum);
+        if (nvg_rad_cache_.count(L))
+            continue;
+        double T = dT(nvg_rng_);
+        double eps = dE(nvg_rng_);
+        nvg_rad_cache_[L] = planckBandRadiance(band, resp, T, eps);
+        changed = true;
     }
-    for (auto& kv : rads)
-        nvg_lut_[kv.first] = static_cast<uint8_t>(std::round((kv.second / max_rad) * 255.0));
+    if (!changed && !nvg_lut_.empty())
+        return;
 
-    nvg_lut_initialized_ = true;
+    double max_rad = 0.0;
+    for (const auto& kv : nvg_rad_cache_)
+        max_rad = std::max(max_rad, kv.second);
+    if (max_rad <= 0.0)
+        max_rad = 1.0;
+
+    nvg_lut_.clear();
+    for (const auto& kv : nvg_rad_cache_)
+        nvg_lut_[kv.first] = static_cast<uint8_t>(std::round((kv.second / max_rad) * 255.0));
 }
 
 //port of thermal_image_node.cpp "nightvision" branch (lines 90-273)
@@ -546,6 +556,20 @@ SyntheticCameraProcessor::ThermalProfile SyntheticCameraProcessor::classifyLabel
             p.is_kangaroo = true;
     }
 
+    //user-configured per-object overrides (settings.json SyntheticCameraSettings ->
+    //ThermalIR -> Overrides) take priority over the keyword classification; first
+    //matching entry wins
+    for (const auto& o : cfg.overrides) {
+        if (l.find(toLower(o.match)) != std::string::npos) {
+            p.base_temp_K = o.temp_K;
+            p.emissivity = o.emissivity;
+            p.is_animal = o.is_animal;
+            p.is_fire = o.is_fire;
+            p.is_kangaroo = o.is_kangaroo;
+            break;
+        }
+    }
+
     p.base_temp_K = std::min(std::max(p.base_temp_K, cfg.temp_min), cfg.temp_max);
     p.emissivity = std::min(std::max(p.emissivity, cfg.eps_min), cfg.eps_max);
     return p;
@@ -583,12 +607,12 @@ void SyntheticCameraProcessor::ensureColorProfileMap()
 }
 
 //port of thermal_image_segmentation_based_node.cpp initLUT (lines 647-777):
-//radiance per color present in the first frame, normalized, animal/fire boosted
+//radiance per color, normalized, animal/fire boosted. Unlike the ROS node (which
+//froze the LUT on the first frame, mapping later-appearing colors to 0), the
+//radiance cache grows as new segmentation colors are encountered and the LUT is
+//renormalized, so objects entering view mid-run still render.
 void SyntheticCameraProcessor::ensureThermalIrLut(const std::vector<uint8_t>& seg_rgb, int width, int height)
 {
-    if (flir_lut_initialized_)
-        return;
-
     //precomputeSpectralResponse (lines 291-304); note: node B uses lambda <= 14.0
     if (band_.empty()) {
         const double mu = 11.0, sigma = 1.0;
@@ -603,13 +627,16 @@ void SyntheticCameraProcessor::ensureThermalIrLut(const std::vector<uint8_t>& se
     for (size_t i = 0; i < pixel_count; ++i)
         colors.insert(makeColorKey(seg_rgb[i * 3 + 0], seg_rgb[i * 3 + 1], seg_rgb[i * 3 + 2]));
 
-    //if the profile map is not available yet, this rebuild starts from scratch
-    flir_lut_.clear();
+    //until the native color->profile map is available every color classifies as
+    //neutral; recompute from scratch each request so profiles apply once it loads
+    if (!profile_map_initialized_)
+        flir_rad_cache_.clear();
 
-    double max_rad = 0.0;
-    std::unordered_map<uint32_t, double> rads;
-
+    bool changed = false;
     for (uint32_t key : colors) {
+        if (flir_rad_cache_.count(key))
+            continue;
+
         ThermalProfile prof; //default neutral if not in the native map
         auto itp = color_to_profile_.find(key);
         if (itp != color_to_profile_.end())
@@ -623,14 +650,20 @@ void SyntheticCameraProcessor::ensureThermalIrLut(const std::vector<uint8_t>& se
             sum = std::min(sum, max_fire_factor * 1e6); // arbitrary large scale
         }
 
-        rads[key] = sum;
-        max_rad = std::max(max_rad, sum);
+        flir_rad_cache_[key] = sum;
+        changed = true;
     }
+    if (!changed && !flir_lut_.empty())
+        return;
 
+    double max_rad = 0.0;
+    for (const auto& kv : flir_rad_cache_)
+        max_rad = std::max(max_rad, kv.second);
     if (max_rad <= 0.0)
         max_rad = 1.0;
 
-    for (auto& kv : rads) {
+    flir_lut_.clear();
+    for (const auto& kv : flir_rad_cache_) {
         uint8_t cnt = static_cast<uint8_t>(std::round((kv.second / max_rad) * 255.0));
         auto itp = color_to_profile_.find(kv.first);
         if (itp != color_to_profile_.end()) {
@@ -642,10 +675,6 @@ void SyntheticCameraProcessor::ensureThermalIrLut(const std::vector<uint8_t>& se
         }
         flir_lut_[kv.first] = cnt;
     }
-
-    //cache like the ROS node, but only once the native color->profile map was
-    //actually available; otherwise rebuild on the next request
-    flir_lut_initialized_ = profile_map_initialized_;
 }
 
 //port of thermal_image_segmentation_based_node.cpp "flir" branch (segCallback

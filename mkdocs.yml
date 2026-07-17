@@ -105,6 +105,7 @@ nav:
     - "Image APIs": 'image_apis.md'
     - "C++ APIs": 'apis_cpp.md'
     - "Instance Segmentation": 'instance_segmentation.md'
+    - "Synthetic IR / NVG Cameras": 'synthetic_cameras.md'
     - "Annotation": 'annotation.md'
     - "Camera Views": 'camera_views.md'
     - "Car Mode": 'using_car.md'
