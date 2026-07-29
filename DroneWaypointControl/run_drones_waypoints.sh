@@ -26,7 +26,10 @@ EXECUTABLE_PATH=/home/sgarimella34/multi-robot-coordination/Cosys-AirSim/build_r
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity3"
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/BEVP_customcity5"
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/test1_forest"
-WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/customforest_test1/"
+# WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/customforest_test1/"
+
+# SmallTown MG planning demo:
+WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/smalltown_test1"
 
 # WAYPOINT_DIR="/home/sgarimella34/Documents/trajectory_editor_sandbox/"
 # WAYPOINT_DIR="/home/sgarimella34/multi-robot-coordination/trajectory_data/test_drone/"
@@ -42,8 +45,8 @@ DEFAULT_NUM_DRONES=2
 
 # Default velocity
 # VELOCITY=1.5 
-VELOCITY=0.75
-# VELOCITY=5
+# VELOCITY=0.75
+VELOCITY=5
 
 # Default fly altitude. NOTE!!! This altitude is relative to the PlayerStart object's height in UE5, which is 1.5m above ground
 # for DAIR-V2X-style inf camera flying in city env;
@@ -61,6 +64,14 @@ FLY_ALTITUDE=-4.0 #for customforest
 
 # Manually set return-home behavior (set to true or false)
 DISABLE_RETURN_HOME=true
+
+# Altitude mode: "fixed" flies every waypoint at FLY_ALTITUDE (legacy behavior);
+# "waypoint" flies at each waypoint's own recorded Z (clamped to >=1m above origin).
+# Override per-run with: USE_WAYPOINT_Z=true ./run_drones_waypoints.sh Drone1
+ALTITUDE_MODE="fixed"
+if [[ "$USE_WAYPOINT_Z" == "true" ]]; then
+    ALTITUDE_MODE="waypoint"
+fi
 
 # Check if a velocity argument was provided via environment variable
 if [[ -n "$WAYPOINT_VELOCITY" ]]; then
@@ -96,6 +107,8 @@ usage() {
     echo "  WAYPOINT_VELOCITY=3.5 FLY_ALTITUDE=-50.0 $0 Drone1"
     echo "To disable return-to-home:"
     echo "  DISABLE_RETURN_HOME=true $0 Drone1"
+    echo "To fly at each waypoint's recorded altitude instead of FLY_ALTITUDE:"
+    echo "  USE_WAYPOINT_Z=true $0 Drone1"
     exit 1
 }
 
@@ -104,11 +117,17 @@ launch_drone() {
     DRONE_NAME=$1
     WAYPOINT_FILE="$WAYPOINT_DIR/${DRONE_NAME}_trajectory.txt"
 
-    echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s and altitude ${ALTITUDE} m"
-    if [[ "$RETURN_HOME" == "true" ]]; then
-        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" &
+    EXTRA_FLAGS=()
+    if [[ "$ALTITUDE_MODE" == "waypoint" ]]; then
+        EXTRA_FLAGS+=("--use-waypoint-z")
+        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s using recorded waypoint altitudes"
     else
-        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" --no-return-home &
+        echo "Launching $DRONE_NAME with waypoints from $WAYPOINT_FILE at velocity ${VELOCITY} m/s and altitude ${ALTITUDE} m"
+    fi
+    if [[ "$RETURN_HOME" == "true" ]]; then
+        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" "${EXTRA_FLAGS[@]}" &
+    else
+        $EXECUTABLE_PATH "$DRONE_NAME" "$WAYPOINT_FILE" "$VELOCITY" "$ALTITUDE" "${EXTRA_FLAGS[@]}" --no-return-home &
     fi
     PIDS+=($!)
 }

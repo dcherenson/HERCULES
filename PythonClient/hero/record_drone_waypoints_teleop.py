@@ -53,10 +53,10 @@ import hercules_cosysairsim as airsim
 # ============================================================
 # ====== USER PARAMETERS (edit these to your preferences) ====
 # ============================================================
-VEHICLE_NAME      = "Drone2"
+VEHICLE_NAME      = "Drone1"
 RPC_PORT          = 41451
 
-OUTFILE_PATH      = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/customforest_test1/Drone2_trajectory.txt"
+OUTFILE_PATH      = "/home/sgarimella34/multi-robot-coordination/trajectory_data/CSLAM_random_explore/smalltown_test1/Drone1_trajectory.txt"
 APPEND_MODE       = False
 
 # Recording
