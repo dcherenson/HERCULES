@@ -2,19 +2,15 @@
 
 import setup_path
 import hercules_cosysairsim as airsim
+import argparse
 import numpy as np
 import time
 import math
 
-# List your multirotor names as in settings.json
+# Default multirotor names as in settings.json (override with --drones)
 DRONE_NAMES = [
-    "Drone1",
-    "Drone2"
+    "Drone1"
 ]
-
-# DRONE_NAMES = [
-#     "Drone2"
-# ]
 
 
 def parallel_join(futures):
@@ -149,13 +145,19 @@ def run_calibration_on_all(client, drone_names):
         client.hoverAsync(vehicle_name=name)
 
 if __name__ == "__main__":
-    client = airsim.MultirotorClient(port=41451)
+    parser = argparse.ArgumentParser(description="Cam-IMU calibration maneuvers for multirotors")
+    parser.add_argument("--drones", nargs="*", default=DRONE_NAMES,
+                        help="Multirotor vehicle names (default: %(default)s)")
+    parser.add_argument("--port", type=int, default=41451)
+    cli = parser.parse_args()
+
+    client = airsim.MultirotorClient(port=cli.port)
     client.confirmConnection()
 
     # enable API control and arm every drone
-    for name in DRONE_NAMES:
+    for name in cli.drones:
         client.enableApiControl(True, vehicle_name=name)
         client.armDisarm(True, vehicle_name=name)
 
     time.sleep(1.0)
-    run_calibration_on_all(client, DRONE_NAMES)
+    run_calibration_on_all(client, cli.drones)

@@ -6,12 +6,13 @@ world NED frame using the X and Y initial pose from the settings.json file.
 """
 
 
+import argparse
 import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 # -------------------------------
-# USER-DEFINED PATHS
+# DEFAULT PATHS (override with --base-dir / --settings)
 # -------------------------------
 # Base folder containing Drone1/, Drone2/, Husky1/, Husky2/, settings.json
 BASE_DIR = Path("/home/sgarimella34/Documents/raw_data_hercules")
@@ -79,12 +80,23 @@ def process_robot(robot_dir: Path, init_pose: Dict[str, float]) -> None:
 
 
 def main():
-    if not SETTINGS_PATH.exists():
-        print(f"[ERROR] settings.json not found at: {SETTINGS_PATH}")
+    parser = argparse.ArgumentParser(
+        description="Transform per-robot odometry into the world NED frame")
+    parser.add_argument("--base-dir", type=Path, default=BASE_DIR,
+                        help="Folder containing per-vehicle subdirs (default: %(default)s)")
+    parser.add_argument("--settings", type=Path, default=None,
+                        help="Path to settings.json (default: <base-dir>/settings.json)")
+    args = parser.parse_args()
+
+    base_dir = args.base_dir
+    settings_path = args.settings if args.settings else base_dir / "settings.json"
+
+    if not settings_path.exists():
+        print(f"[ERROR] settings.json not found at: {settings_path}")
         return
 
-    init_poses = load_settings(SETTINGS_PATH)
-    subdirs = [p for p in BASE_DIR.iterdir() if p.is_dir()]
+    init_poses = load_settings(settings_path)
+    subdirs = [p for p in base_dir.iterdir() if p.is_dir()]
 
     for sd in sorted(subdirs):
         if sd.name in init_poses:

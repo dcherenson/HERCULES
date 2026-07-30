@@ -5,81 +5,57 @@ hercules_multi_vehicle_data_collector.py
 Pauses the Cosys-AirSim sim globally via the multirotor client, steps it at a fixed dt,
 then collects synchronized IMU, odometry, camera, and LiDAR data from multiple multirotor
 drones and multiple Husky UGVs running on separate API ports.
+
+All settings are CLI flags whose defaults match the previous hardcoded values, so
+running with no arguments behaves exactly as before:
+
+  python3 hercules_multi_vehicle_data_collector.py \
+      --outdir /media/.../raw_data_hercules/smalltown_test1 \
+      --duration 1300 --drones Drone1 --huskies Husky1
+
+On SIGINT/SIGTERM the collector finishes the current step, unpauses the sim and
+closes all files cleanly, so an orchestrator may stop it early once trajectory
+replay has finished.
 """
 
 import setup_path
+import argparse
 import os
+import signal
 import numpy as np
 import cv2
 import hercules_cosysairsim as airsim
 
-# Configuration
-DURATION        = 1300.0        # seconds
-# DURATION        = 1100.0        # seconds  just for city slam
-DT_RATE         = 200.0         # IMU rate (Hz)
-DT              = 1.0 / DT_RATE
-# OUTDIR = "/media/sgarimella34/SSD2/raw_data_hercules/ausenv_stereo_lidar10Hz_centerseq_2ugvuav_752x480"
-OUTDIR = "/media/sgarimella34/hercules-collect/raw_data_hercules/customforest_test2uGv"
-SAVE_DEPTH_PNG  = False          # if True, also write a visual 8-bit PNG
-
-# DRONE_NAMES   = ["Drone1", "Drone2"]
-# HUSKY_NAMES   = ["Husky1", "Husky2"]
-
-DRONE_NAMES   = []
-HUSKY_NAMES   = ["Husky1", "Husky2"]
-
-# Use front_center only for depth/seg; stereo_* for RGB
-CAMERA_NAME          = "front_center"
-STEREO_CAMERA_NAMES  = ["stereo_left", "stereo_right"]
-LIDAR_NAME           = "LidarSensor1"
-
-DRONE_PORT    = 41451
-HUSKY_PORT    = 41452
-
-# --- Setup clients ---
-drone_client = airsim.MultirotorClient(port=DRONE_PORT)
-husky_client = airsim.CarClient(port=HUSKY_PORT)
-drone_client.confirmConnection()
-husky_client.confirmConnection()
-
-for name in DRONE_NAMES:
-    drone_client.enableApiControl(True, vehicle_name=name)
-for name in HUSKY_NAMES:
-    husky_client.enableApiControl(True, vehicle_name=name)
-
-# Pause simulation globally via the drone client
-drone_client.simPause(True)
-
-# Prepare output dirs & files
-os.makedirs(OUTDIR, exist_ok=True)
-files = {}
-all_vehicles = DRONE_NAMES + HUSKY_NAMES
-
-for v in all_vehicles:
-    base = os.path.join(OUTDIR, v)
-    os.makedirs(base, exist_ok=True)
-    files[v] = {
-        "imu":  open(os.path.join(base, "imu.txt"),  "w"),
-        "odom": open(os.path.join(base, "odom.txt"), "w"),
-        "rgb": os.path.join(base, "rgb"),
-        "rgb_stereo_left":  os.path.join(base, "rgb_stereo_left"),
-        "rgb_stereo_right": os.path.join(base, "rgb_stereo_right"),
-        "depth": os.path.join(base, "depth"),
-        "seg":   os.path.join(base, "seg"),
-        "lidar": os.path.join(base, "lidar"),
-    }
-    for sub in ("rgb", "rgb_stereo_left", "rgb_stereo_right", "depth", "seg", "lidar"):
-        os.makedirs(files[v][sub], exist_ok=True)
-
-# Sampling rates
-odom_step  = int(round(DT_RATE / 20.0))  # 20 Hz
-cam_step   = odom_step                   # 20 Hz
-# lidar_step = int(round(DT_RATE / 10.0))  # 10 Hz
-lidar_step = int(round(DT_RATE / 20.0))  # 20 Hz
+stop_requested = False
 
 
-total_steps = int(round(DURATION / DT))
-print(f"Collecting {total_steps} steps @ {DT_RATE:.0f} Hz…")
+def _request_stop(signum, frame):
+    global stop_requested
+    stop_requested = True
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Synchronized multi-vehicle HERCULES data collector")
+    p.add_argument("--duration", type=float, default=1300.0, help="Sim seconds to record")
+    p.add_argument("--imu-rate", type=float, default=200.0, help="Sim step / IMU rate (Hz)")
+    p.add_argument("--outdir",
+                   default="/media/sgarimella34/T74/Hercules_Datasets/raw_data_hercules/smalltown_test1",
+                   help="Root output folder")
+    p.add_argument("--drones", nargs="*", default=["Drone1"], help="Multirotor vehicle names")
+    p.add_argument("--huskies", nargs="*", default=["Husky1"], help="UGV vehicle names")
+    p.add_argument("--camera", default="front_center", help="Camera used for depth/seg")
+    p.add_argument("--stereo-cameras", nargs="*", default=["stereo_left", "stereo_right"],
+                   help="Stereo camera names for RGB")
+    p.add_argument("--lidar", default="LidarSensor1", help="LiDAR sensor name")
+    p.add_argument("--drone-port", type=int, default=41451)
+    p.add_argument("--husky-port", type=int, default=41452)
+    p.add_argument("--odom-hz", type=float, default=20.0)
+    p.add_argument("--cam-hz", type=float, default=20.0)
+    p.add_argument("--lidar-hz", type=float, default=20.0)
+    p.add_argument("--save-depth-png", action="store_true",
+                   help="Also write a visual 8-bit depth PNG")
+    return p.parse_args()
+
 
 def get_nonempty_images(client, vehicle_name, camera_name):
     """Retry simGetImages until we get valid Scene, DepthPlanar, Segmentation."""
@@ -97,6 +73,7 @@ def get_nonempty_images(client, vehicle_name, camera_name):
         ):
             return imgs
 
+
 def get_nonempty_lidar(client, vehicle_name, lidar_name):
     """Retry getLidarData until we get nonempty point_cloud."""
     while True:
@@ -106,138 +83,144 @@ def get_nonempty_lidar(client, vehicle_name, lidar_name):
             if pts.size:
                 return pts
 
-# Main loop
-for step in range(1, total_steps + 1):
-    # 1) step sim forward
-    drone_client.simContinueForTime(DT)
-    t = step * DT
 
-    # 2) multirotors
-    for name in DRONE_NAMES:
-        c = drone_client
+def collect_vehicle(client, name, files, args, step, t, odom_step, cam_step, lidar_step, is_drone):
+    # IMU
+    imu = client.getImuData(vehicle_name=name)
+    la, av = imu.linear_acceleration, imu.angular_velocity
+    files[name]["imu"].write(
+        f"{t:.6f} {la.x_val:.6f} {la.y_val:.6f} {la.z_val:.6f} "
+        f"{av.x_val:.6f} {av.y_val:.6f} {av.z_val:.6f}\n"
+    )
 
-        # IMU
-        imu = c.getImuData(vehicle_name=name)
-        la, av = imu.linear_acceleration, imu.angular_velocity
-        files[name]["imu"].write(
-            f"{t:.6f} {la.x_val:.6f} {la.y_val:.6f} {la.z_val:.6f} "
-            f"{av.x_val:.6f} {av.y_val:.6f} {av.z_val:.6f}\n"
+    # Odometry
+    if step % odom_step == 0:
+        if is_drone:
+            st = client.getMultirotorState(vehicle_name=name)
+        else:
+            st = client.getCarState(vehicle_name=name)
+        p = st.kinematics_estimated.position
+        o = st.kinematics_estimated.orientation
+        files[name]["odom"].write(
+            f"{t:.6f} {p.x_val:.6f} {p.y_val:.6f} {p.z_val:.6f} "
+            f"{o.w_val:.6f} {o.x_val:.6f} {o.y_val:.6f} {o.z_val:.6f}\n"
         )
 
-        # Odometry @ 20 Hz
-        if step % odom_step == 0:
-            st = c.getMultirotorState(vehicle_name=name)
-            p = st.kinematics_estimated.position
-            o = st.kinematics_estimated.orientation
-            files[name]["odom"].write(
-                f"{t:.6f} {p.x_val:.6f} {p.y_val:.6f} {p.z_val:.6f} "
-                f"{o.w_val:.6f} {o.x_val:.6f} {o.y_val:.6f} {o.z_val:.6f}\n"
+    # Cameras
+    if step % cam_step == 0:
+        imgs = get_nonempty_images(client, name, args.camera)
+        _, depth, seg = imgs
+
+        depth_arr = np.array(depth.image_data_float, dtype=np.float32)\
+                        .reshape(depth.height, depth.width)
+        np.save(os.path.join(files[name]["depth"], f"{t:.6f}.npy"), depth_arr)
+
+        if args.save_depth_png:
+            depth_vis = np.clip(depth_arr, 0.0, 100.0) / 100.0
+            depth_vis = (depth_vis * 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(files[name]["depth"], f"{t:.6f}.png"), depth_vis)
+
+        seg_img = np.frombuffer(seg.image_data_uint8, dtype=np.uint8)\
+                    .reshape(seg.height, seg.width, 3)
+        seg_img = cv2.cvtColor(seg_img, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(os.path.join(files[name]["seg"], f"{t:.6f}.png"), seg_img)
+
+        for stereo_cam in args.stereo_cameras:
+            stereo_imgs = get_nonempty_images(client, name, stereo_cam)
+            stereo_scene = stereo_imgs[0]
+            stereo_rgb = np.frombuffer(stereo_scene.image_data_uint8, dtype=np.uint8)\
+                            .reshape(stereo_scene.height, stereo_scene.width, 3)
+            stereo_rgb = cv2.cvtColor(stereo_rgb, cv2.COLOR_RGB2BGR)
+
+            out_dir = (
+                files[name]["rgb_stereo_left"]
+                if stereo_cam == "stereo_left"
+                else files[name]["rgb_stereo_right"]
             )
+            cv2.imwrite(os.path.join(out_dir, f"{t:.6f}.png"), stereo_rgb)
 
-        # Cameras @ 20 Hz
-        if step % cam_step == 0:
-            imgs = get_nonempty_images(c, name, CAMERA_NAME)
-            _, depth, seg = imgs
+    # LiDAR
+    if step % lidar_step == 0:
+        pts = get_nonempty_lidar(client, name, args.lidar)
+        np.save(os.path.join(files[name]["lidar"], f"{t:.6f}.npy"), pts)
 
-            # Depth
-            depth_arr = np.array(depth.image_data_float, dtype=np.float32)\
-                            .reshape(depth.height, depth.width)
-            np.save(os.path.join(files[name]["depth"], f"{t:.6f}.npy"), depth_arr)
 
-            if SAVE_DEPTH_PNG:
-                depth_vis = np.clip(depth_arr, 0.0, 100.0) / 100.0
-                depth_vis = (depth_vis * 255).astype(np.uint8)
-                cv2.imwrite(os.path.join(files[name]["depth"], f"{t:.6f}.png"), depth_vis)
+def main():
+    args = parse_args()
+    dt = 1.0 / args.imu_rate
 
-            # Segmentation
-            seg_img = np.frombuffer(seg.image_data_uint8, dtype=np.uint8)\
-                        .reshape(seg.height, seg.width, 3)
-            seg_img = cv2.cvtColor(seg_img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(os.path.join(files[name]["seg"], f"{t:.6f}.png"), seg_img)
+    signal.signal(signal.SIGINT, _request_stop)
+    signal.signal(signal.SIGTERM, _request_stop)
 
-            # Stereo RGB
-            for stereo_cam in STEREO_CAMERA_NAMES:
-                stereo_imgs = get_nonempty_images(c, name, stereo_cam)
-                stereo_scene = stereo_imgs[0]
-                stereo_rgb = np.frombuffer(stereo_scene.image_data_uint8, dtype=np.uint8)\
-                                .reshape(stereo_scene.height, stereo_scene.width, 3)
-                stereo_rgb = cv2.cvtColor(stereo_rgb, cv2.COLOR_RGB2BGR)
+    # --- Setup clients ---
+    drone_client = airsim.MultirotorClient(port=args.drone_port) if args.drones else None
+    husky_client = airsim.CarClient(port=args.husky_port) if args.huskies else None
+    if drone_client:
+        drone_client.confirmConnection()
+    if husky_client:
+        husky_client.confirmConnection()
 
-                out_dir = (
-                    files[name]["rgb_stereo_left"]
-                    if stereo_cam == "stereo_left"
-                    else files[name]["rgb_stereo_right"]
-                )
-                cv2.imwrite(os.path.join(out_dir, f"{t:.6f}.png"), stereo_rgb)
+    for name in args.drones:
+        drone_client.enableApiControl(True, vehicle_name=name)
+    for name in args.huskies:
+        husky_client.enableApiControl(True, vehicle_name=name)
 
-        # LiDAR @ 10 Hz
-        if step % lidar_step == 0:
-            pts = get_nonempty_lidar(c, name, LIDAR_NAME)
-            np.save(os.path.join(files[name]["lidar"], f"{t:.6f}.npy"), pts)
+    # Pause simulation globally (prefer drone client, as before)
+    pause_client = drone_client or husky_client
+    pause_client.simPause(True)
 
-    # 3) huskies
-    for name in HUSKY_NAMES:
-        c = husky_client
+    # Prepare output dirs & files
+    os.makedirs(args.outdir, exist_ok=True)
+    files = {}
+    all_vehicles = list(args.drones) + list(args.huskies)
 
-        # IMU
-        imu = c.getImuData(vehicle_name=name)
-        la, av = imu.linear_acceleration, imu.angular_velocity
-        files[name]["imu"].write(
-            f"{t:.6f} {la.x_val:.6f} {la.y_val:.6f} {la.z_val:.6f} "
-            f"{av.x_val:.6f} {av.y_val:.6f} {av.z_val:.6f}\n"
-        )
+    for v in all_vehicles:
+        base = os.path.join(args.outdir, v)
+        os.makedirs(base, exist_ok=True)
+        files[v] = {
+            "imu":  open(os.path.join(base, "imu.txt"),  "w"),
+            "odom": open(os.path.join(base, "odom.txt"), "w"),
+            "rgb": os.path.join(base, "rgb"),
+            "rgb_stereo_left":  os.path.join(base, "rgb_stereo_left"),
+            "rgb_stereo_right": os.path.join(base, "rgb_stereo_right"),
+            "depth": os.path.join(base, "depth"),
+            "seg":   os.path.join(base, "seg"),
+            "lidar": os.path.join(base, "lidar"),
+        }
+        for sub in ("rgb", "rgb_stereo_left", "rgb_stereo_right", "depth", "seg", "lidar"):
+            os.makedirs(files[v][sub], exist_ok=True)
 
-        # Odometry @ 20 Hz
-        if step % odom_step == 0:
-            st = c.getCarState(vehicle_name=name)
-            p = st.kinematics_estimated.position
-            o = st.kinematics_estimated.orientation
-            files[name]["odom"].write(
-                f"{t:.6f} {p.x_val:.6f} {p.y_val:.6f} {p.z_val:.6f} "
-                f"{o.w_val:.6f} {o.x_val:.6f} {o.y_val:.6f} {o.z_val:.6f}\n"
-            )
+    odom_step  = int(round(args.imu_rate / args.odom_hz))
+    cam_step   = int(round(args.imu_rate / args.cam_hz))
+    lidar_step = int(round(args.imu_rate / args.lidar_hz))
 
-        # Cameras @ 20 Hz
-        if step % cam_step == 0:
-            imgs = get_nonempty_images(c, name, CAMERA_NAME)
-            _, depth, seg = imgs
+    total_steps = int(round(args.duration / dt))
+    print(f"Collecting {total_steps} steps @ {args.imu_rate:.0f} Hz…", flush=True)
 
-            depth_arr = np.array(depth.image_data_float, dtype=np.float32)\
-                            .reshape(depth.height, depth.width)
-            np.save(os.path.join(files[name]["depth"], f"{t:.6f}.npy"), depth_arr)
+    steps_done = 0
+    try:
+        for step in range(1, total_steps + 1):
+            if stop_requested:
+                print("Stop requested — finalizing early.", flush=True)
+                break
 
-            if SAVE_DEPTH_PNG:
-                depth_vis = np.clip(depth_arr, 0.0, 100.0) / 100.0
-                depth_vis = (depth_vis * 255).astype(np.uint8)
-                cv2.imwrite(os.path.join(files[name]["depth"], f"{t:.6f}.png"), depth_vis)
+            pause_client.simContinueForTime(dt)
+            t = step * dt
 
-            seg_img = np.frombuffer(seg.image_data_uint8, dtype=np.uint8)\
-                        .reshape(seg.height, seg.width, 3)
-            seg_img = cv2.cvtColor(seg_img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(os.path.join(files[name]["seg"], f"{t:.6f}.png"), seg_img)
+            for name in args.drones:
+                collect_vehicle(drone_client, name, files, args, step, t,
+                                odom_step, cam_step, lidar_step, is_drone=True)
+            for name in args.huskies:
+                collect_vehicle(husky_client, name, files, args, step, t,
+                                odom_step, cam_step, lidar_step, is_drone=False)
+            steps_done = step
+    finally:
+        pause_client.simPause(False)
+        for v in all_vehicles:
+            files[v]["imu"].close()
+            files[v]["odom"].close()
+        print(f"Done ({steps_done}/{total_steps} steps). Data saved under: {args.outdir}", flush=True)
 
-            for stereo_cam in STEREO_CAMERA_NAMES:
-                stereo_imgs = get_nonempty_images(c, name, stereo_cam)
-                stereo_scene = stereo_imgs[0]
-                stereo_rgb = np.frombuffer(stereo_scene.image_data_uint8, dtype=np.uint8)\
-                                .reshape(stereo_scene.height, stereo_scene.width, 3)
-                stereo_rgb = cv2.cvtColor(stereo_rgb, cv2.COLOR_RGB2BGR)
 
-                out_dir = (
-                    files[name]["rgb_stereo_left"]
-                    if stereo_cam == "stereo_left"
-                    else files[name]["rgb_stereo_right"]
-                )
-                cv2.imwrite(os.path.join(out_dir, f"{t:.6f}.png"), stereo_rgb)
-
-        if step % lidar_step == 0:
-            pts = get_nonempty_lidar(c, name, LIDAR_NAME)
-            np.save(os.path.join(files[name]["lidar"], f"{t:.6f}.npy"), pts)
-
-# finalize
-drone_client.simPause(False)
-for v in all_vehicles:
-    files[v]["imu"].close()
-    files[v]["odom"].close()
-
-print("Done. Data saved under:", OUTDIR)
+if __name__ == "__main__":
+    main()
