@@ -45,8 +45,8 @@ DEFAULT_NUM_DRONES=2
 
 # Default velocity
 # VELOCITY=1.5 
-# VELOCITY=0.75
-VELOCITY=5
+VELOCITY=0.75
+# VELOCITY=5
 
 # Default fly altitude. NOTE!!! This altitude is relative to the PlayerStart object's height in UE5, which is 1.5m above ground
 # for DAIR-V2X-style inf camera flying in city env;

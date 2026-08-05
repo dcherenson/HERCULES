@@ -44,12 +44,12 @@ DEFAULT_NUM_UGVS=2
 
 # Default linear speed (in m/s) when no individual speed is provided
 # NOTE!!! Set speed to 0.35 when you are running in simpause clock based physics, do not remove below
-# DEFAULT_SPEED=0.29
+DEFAULT_SPEED=0.29
 # DEFAULT_SPEED=0.5
 # DEFAULT_SPEED=0.3
 # DEFAULT_SPEED=0.6 # forest
 
-DEFAULT_SPEED=5.0  # nuclearnev city test
+# DEFAULT_SPEED=5.0  # nuclearnev city test
 
 # Default control-loop frequency (in Hz)
 DEFAULT_CTRL_HZ=20
