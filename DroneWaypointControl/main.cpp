@@ -20,6 +20,8 @@ STRICT_MODE_ON
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <algorithm>
+#include <cmath>
 
 using namespace msr::airlib;
 
@@ -28,7 +30,7 @@ void sleep_for_seconds(int seconds)
     std::this_thread::sleep_for(std::chrono::seconds(seconds));
 }
 
-std::vector<Vector3r> loadWaypoints(const std::string &file_path, float fixed_z)
+std::vector<Vector3r> loadWaypoints(const std::string &file_path, float fixed_z, bool use_waypoint_z)
 {
     std::vector<Vector3r> waypoints;
     std::ifstream file(file_path);
@@ -46,7 +48,11 @@ std::vector<Vector3r> loadWaypoints(const std::string &file_path, float fixed_z)
         float x, y, z;
         if (iss >> x >> y >> z)
         {
-            waypoints.emplace_back(Vector3r(x, y, fixed_z));
+            // Recorded files store Z up-positive; AirSim expects NED (z down-negative).
+            // In waypoint-z mode, clamp to >=1m above origin so ground-level points
+            // recorded before takeoff don't drive the drone into the floor.
+            float z_ned = use_waypoint_z ? std::min(-z, -1.0f) : fixed_z;
+            waypoints.emplace_back(Vector3r(x, y, z_ned));
         }
     }
 
@@ -56,21 +62,37 @@ std::vector<Vector3r> loadWaypoints(const std::string &file_path, float fixed_z)
 
 int main(int argc, char *argv[])
 {
-    if (argc < 3 || argc > 6)
+    if (argc < 3 || argc > 7)
     {
-        std::cerr << "Usage: " << argv[0] << " <DroneName> <WaypointFilePath> [WaypointVelocity] [FlyAltitude] [--no-return-home]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <DroneName> <WaypointFilePath> [WaypointVelocity] [FlyAltitude] [--use-waypoint-z] [--no-return-home]" << std::endl;
         return 1;
     }
 
     std::string drone_name = argv[1];
     std::string waypoint_file = argv[2];
-    float waypoint_flight_velocity = (argc >= 4) ? std::stof(argv[3]) : 2.0f;
-    float fly_altitude = (argc >= 5) ? std::stof(argv[4]) : -35.0f;
+    float waypoint_flight_velocity = 2.0f;
+    float fly_altitude = -35.0f;
     float return_home_velocity = 3.0f;
     bool enable_return_home = true;
-    if (argc == 6 && std::string(argv[5]) == "--no-return-home")
+    bool use_waypoint_z = false;
+    int positional = 0;
+    for (int i = 3; i < argc; ++i)
     {
-        enable_return_home = false;
+        std::string arg = argv[i];
+        if (arg == "--no-return-home")
+            enable_return_home = false;
+        else if (arg == "--use-waypoint-z")
+            use_waypoint_z = true;
+        else if (positional == 0)
+        {
+            waypoint_flight_velocity = std::stof(arg);
+            positional = 1;
+        }
+        else
+        {
+            fly_altitude = std::stof(arg);
+            positional = 2;
+        }
     }
 
     try
@@ -91,20 +113,49 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        std::cout << "[" << drone_name << "] Moving to altitude " << -fly_altitude << " meters..." << std::endl;
-        client.moveToZAsync(fly_altitude, 2.5f, 30.0f, YawMode(true, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
-
-        std::vector<Vector3r> waypoints = loadWaypoints(waypoint_file, fly_altitude);
+        std::vector<Vector3r> waypoints = loadWaypoints(waypoint_file, fly_altitude, use_waypoint_z);
         if (waypoints.empty())
         {
             std::cerr << "[" << drone_name << "] No valid waypoints found. Exiting..." << std::endl;
             return 1;
         }
 
-        std::cout << "[" << drone_name << "] Flying through " << waypoints.size()
-                  << " waypoints at velocity " << waypoint_flight_velocity << " m/s..." << std::endl;
+        // Initial climb: fixed altitude, or the first waypoint's altitude in waypoint-z mode
+        float initial_z = use_waypoint_z ? waypoints.front().z() : fly_altitude;
+        std::cout << "[" << drone_name << "] Moving to altitude " << -initial_z << " meters"
+                  << (use_waypoint_z ? " (waypoint-z mode)" : "") << "..." << std::endl;
+        client.moveToZAsync(initial_z, 2.5f, 30.0f, YawMode(true, 0), -1.0f, 1.0f, drone_name)->waitOnLastTask();
 
-        client.moveOnPathAsync(waypoints, waypoint_flight_velocity, 100000.0f,
+        // Skip leading waypoints within 2m (XY) of the start position: they are the
+        // near-stationary points recorded during takeoff, and with ForwardOnly yaw
+        // they give the controller no usable heading, causing a spin at path start.
+        auto start_pos = client.getMultirotorState(drone_name).getPosition();
+        size_t start_idx = 0;
+        while (start_idx + 1 < waypoints.size())
+        {
+            float dx = waypoints[start_idx].x() - start_pos.x();
+            float dy = waypoints[start_idx].y() - start_pos.y();
+            if (std::sqrt(dx * dx + dy * dy) >= 2.0f)
+                break;
+            ++start_idx;
+        }
+        std::vector<Vector3r> path(waypoints.begin() + start_idx, waypoints.end());
+
+        // Pre-aim at the first real waypoint so the path starts without a yaw flail.
+        // No-op if the drone already faces its direction of travel.
+        float aim_dx = path.front().x() - start_pos.x();
+        float aim_dy = path.front().y() - start_pos.y();
+        if (std::sqrt(aim_dx * aim_dx + aim_dy * aim_dy) > 0.5f)
+        {
+            float yaw_deg = std::atan2(aim_dy, aim_dx) * 180.0f / static_cast<float>(M_PI);
+            client.rotateToYawAsync(yaw_deg, 10.0f, 2.0f, drone_name)->waitOnLastTask();
+        }
+
+        std::cout << "[" << drone_name << "] Flying through " << path.size()
+                  << " waypoints (skipped " << start_idx << " takeoff points) at velocity "
+                  << waypoint_flight_velocity << " m/s..." << std::endl;
+
+        client.moveOnPathAsync(path, waypoint_flight_velocity, 100000.0f,
                                DrivetrainType::ForwardOnly,
                                YawMode(false, 0), 4.0f, 1.0f,
                                drone_name)

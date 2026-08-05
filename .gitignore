@@ -336,7 +336,14 @@ cmake_build/
 /3.3.2.zip
 /PythonClient/**/cloud.txt
 /PythonClient/**/cloud.asc
-/Unreal/Plugins/AirSim/Content/VehicleAdv/SUV/
+# Ignore downloaded SUV content, but keep custom HERCULES UGV assets tracked.
+# Note: this must be "/*" (contents) not "/" (directory) or the negations below
+# would have no effect - git does not descend into fully-excluded directories.
+/Unreal/Plugins/AirSim/Content/VehicleAdv/SUV/*
+!/Unreal/Plugins/AirSim/Content/VehicleAdv/SUV/UGVPawn.uasset
+!/Unreal/Plugins/AirSim/Content/VehicleAdv/SUV/UGVWheelFront.uasset
+!/Unreal/Plugins/AirSim/Content/VehicleAdv/SUV/UGVWheelRear.uasset
+!/Unreal/Plugins/AirSim/Content/VehicleAdv/SUV/CPHuskyMountedBar.uasset
 /suv_download_tmp
 car_assets.zip
 __pycache__/

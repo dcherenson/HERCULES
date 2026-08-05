@@ -2,13 +2,14 @@
 
 import setup_path
 import hercules_cosysairsim as airsim
+import argparse
 import time
 import numpy as np
 from multiprocessing import Process
 
-# UGV names from settings.json
-UGV_NAMES = ["Husky1", "Husky2"]
-# UGV_NAMES = ["Husky1"]
+# Default UGV names from settings.json (override with --ugvs)
+UGV_NAMES = ["Husky1"]
+UGV_PORT = 41452
 
 # Speed regulation parameters
 TARGET_SPEED = 0.3    # m/s magnitude
@@ -72,8 +73,9 @@ def drive_distance(client, vehicle_name, distance, steering=0.0):
 def run_ugv_calibration_motion(vehicle_name,
                                segment_count=4,
                                total_dist=5.0,
-                               steer_amp=0.4):
-    client = airsim.CarClient(port=41452)
+                               steer_amp=0.4,
+                               port=UGV_PORT):
+    client = airsim.CarClient(port=port)
     client.confirmConnection()
     client.enableApiControl(True, vehicle_name=vehicle_name)
     try:
@@ -106,9 +108,16 @@ def run_ugv_calibration_motion(vehicle_name,
     client.enableApiControl(False, vehicle_name=vehicle_name)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Cam-IMU calibration maneuvers for UGVs")
+    parser.add_argument("--ugvs", nargs="*", default=UGV_NAMES,
+                        help="UGV vehicle names (default: %(default)s)")
+    parser.add_argument("--port", type=int, default=UGV_PORT)
+    cli = parser.parse_args()
+
     procs = []
-    for name in UGV_NAMES:
-        p = Process(target=run_ugv_calibration_motion, args=(name,))
+    for name in cli.ugvs:
+        p = Process(target=run_ugv_calibration_motion, args=(name,),
+                    kwargs={"port": cli.port})
         p.start()
         procs.append(p)
     for p in procs:
