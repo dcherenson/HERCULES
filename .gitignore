@@ -420,3 +420,5 @@ ros2/src/VINS-MONO-ROS2
 
 *.csv
 PythonClient/segmentation/*.csv
+
+herculesvenv/
