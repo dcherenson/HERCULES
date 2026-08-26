@@ -1998,6 +1998,11 @@ APawn *ASimModeBase::createVehiclePawn(const AirSimSettings::VehicleSetting &veh
     APawn *spawned_pawn = static_cast<APawn *>(this->GetWorld()->SpawnActor(
         vehicle_bp_class, &spawn_position, &spawn_rotation, pawn_spawn_params));
 
+    if (spawned_pawn)
+    {
+        spawned_pawn->SpawnDefaultController();
+    }
+
     spawned_actors_.Add(spawned_pawn);
 
     return spawned_pawn;
@@ -2042,6 +2047,7 @@ bool ASimModeBase::createVehicleAtRuntime(const std::string &vehicle_name, const
     const auto *vehicle_setting = getSettings().getVehicleSetting(vehicle_name);
 
     auto spawned_pawn = createVehiclePawn(*vehicle_setting);
+    addPawnToMap(spawned_pawn, vehicle_type_lower);
     auto vehicle_sim_api = createVehicleApi(spawned_pawn);
 
     // Usually physics registration happens at init, in ASimModeWorldBase::initializeForPlay(), but not in this case

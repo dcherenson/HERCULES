@@ -218,6 +218,10 @@ def euler_to_quaternion(roll, pitch, yaw):
     return q
 
 
+to_quaternion = euler_to_quaternion
+
+
+
 def euler_to_rotation_matrix(roll, pitch, yaw):
     cx = math.cos(roll * 0.5)
     sx = math.sin(roll * 0.5)

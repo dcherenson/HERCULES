@@ -27,6 +27,13 @@ void SkidVehiclePawnApi::updateMovement(const msr::airlib::CarApiBase::CarContro
 	to_set_controls_.brake = 0;
 	bool set_throttle = false;
 	bool set_steering = false;
+	
+    movement_->SetUseAutomaticGears(!controls.is_manual_gear);
+	if (!controls.is_manual_gear && movement_->GetTargetGear() < 0)
+		movement_->SetTargetGear(0, true);
+	if (controls.is_manual_gear && movement_->GetTargetGear() != controls.manual_gear)
+		movement_->SetTargetGear(controls.manual_gear, controls.gear_immediate);
+
 	if (controls.handbrake) {
 		to_set_controls_.throttle = 0;
 		to_set_controls_.steering = 0;

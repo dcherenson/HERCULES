@@ -112,7 +112,11 @@ void PawnSimApi::setupCamerasFromSettings(const common_utils::UniqueValueMap<std
     for (auto& pair : cameras_.getMap()) {
         const auto& camera_setting = Utils::findOrDefault(getVehicleSetting()->cameras, pair.first, camera_defaults);
         APIPCamera* camera = pair.second;
-        camera->setupCameraFromSettings(camera_setting, getNedTransform());
+        if (camera) {
+            camera->setupCameraFromSettings(camera_setting, getNedTransform());
+        } else {
+            UAirBlueprintLib::LogMessageString("Camera was null in setupCamerasFromSettings for key: ", pair.first, LogDebugLevel::Failure);
+        }
     }
 }
 

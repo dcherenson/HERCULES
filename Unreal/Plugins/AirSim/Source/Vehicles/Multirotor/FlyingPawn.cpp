@@ -18,12 +18,26 @@ void AFlyingPawn::BeginPlay()
 void AFlyingPawn::initializeForBeginPlay()
 {
     //get references of existing camera
-    camera_front_right_ = Cast<APIPCamera>(
-        (UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("FrontRightCamera")))->GetChildActor());
-    camera_front_left_ = Cast<APIPCamera>(
-        (UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("FrontLeftCamera")))->GetChildActor());
-    camera_front_center_ = Cast<APIPCamera>(
-        (UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("FrontCenterCamera")))->GetChildActor());
+    auto comp_fr = UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("FrontRightCamera"));
+    if (comp_fr) {
+        camera_front_right_ = Cast<APIPCamera>(comp_fr->GetChildActor());
+    } else {
+        camera_front_right_ = nullptr;
+    }
+
+    auto comp_fl = UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("FrontLeftCamera"));
+    if (comp_fl) {
+        camera_front_left_ = Cast<APIPCamera>(comp_fl->GetChildActor());
+    } else {
+        camera_front_left_ = nullptr;
+    }
+
+    auto comp_fc = UAirBlueprintLib::GetActorComponent<UChildActorComponent>(this, TEXT("FrontCenterCamera"));
+    if (comp_fc) {
+        camera_front_center_ = Cast<APIPCamera>(comp_fc->GetChildActor());
+    } else {
+        camera_front_center_ = nullptr;
+    }
 
     // Note by SSG: Not spawning back and bottom cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
     // camera_back_center_ = Cast<APIPCamera>(
@@ -55,24 +69,27 @@ void AFlyingPawn::EndPlay(const EEndPlayReason::Type EndPlayReason)
 const common_utils::UniqueValueMap<std::string, APIPCamera*> AFlyingPawn::getCameras() const
 {
     common_utils::UniqueValueMap<std::string, APIPCamera*> cameras;
-    cameras.insert_or_assign("front_center", camera_front_center_);
-    cameras.insert_or_assign("front_right", camera_front_right_);
-    cameras.insert_or_assign("front_left", camera_front_left_);
-
-    // Note by SSG: Not spawning back and bottom cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
-    // cameras.insert_or_assign("bottom_center", camera_bottom_center_);
-    // cameras.insert_or_assign("back_center", camera_back_center_);
-
-    cameras.insert_or_assign("0", camera_front_center_);
-    cameras.insert_or_assign("1", camera_front_right_);
-    cameras.insert_or_assign("2", camera_front_left_);
+    if (camera_front_center_) {
+        cameras.insert_or_assign("front_center", camera_front_center_);
+        cameras.insert_or_assign("0", camera_front_center_);
+    }
+    if (camera_front_right_) {
+        cameras.insert_or_assign("front_right", camera_front_right_);
+        cameras.insert_or_assign("1", camera_front_right_);
+    }
+    if (camera_front_left_) {
+        cameras.insert_or_assign("front_left", camera_front_left_);
+        cameras.insert_or_assign("2", camera_front_left_);
+    }
 
     // Note by SSG: Not spawning back and bottom cameras to reduce CPU/GPU usage and because exploration algorithm does not use them
     // cameras.insert_or_assign("3", camera_bottom_center_);
     // cameras.insert_or_assign("4", camera_back_center_);
 
-    cameras.insert_or_assign("", camera_front_center_);
-    cameras.insert_or_assign("fpv", camera_front_center_);
+    if (camera_front_center_) {
+        cameras.insert_or_assign("", camera_front_center_);
+        cameras.insert_or_assign("fpv", camera_front_center_);
+    }
 
     return cameras;
 }

@@ -212,19 +212,24 @@ void ASkidVehiclePawn::initializeForBeginPlay(bool engine_sound)
 const common_utils::UniqueValueMap<std::string, APIPCamera*> ASkidVehiclePawn::getCameras() const
 {
 	common_utils::UniqueValueMap<std::string, APIPCamera*> cameras;
-	cameras.insert_or_assign("front_center", camera_front_center_);
-	cameras.insert_or_assign("front_right", camera_front_right_);
-	cameras.insert_or_assign("front_left", camera_front_left_);
+	if (camera_front_center_) {
+		cameras.insert_or_assign("front_center", camera_front_center_);
+		cameras.insert_or_assign("0", camera_front_center_);
+		cameras.insert_or_assign("", camera_front_center_);
+	}
+	if (camera_front_right_) {
+		cameras.insert_or_assign("front_right", camera_front_right_);
+		cameras.insert_or_assign("1", camera_front_right_);
+	}
+	if (camera_front_left_) {
+		cameras.insert_or_assign("front_left", camera_front_left_);
+		cameras.insert_or_assign("2", camera_front_left_);
+	}
+
 	// cameras.insert_or_assign("fpv", camera_driver_);
 	// cameras.insert_or_assign("back_center", camera_back_center_);
-
-	cameras.insert_or_assign("0", camera_front_center_);
-	cameras.insert_or_assign("1", camera_front_right_);
-	cameras.insert_or_assign("2", camera_front_left_);
 	// cameras.insert_or_assign("3", camera_driver_);
 	// cameras.insert_or_assign("4", camera_back_center_);
-
-	cameras.insert_or_assign("", camera_front_center_);
 
 	return cameras;
 }
