@@ -2371,5 +2371,5 @@ std::string ASimModeBase::getVehicleType(APawn *pawn) const
     std::map<APawn *, std::string>::const_iterator it = pawn_to_vehicle_.find(pawn);
     if (it != pawn_to_vehicle_.end())
         return it->second;
-    return nullptr;
+    return "";
 }

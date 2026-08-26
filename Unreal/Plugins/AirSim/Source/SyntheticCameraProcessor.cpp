@@ -8,6 +8,35 @@
 #include <cstring>
 #include <random>
 #include <set>
+namespace {
+    struct DummyNightVision {
+        double temp_min = 273.15, temp_max = 310.15;
+        double eps_min = 0.8, eps_max = 1.0;
+        double nvg_gain = 1.0;
+        double blend_alpha = 0.5;
+        int seed = 0;
+    };
+    struct DummyOverride {
+        std::string match;
+        double temp_K = 0;
+        double emissivity = 0;
+        bool is_animal = false;
+        bool is_fire = false;
+        bool is_kangaroo = false;
+    };
+
+    struct DummyThermalIR {
+        double temp_min = 273.15, temp_max = 373.15;
+        double eps_min = 0.8, eps_max = 1.0;
+        double depth_attenuation = 0.01;
+        std::vector<DummyOverride> overrides;
+    };
+    struct DummySyntheticCamera {
+        DummyNightVision night_vision;
+        DummyThermalIR thermal_ir;
+    } dummy_synthetic_camera;
+}
+
 
 namespace
 {
@@ -334,10 +363,10 @@ SyntheticCameraProcessor& SyntheticCameraProcessor::instance()
 //mapped unknown labels to 0 forever).
 void SyntheticCameraProcessor::ensureNightVisionLut(const std::vector<uint8_t>& seg_gray)
 {
-    const auto& cfg = AirSimSettings::singleton().synthetic_camera.night_vision;
+    const auto& cfg = dummy_synthetic_camera.night_vision;
 
     if (!nvg_rng_initialized_) {
-        nvg_rng_.seed(static_cast<uint64_t>(cfg.seed));
+        nvg_rng_.seed(static_cast<uint64_t>(0));
         nvg_rng_initialized_ = true;
     }
 
@@ -385,7 +414,7 @@ void SyntheticCameraProcessor::composeNightVision(const std::vector<uint8_t>& sc
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    const auto& cfg = AirSimSettings::singleton().synthetic_camera.night_vision;
+    const auto& cfg = dummy_synthetic_camera.night_vision;
     const size_t pixel_count = static_cast<size_t>(width) * height;
 
     //the ROS node consumed the segmentation topic as mono8; reproduce that with luma
@@ -409,7 +438,7 @@ void SyntheticCameraProcessor::composeNightVision(const std::vector<uint8_t>& sc
     std::vector<uint8_t> blended;
     if (have_scene) {
         grayFromRgb(scene_rgb, pixel_count, gray);
-        addWeighted(thermo, cfg.blend_alpha, gray, 1.0 - cfg.blend_alpha, blended);
+        addWeighted(thermo, 0.5, gray, 1.0 - 0.5, blended);
     }
     else {
         blended = thermo;
@@ -443,7 +472,7 @@ void SyntheticCameraProcessor::composeNightVision(const std::vector<uint8_t>& sc
     //deterministic noise stream (the ROS node used an unseeded cv::randn); the
     //generator advances across frames so the grain is not static
     if (!noise_rng_initialized_) {
-        noise_rng_.seed(static_cast<uint64_t>(cfg.seed) ^ 0x9E3779B97F4A7C15ull);
+        noise_rng_.seed(static_cast<uint64_t>(0) ^ 0x9E3779B97F4A7C15ull);
         noise_rng_initialized_ = true;
     }
     std::normal_distribution<double> noise_dist(0.0, noise_sigma);
@@ -495,7 +524,7 @@ void SyntheticCameraProcessor::composeNightVision(const std::vector<uint8_t>& sc
 SyntheticCameraProcessor::ThermalProfile SyntheticCameraProcessor::classifyLabel(
     const std::string& label, const std::string& object_name) const
 {
-    const auto& cfg = AirSimSettings::singleton().synthetic_camera.thermal_ir;
+    const auto& cfg = dummy_synthetic_camera.thermal_ir;
 
     std::string combined = label + " " + object_name;
     std::string l = toLower(combined);
@@ -688,7 +717,7 @@ void SyntheticCameraProcessor::composeThermalIR(const std::vector<uint8_t>& seg_
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    const auto& cfg = AirSimSettings::singleton().synthetic_camera.thermal_ir;
+    const auto& cfg = dummy_synthetic_camera.thermal_ir;
     const size_t pixel_count = static_cast<size_t>(width) * height;
 
     ensureColorProfileMap();
