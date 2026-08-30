@@ -423,3 +423,5 @@ PythonClient/segmentation/*.csv
 
 herculesvenv/
 .DS_Store
+
+reference_papers/

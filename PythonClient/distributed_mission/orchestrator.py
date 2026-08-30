@@ -133,10 +133,32 @@ def main():
                 pos = np.array([kinematics.position.x_val, kinematics.position.y_val, kinematics.position.z_val])
                 vel = np.array([kinematics.linear_velocity.x_val, kinematics.linear_velocity.y_val, kinematics.linear_velocity.z_val])
                 ground_truth_positions[a_id] = pos
+                # Gather new sensors based on vehicle type
+                try:
+                    imu_data = client.getImuData(vehicle_name=a_id)
+                    thermal_req = airsim.ImageRequest("front_center", airsim.ImageType.ThermalIR, False, False)
+                    thermal_res = client.simGetImages([thermal_req], vehicle_name=a_id)
+                    
+                    dist_data = None
+                    lidar_data = None
+                    
+                    if agent.vehicle_type == "drone":
+                        dist_data = client.getDistanceSensorData(distance_sensor_name="Distance", vehicle_name=a_id)
+                    elif agent.vehicle_type == "ugv":
+                        lidar_data = client.getLidarData(lidar_name="Lidar1", vehicle_name=a_id)
+                except Exception as e:
+                    print(f"Sensor error on {a_id}: {e}")
+                    imu_data = None
+                    thermal_res = None
+
                 sensor_data_dict[a_id] = {
                     "position": pos,
                     "velocity": vel,
-                    "kinematics": kinematics
+                    "kinematics": kinematics,
+                    "imu": imu_data,
+                    "thermal_image": thermal_res,
+                    "distance": dist_data,
+                    "lidar": lidar_data
                 }
 
             # Evaluate distance-dependent communication topology
