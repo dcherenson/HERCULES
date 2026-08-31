@@ -425,3 +425,5 @@ herculesvenv/
 .DS_Store
 
 reference_papers/
+.agents/
+skills-lock.json

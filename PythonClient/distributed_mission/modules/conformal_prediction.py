@@ -25,6 +25,7 @@ class ConformalPredictionModule:
         Outputs:
             robustness_margin: Scalar or vector uncertainty bound (e.g., safety margin in meters).
         """
-        # Placeholder: Return default fixed robustness margin (e.g., 0.5 meters safety buffer)
-        default_margin = 0.5
+        # Placeholder: robustness estimation is not implemented yet. Keep the
+        # placeholder neutral so it does not silently add a safety buffer.
+        default_margin = 0.0
         return default_margin

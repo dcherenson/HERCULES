@@ -27,7 +27,9 @@ classifiers = [
 keywords = ["simulation", "airsim", "api"]
 dependencies = [
     "numpy",
-    "rpc-msgpack"
+    "rpc-msgpack",
+    "osqp",
+    "matplotlib"
 ]
 requires-python = ">=3.7"
 
@@ -45,6 +47,4 @@ hercules_cosysairsim = ["colormap.npy"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["hercules_cosysairsim*"]
-
-
 
