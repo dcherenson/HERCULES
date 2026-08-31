@@ -15,10 +15,12 @@ Use `--timing-mode stepped` when deterministic `simPause`/
 2.5 Hz per vehicle and is staggered across the team; cached proxies are
 inflated by age and expire into the safety fail-safe.
 
-On the reference Mac, the optimized FlyingCPP headless run achieved roughly
-59--60 ms mean cycle time and 93--94 ms p95 over 60 control steps for both
-CBF methods. A small number of deadline misses can still occur from Unreal
-or RPC jitter; they are recorded in the JSONL timing fields.
+The control loop is scheduled against a 10 Hz deadline, but live sensor
+perception is the expensive path: a recent 800-step FlyingCPP run averaged
+about 115 ms per cycle, with perception averaging about 67 ms and occasional
+longer RPC/depth calls. Deadline misses are recorded in the JSONL timing
+fields. Truth-obstacle mode skips sensor captures and is useful for isolating
+CBF/formation behavior from this perception cost.
 
 Launch modes are `visible`, `headless`, and `existing`. FlyingCPP is the
 default orchestrator map. It uses deterministic `1M_Cube_Chamfer` blocks whose
@@ -27,9 +29,12 @@ cleanup. RuralAustralia Example 1 remains selectable, but is not yet a
 safety-certification scenario.
 
 The default FlyingCPP course places the mission goal at x=16 m, beyond a
-deterministic mixed-height obstacle course. The first wall has narrow lateral
-passages that are smaller than the UAV box formation, and floating blocks in
-the passages create additional altitude changes. Use `--no-spawn-obstacles` to
+deterministic mixed-height obstacle course. It uses one fixed bypass waypoint
+`(14, -14, -1)` in AirSim NED and a 3 m transition radius. UAV references use
+that point as a temporary virtual formation center while the UGVs retain their
+leader-follower formation; no online waypoint generation is used. The first
+row has lateral passages smaller than the UAV box formation, and floating
+blocks create additional altitude changes. Use `--no-spawn-obstacles` to
 disable this course.
 
 Startup launches all UAV takeoff commands concurrently, then launches all UAV

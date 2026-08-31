@@ -208,8 +208,9 @@ def analyze_perception_records(records: Sequence[Mapping], sidecar_metadata: Map
             zero_count += int(stage_counts.get("zero_returns", 0))
             zero_entered_count += int(stage_counts.get("zero_returns_entered_detector", 0))
             state = (record.get("states") or {}).get(name, {})
-            if view.get("position") is not None and state.get("position") is not None:
-                offsets.append(float(np.linalg.norm(np.asarray(view["position"], dtype=float) - np.asarray(state["position"], dtype=float))))
+            vehicle_position = view.get("vehicle_position", state.get("position"))
+            if view.get("position") is not None and vehicle_position is not None:
+                offsets.append(float(np.linalg.norm(np.asarray(view["position"], dtype=float) - np.asarray(vehicle_position, dtype=float))))
             if view.get("sensor_type") == "uav_camera" and view.get("position") is not None:
                 rotation = _quaternion_to_matrix(view.get("orientation_quaternion"))
                 sensor_position = np.asarray(view["position"], dtype=float)
@@ -272,7 +273,8 @@ def _write_timeline(records: Sequence[Mapping], report: Mapping, output_path: st
             count.append(len(data.get("proxies", [])))
             age.append(float(data.get("age", view.get("age", np.nan))))
             state = (record.get("states") or {}).get(name, {})
-            offset.append(float(np.linalg.norm(np.asarray(view["position"]) - np.asarray(state["position"]))) if view.get("position") is not None and state.get("position") is not None else np.nan)
+            vehicle_position = view.get("vehicle_position", state.get("position"))
+            offset.append(float(np.linalg.norm(np.asarray(view["position"]) - np.asarray(vehicle_position))) if view.get("position") is not None and vehicle_position is not None else np.nan)
         axes[0].plot(x, count, marker=".", label=name)
         axes[1].plot(x, age, marker=".", label=name)
         axes[2].plot(x, offset, marker=".", label=name)
@@ -301,8 +303,16 @@ def _write_worst_capture_plot(record: Mapping, name: str, capture_id: str, metad
     import matplotlib.pyplot as plt
 
     figure, axes = plt.subplots(1, 2, figsize=(12, 5))
+    def plot_points(points: np.ndarray) -> np.ndarray:
+        points = np.asarray(points, dtype=float).reshape((-1, 3))
+        finite = np.all(np.isfinite(points), axis=1)
+        # Ignore invalid depth sentinels and unbounded legacy values in the
+        # human-readable overlay while retaining their stage counts in JSON.
+        finite &= np.linalg.norm(points, axis=1) <= 35.0
+        return points[finite]
+
     if "raw_sensor" in keys:
-        points = np.asarray(archive[keys["raw_sensor"]])
+        points = plot_points(archive[keys["raw_sensor"]])
         if len(points):
             axes[0].scatter(points[:, 0], points[:, 1], s=2, alpha=0.35, label="raw sensor")
     axes[0].scatter([0], [0], color="red", marker="x", label="sensor origin")
@@ -310,7 +320,7 @@ def _write_worst_capture_plot(record: Mapping, name: str, capture_id: str, metad
     axes[0].set_xlabel("forward/local X")
     axes[0].set_ylabel("right/local Y")
     if "world_input" in keys:
-        points = np.asarray(archive[keys["world_input"]])
+        points = plot_points(archive[keys["world_input"]])
         if len(points):
             axes[1].scatter(points[:, 0], points[:, 1], s=2, alpha=0.35, label="world input")
     data = (record.get("obstacles") or {}).get(name, {})

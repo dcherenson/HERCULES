@@ -52,7 +52,9 @@ class CBFConfig:
     k1: float = 2.0
     k2: float = 2.0
     alpha: float = 2.0
-    uncertainty_radius: float = 0.5
+    # Placeholder robustness radius; set to zero until the estimator supplies
+    # a calibrated uncertainty model.
+    uncertainty_radius: float = 0.0
     uav_radius: float = 1.0
     ugv_radius: float = 1.25
     obstacle_margin: float = 0.0

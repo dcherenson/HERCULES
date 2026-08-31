@@ -4,7 +4,7 @@ import numpy as np
 
 from simulation.airsim_runtime import AirSimLaunchConfig
 from simulation.airsim_runtime import AirSimFacade, AirSimLauncher
-from orchestrator import _is_ground_object, compose_sensor_world_pose
+from orchestrator import _is_ground_object, camera_response_world_pose, compose_sensor_world_pose
 
 
 def test_launcher_preserves_start_formation_modes():
@@ -94,3 +94,64 @@ def test_sensor_pose_composes_vehicle_world_pose_with_relative_mount():
     )
     assert np.allclose(position, [10.0, 21.0, -3.0])
     assert np.allclose(rotation, vehicle_rotation)
+
+
+def test_camera_response_pose_is_translated_from_vehicle_start_frame_to_world():
+    position, rotation, frame = camera_response_world_pose(
+        np.asarray([0.46, 2.0, -4.90]),
+        np.eye(3),
+        np.asarray([-2.0, -2.0, -5.40]),
+        np.asarray([-2.0, 2.0, -4.90]),
+    )
+    assert np.allclose(position, [0.46, -2.0, -5.40])
+    assert np.allclose(rotation, np.eye(3))
+    assert frame == "world_ned_from_vehicle_start_frame"
+
+
+def test_camera_response_pose_has_explicit_fallback_without_frame_origin():
+    position, rotation, frame = camera_response_world_pose(
+        np.asarray([0.46, 0.0, -4.90]), np.eye(3), None, None
+    )
+    assert np.allclose(position, [0.46, 0.0, -4.90])
+    assert np.allclose(rotation, np.eye(3))
+    assert frame == "response_pose_frame_unknown"
+
+
+def test_ugv_command_maps_signed_speed_to_air_sim_car_controls():
+    class Controls:
+        def __init__(self):
+            self.throttle = None
+            self.brake = None
+            self.steering = None
+            self.is_manual_gear = None
+            self.manual_gear = None
+
+    class AirSim:
+        CarControls = Controls
+
+    class Car:
+        def __init__(self):
+            self.last = None
+
+        def setCarControls(self, controls, vehicle_name=None):
+            self.last = (controls, vehicle_name)
+
+    car = Car()
+    facade = AirSimFacade(airsim_module=AirSim, car_client=car)
+    facade.command_ugv("Husky1", -1.0, 0.25)
+    controls, vehicle_name = car.last
+    assert vehicle_name == "Husky1"
+    assert controls.throttle == 0.5
+    assert controls.brake == 0.0
+    assert controls.manual_gear == -1
+    assert controls.steering == 0.25
+
+    facade.command_ugv("Husky1", 0.0, -0.5, brake=1.0)
+    controls, _ = car.last
+    assert controls.throttle == 0.0
+    assert controls.brake == 1.0
+    assert controls.manual_gear == 1
+
+    facade.command_ugv("Husky1", 0.1, 0.0, throttle=0.75)
+    controls, _ = car.last
+    assert controls.throttle == 0.75

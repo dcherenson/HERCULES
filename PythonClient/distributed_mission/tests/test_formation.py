@@ -53,3 +53,20 @@ def test_leader_and_followers_get_distinct_nominal_references():
 
 def test_heading_wraps_to_shortest_direction():
     assert np.isclose(wrap_angle(3.0 * np.pi), -np.pi)
+
+
+def test_single_preplanned_waypoint_is_used_before_goal():
+    controller = FormationController(FormationConfig(intermediate_waypoint=np.array([16.0, -10.0, -1.0])))
+    states = {"Husky1": AgentState("Husky1", np.zeros(3), vehicle_type="ugv")}
+    nominal = controller.nominal_unicycle_control(states["Husky1"], states, np.array([16.0, 0.0, -1.0]))
+    assert nominal[0] > 0.0
+    assert nominal[1] < 0.0
+
+
+def test_uavs_use_fixed_waypoint_center_before_leader_arrives():
+    waypoint = np.array([10.0, -10.0, -1.0])
+    controller = FormationController(FormationConfig(intermediate_waypoint=waypoint))
+    states = {"Husky1": AgentState("Husky1", np.zeros(3), vehicle_type="ugv")}
+    position, velocity, _ = controller.reference_for("SimpleFlight", states)
+    assert np.allclose(position, waypoint + controller.config.slots["SimpleFlight"])
+    assert np.allclose(velocity, np.zeros(3))

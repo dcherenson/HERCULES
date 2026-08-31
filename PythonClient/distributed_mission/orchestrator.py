@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime
 import os
 import sys
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -19,7 +20,13 @@ sys.path.append(os.path.join(current_dir, ".."))
 from agent import Agent
 from modules.cbf import AgentState, CBFConfig, ObstacleProxy
 from modules.formation_control import FormationConfig, FormationController
-from modules.obstacle_detection import ObstacleDetector, PerceptionConfig, decode_depth_response
+from modules.obstacle_detection import (
+    ObstacleDetector,
+    PerceptionConfig,
+    decode_depth_response,
+    estimate_ground_z,
+    truth_obstacle_proxies,
+)
 from modules.perception_diagnostics import PerceptionTraceStore
 from simulation.airsim_runtime import AsyncJsonlWriter, AirSimFacade, AirSimLaunchConfig, AirSimLauncher
 
@@ -32,12 +39,12 @@ COMMUNICATION_RANGE_METERS = 30.0
 # blocks have deliberately different heights, so the UAVs must also change
 # altitude while crossing the course. All centers/scales use AirSim NED.
 BLOCK_COURSE = (
-    (5.0, -5.0, -2.0, (2.0, 3.0, 4.0)),  # low ground block
-    (5.0, 0.0, -4.0, (2.0, 3.0, 8.0)),   # tall ground block
-    (5.0, 5.0, -3.0, (2.0, 3.0, 6.0)),   # medium ground block
+    (8.0, -7.0, -2.0, (2.0, 2.0, 4.0)),  # low ground block
+    (8.0, 0.0, -4.0, (2.0, 2.0, 8.0)),   # tall ground block
+    (8.0, 7.0, -3.0, (2.0, 2.0, 6.0)),   # medium ground block
     # Floating blocks occupy the two passages at different heights.
-    (8.0, -2.5, -5.5, (2.0, 1.5, 2.0)),
-    (8.0, 2.5, -7.0, (2.0, 1.5, 2.0)),
+    (12.0, -3.5, -5.5, (2.0, 1.5, 2.0)),
+    (12.0, 3.5, -7.0, (2.0, 1.5, 2.0)),
 )
 
 
@@ -129,6 +136,32 @@ def compose_sensor_world_pose(
     return vehicle_position + vehicle_rotation @ sensor_position, vehicle_rotation @ sensor_rotation
 
 
+def camera_response_world_pose(
+    response_position: np.ndarray,
+    response_rotation: np.ndarray,
+    actor_position: Optional[np.ndarray],
+    kinematics_position: Optional[np.ndarray],
+) -> Tuple[np.ndarray, np.ndarray, str]:
+    """Convert an AirSim image-response pose into world NED.
+
+    In Hero mode an image response pose is expressed in the vehicle's
+    configured starting-point frame.  That frame can be translated relative
+    to the shared Unreal world when vehicles are placed from settings.json.
+    The response orientation is already expressed in the inertial axes; only
+    the frame translation is needed here.  Keeping the fallback explicit is
+    useful for older AirSim builds that omit the response pose.
+    """
+
+    position = np.asarray(response_position, dtype=float).reshape(3)
+    rotation = np.asarray(response_rotation, dtype=float).reshape((3, 3))
+    if actor_position is not None and kinematics_position is not None:
+        actor = np.asarray(actor_position, dtype=float).reshape(3)
+        kinematics = np.asarray(kinematics_position, dtype=float).reshape(3)
+        if np.all(np.isfinite(actor)) and np.all(np.isfinite(kinematics)):
+            return position + actor - kinematics, rotation, "world_ned_from_vehicle_start_frame"
+    return position, rotation, "response_pose_frame_unknown"
+
+
 def _yaw_quaternion(yaw: float) -> List[float]:
     return [float(np.cos(yaw / 2.0)), 0.0, 0.0, float(np.sin(yaw / 2.0))]
 
@@ -155,8 +188,14 @@ def _capture_obstacles(
                 camera_fovs[name] = float(camera.fov) * np.pi / 180.0
             response_position = getattr(response, "camera_position", None)
             response_orientation = getattr(response, "camera_orientation", None)
-            camera_position = _vector3(response_position) if response_position is not None else state["position"]
-            camera_orientation = _quaternion_matrix(response_orientation) if response_orientation is not None else np.eye(3)
+            reported_camera_position = _vector3(response_position) if response_position is not None else state["position"]
+            reported_camera_orientation = _quaternion_matrix(response_orientation) if response_orientation is not None else np.eye(3)
+            camera_position, camera_orientation, camera_position_frame = camera_response_world_pose(
+                reported_camera_position,
+                reported_camera_orientation,
+                state.get("actor_position"),
+                state.get("kinematics_position"),
+            )
             horizontal_fov = camera_fovs[name]
             vertical_fov = 2.0 * np.arctan(np.tan(horizontal_fov / 2.0) * depth.shape[0] / depth.shape[1])
             capture_time = time.time()
@@ -170,13 +209,30 @@ def _capture_obstacles(
                 "vertical_fov_deg": float(np.degrees(vertical_fov)),
                 "range_m": float(detector.config.max_range),
                 "capture_timestamp": float(capture_time),
-                "position_frame": "world_ned",
+                "position_frame": camera_position_frame,
                 "point_frame": "camera_local_ned",
                 "vehicle_position": np.asarray(state["position"], dtype=float).tolist(),
+                "reported_position": reported_camera_position.tolist(),
+                "reported_position_frame": "vehicle_start_frame_ned",
+                "vehicle_frame_origin": (
+                    (np.asarray(state["actor_position"], dtype=float) - np.asarray(state["kinematics_position"], dtype=float)).tolist()
+                    if state.get("actor_position") is not None and state.get("kinematics_position") is not None else None
+                ),
             }
-            obstacles, diagnostics = detector.detect_with_diagnostics(
-                points, state["position"], capture_time, "depth_" + name, False, ground_z=0.0
+            # FlyingCPP's map ground is around NED z=2 rather than z=0. A
+            # fixed z=0 rejection both leaves the background floor in the
+            # cloud and can remove the top face of a course block. Estimate
+            # the visible horizontal ground return in the world cloud.
+            estimated_ground_z = estimate_ground_z(
+                points, state["position"], search_below=2.0, search_above=12.0,
+                min_range=detector.config.min_range, max_range=detector.config.max_range,
+                min_separation_above_ego=2.0,
             )
+            obstacles, diagnostics = detector.detect_with_diagnostics(
+                points, state["position"], capture_time, "depth_" + name, False, ground_z=estimated_ground_z
+            )
+            if estimated_ground_z is not None:
+                diagnostics.stage_counts["estimated_ground_z_mm"] = int(round(estimated_ground_z * 1000.0))
             return obstacles, True, sensor_view, {
                 "sensor_points": sensor_points,
                 "world_points": points,
@@ -229,9 +285,18 @@ def _capture_obstacles(
         if len(raw) > detector.config.max_points:
             raw = raw[np.linspace(0, len(raw) - 1, detector.config.max_points, dtype=int)]
         points = raw @ sensor_rotation.T + sensor_position
-        obstacles, diagnostics = detector.detect_with_diagnostics(
-            points, vehicle_position, capture_time, "lidar_" + name, True, ground_z=0.0
+        # The map ground is not necessarily NED z=0. Estimate its local
+        # height from the dense LiDAR return so the planar detector does not
+        # turn the ground mesh into large obstacle proxies.
+        estimated_ground_z = estimate_ground_z(
+            points, vehicle_position, min_range=detector.config.min_range,
+            max_range=detector.config.max_range,
         )
+        obstacles, diagnostics = detector.detect_with_diagnostics(
+            points, vehicle_position, capture_time, "lidar_" + name, True, ground_z=estimated_ground_z
+        )
+        if estimated_ground_z is not None:
+            diagnostics.stage_counts["estimated_ground_z_mm"] = int(round(estimated_ground_z * 1000.0))
         diagnostics.stage_counts["raw_sensor_points"] = raw_count
         diagnostics.stage_counts["finite_nonzero_points"] = len(raw)
         diagnostics.stage_counts["zero_returns"] = zero_returns
@@ -255,12 +320,32 @@ def _spawn_block_course(facade: AirSimFacade, airsim: Any) -> Tuple[List[str], L
     # Cleanup is limited to this prefix so user-created scene objects survive.
     for index, (x, y, z, dimensions) in enumerate(BLOCK_COURSE):
         name = "distributed_cbf_block_{}".format(index)
+        try:
+            # AirSim may reuse an already-running Unreal world between
+            # missions. Remove only the prior objects owned by this
+            # orchestrator before recording fresh truth geometry.
+            facade.delete_object(name)
+        except Exception:
+            pass
         pose = _pose(airsim, np.array([x, y, z]))
         scale = airsim.Vector3r(*dimensions)
         try:
             if facade.spawn_object(name, "1M_Cube_Chamfer", pose, scale):
                 names.append(name)
-                truth.append({"id": name, "shape": "box", "center": [x, y, z], "dimensions": list(dimensions)})
+                # Record the pose Unreal actually assigned. This catches
+                # asset/world-origin surprises in the perception report and
+                # keeps the truth overlay tied to the spawned actor.
+                actual_center = np.array([x, y, z], dtype=float)
+                try:
+                    actual_pose = facade.multirotor.simGetObjectPose(name, True)
+                    actual_position = getattr(actual_pose, "position", None)
+                    if actual_position is not None:
+                        candidate = _vector3(actual_position)
+                        if np.all(np.isfinite(candidate)):
+                            actual_center = candidate
+                except Exception:
+                    pass
+                truth.append({"id": name, "shape": "box", "center": actual_center.tolist(), "dimensions": list(dimensions)})
         except Exception:
             pass
     return names, truth
@@ -291,9 +376,15 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--sensor-rate", type=float, default=2.5, help="per-agent obstacle perception rate")
     parser.add_argument("--sensor-stale-after", type=float, default=None, help="maximum cached sensor age; defaults to one sensor period plus 50 ms")
     parser.add_argument("--top-n-obstacles", type=int, default=5)
-    parser.add_argument("--uncertainty-radius", type=float, default=0.5)
+    parser.add_argument("--uncertainty-radius", type=float, default=0.0)
     parser.add_argument("--uav-radius", type=float, default=1.0)
     parser.add_argument("--ugv-radius", type=float, default=1.25)
+    parser.add_argument("--obstacle-margin", type=float, default=0.0, help="additional existing CBF obstacle clearance margin")
+    parser.add_argument("--uav-velocity-limit", type=float, default=2.0)
+    parser.add_argument("--ugv-speed-limit", type=float, default=2.0)
+    parser.add_argument("--uav-acceleration-limit", type=float, default=4.0)
+    parser.add_argument("--ugv-acceleration-limit", type=float, default=2.0)
+    parser.add_argument("--nominal-speed", type=float, default=2.0, help="existing formation nominal speed limit")
     parser.add_argument("--k1", type=float, default=2.0)
     parser.add_argument("--k2", type=float, default=2.0)
     parser.add_argument("--alpha", type=float, default=2.0)
@@ -305,6 +396,11 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--resx", type=int, default=800)
     parser.add_argument("--resy", type=int, default=600)
     parser.add_argument("--no-spawn-obstacles", action="store_true")
+    parser.add_argument(
+        "--use-truth-obstacles",
+        action="store_true",
+        help="use successfully spawned obstacle boxes as fixed CBF test proxies instead of sensor detections",
+    )
     parser.add_argument("--debug-dir", default=os.path.join(current_dir, "debug_runs"))
     parser.add_argument("--startup-timeout", type=float, default=120.0)
     parser.add_argument("--unreal-editor-path", default=AirSimLaunchConfig().unreal_editor_path)
@@ -333,12 +429,28 @@ def main(argv: List[str] = None) -> int:
     names = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5", "Husky1", "Husky2", "Husky3"]
     types = {name: "drone" for name in names[:5]}
     types.update({name: "ugv" for name in names[5:]})
-    formation = FormationController(FormationConfig(uav_altitude=args.uav_altitude))
+    intermediate_waypoint = None
+    if args.map_name == "flyingcpp" and not args.no_spawn_obstacles:
+        # Clear the wall laterally before advancing in +X. This is the one
+        # fixed course waypoint; obstacle perception still supplies all local
+        # CBF constraints and does not generate waypoints online.
+        intermediate_waypoint = np.array([14.0, -14.0, -1.0])
+    formation = FormationController(FormationConfig(
+        uav_altitude=args.uav_altitude,
+        max_speed=args.nominal_speed,
+        intermediate_waypoint=intermediate_waypoint,
+        waypoint_radius=3.0,
+    ))
     cbf_config = CBFConfig(
         method=args.cbf_method,
         uncertainty_radius=args.uncertainty_radius,
         uav_radius=args.uav_radius,
         ugv_radius=args.ugv_radius,
+        obstacle_margin=args.obstacle_margin,
+        uav_velocity_limit=args.uav_velocity_limit,
+        ugv_speed_limit=args.ugv_speed_limit,
+        uav_acceleration_limit=args.uav_acceleration_limit,
+        ugv_acceleration_limit=args.ugv_acceleration_limit,
         k1=args.k1,
         k2=args.k2,
         alpha=args.alpha,
@@ -347,9 +459,27 @@ def main(argv: List[str] = None) -> int:
         name: cbf_config.uav_radius if types[name] == "drone" else cbf_config.ugv_radius
         for name in names
     }
-    agents = {name: Agent(name, types[name], cbf_config) for name in names}
-    detector = ObstacleDetector(PerceptionConfig(top_n=args.top_n_obstacles))
-    goal = np.array([16.0, 0.0, -1.0])
+    # Wang's double-integrator formulation is retained for UAVs. The AirSim
+    # Husky cannot realize a planar acceleration vector directly, so Wang
+    # mode uses the already-supported unicycle CBF model for UGVs, as allowed
+    # by the initial implementation scope.
+    # The physical Husky cannot rotate in place. A shorter existing unicycle
+    # lookahead keeps the safety control point from entering a surface-based
+    # LiDAR proxy before the car has completed its turn.
+    ugv_cbf_config = replace(cbf_config, method="mestres", lookahead_distance=0.5)
+    agents = {
+        name: Agent(name, types[name], ugv_cbf_config if types[name] == "ugv" else cbf_config)
+        for name in names
+    }
+    # Depth cameras observe partial obstacle surfaces, so their spherical
+    # proxy needs a little more geometric padding to cover the unseen edge of
+    # the surface. LiDAR already observes the planar footprint directly and
+    # keeps the tighter fit used for UGVs.
+    detectors = {
+        "drone": ObstacleDetector(PerceptionConfig(top_n=args.top_n_obstacles, fit_padding=0.75)),
+        "ugv": ObstacleDetector(PerceptionConfig(top_n=args.top_n_obstacles, fit_padding=0.0, planar_surface_offset=0.75)),
+    }
+    goal = np.array([16.0, -14.0, -1.0])
     log_path = os.path.join(args.debug_dir, "{}_{}.jsonl".format(args.cbf_method, int(time.time())))
     writer = AsyncJsonlWriter(log_path)
     perception_trace = PerceptionTraceStore()
@@ -371,13 +501,35 @@ def main(argv: List[str] = None) -> int:
             name: leader_position + formation.config.slots[name]
             for name in names
         }
+        newly_spawned = set()
+        vehicle_origins = {}
+        for name in names:
+            if types[name] == "ugv":
+                # Clear residual CarControls state when an Unreal world is
+                # reused between missions. This is initialization, not a
+                # runtime recovery/reset heuristic.
+                facade.stop_ugv(name)
         for name in names:
             initial_pose = _pose(facade.airsim, initial_positions[name])
-            facade.spawn_vehicle(name, types[name], initial_pose)
-            # Settings-defined actors may already exist, so spawning alone is
-            # not enough to establish the requested formation.
-            facade.set_vehicle_pose(name, initial_pose)
+            if facade.spawn_vehicle(name, types[name], initial_pose):
+                newly_spawned.add(name)
+        # simAddVehicle already applies the requested pose. Applying it again
+        # would add the formation offset a second time in Unreal. Only
+        # settings-defined vehicles, which were not spawned above, need an
+        # explicit pose update.
+        for name in names:
+            if name not in newly_spawned:
+                origin = facade.vehicle_frame_origin(name)
+                if origin is None:
+                    origin = np.zeros(3)
+                vehicle_origins[name] = origin
+                facade.set_vehicle_pose(name, _pose(facade.airsim, initial_positions[name] - origin))
+        for name in names:
             facade.enable(name, types[name], True)
+        for name in names:
+            if types[name] == "ugv":
+                facade.stop_ugv(name)
+        time.sleep(0.2)
 
         if args.map_name == "flyingcpp" and not args.no_spawn_obstacles:
             # Create the course before starting vehicle motion so obstacle
@@ -390,13 +542,66 @@ def main(argv: List[str] = None) -> int:
 
         altitude_futures = []
         for name in names[:5]:
-            target = initial_positions[name].copy()
-            target[2] = args.uav_altitude
-            altitude_futures.append(
-                facade.multirotor.moveToPositionAsync(*target.tolist(), velocity=3.0, vehicle_name=name)
-            )
+            # moveToZAsync is less sensitive to the vehicle's collision-model
+            # origin than a full-pose command and avoids starting the CBF loop
+            # while a drone is still below the ground plane.
+            altitude_futures.append(facade.multirotor.moveToZAsync(args.uav_altitude, 3.0, vehicle_name=name))
         for future in altitude_futures:
             future.join()
+        # Hero's SimpleFlight controller can report completion of moveToZ
+        # before the physics body has converged when it was just teleported.
+        # A short position-hold command gives the estimator a settled,
+        # physically valid starting state without affecting mission timing.
+        hold_futures = [
+            facade.multirotor.moveByVelocityZAsync(
+                0.0, 0.0, args.uav_altitude, 1.0, vehicle_name=name
+            )
+            for name in names[:5]
+        ]
+        for future in hold_futures:
+            future.join()
+        for name in names[:5]:
+            facade.multirotor.hoverAsync(vehicle_name=name).join()
+
+        # A failed registration must not be allowed to become a multi-agent
+        # CBF failure: all drones at one origin would make the initial pair
+        # constraints genuinely infeasible. Retry the formation placement a
+        # few times while still in startup, before logging mission steps.
+        for attempt in range(3):
+            settled_states = {name: facade.state(name) for name in names}
+            xy_error = max(
+                float(np.linalg.norm(settled_states[name]["position"][:2] - initial_positions[name][:2]))
+                for name in names
+            )
+            altitude_error = max(
+                abs(float(settled_states[name]["position"][2]) - float(args.uav_altitude))
+                for name in names[:5]
+            )
+            startup_error = max(xy_error, altitude_error)
+            if xy_error <= 1.0 and altitude_error <= 1.0:
+                break
+            print("Warning: startup formation error {:.3f} m; reapplying poses (attempt {})".format(
+                startup_error, attempt + 1
+            ), flush=True)
+            if xy_error > 1.0:
+                for name in names:
+                    facade.set_vehicle_pose(name, _pose(facade.airsim, initial_positions[name]))
+            if altitude_error > 1.0:
+                altitude_futures = [
+                    facade.multirotor.moveToZAsync(args.uav_altitude, 3.0, vehicle_name=name)
+                    for name in names[:5]
+                ]
+                for future in altitude_futures:
+                    future.join()
+                hold_futures = [
+                    facade.multirotor.moveByVelocityZAsync(
+                        0.0, 0.0, args.uav_altitude, 1.0, vehicle_name=name
+                    )
+                    for name in names[:5]
+                ]
+                for future in hold_futures:
+                    future.join()
+            time.sleep(0.25)
 
         if args.timing_mode == "stepped":
             facade.pause(True)
@@ -404,32 +609,66 @@ def main(argv: List[str] = None) -> int:
         sensor_order = list(names)
         sensor_cursor = 0
         latest_obstacles: Dict[str, List[ObstacleProxy]] = {name: [] for name in names}
+        sensor_period = 1.0 / max(args.sensor_rate, 1e-3)
         latest_sensor_views: Dict[str, Dict[str, Any]] = {name: {} for name in names}
         last_perception: Dict[str, float] = {}
-        sensor_period = 1.0 / max(args.sensor_rate, 1e-3)
-        if args.sensor_stale_after is not None:
-            detector.config.stale_after = args.sensor_stale_after
-        else:
-            detector.config.stale_after = max(detector.config.stale_after, sensor_period + args.dt * 0.5)
+        truth_control_obstacles = {
+            name: truth_obstacle_proxies(
+                true_obstacles,
+                types[name],
+                vehicle_z=initial_positions[name][2] if types[name] == "ugv" else None,
+                vehicle_radius=cbf_config.ugv_radius if types[name] == "ugv" else 0.0,
+            )
+            for name in names
+        }
+        if args.use_truth_obstacles:
+            if not true_obstacles:
+                print(
+                    "Warning: --use-truth-obstacles requested, but no orchestrator truth boxes were spawned; "
+                    "the CBF will receive an empty truth obstacle set.",
+                    flush=True,
+                )
+            latest_obstacles = truth_control_obstacles
+            latest_sensor_views = {
+                name: {
+                    "sensor_type": "truth_obstacle_geometry",
+                    "position_frame": "world_ned",
+                    "point_frame": "world_ned",
+                    "capture_timestamp": time.time(),
+                    "capture_id": "truth_obstacles",
+                    "age": 0.0,
+                    "valid": True,
+                    "obstacle_count": len(truth_control_obstacles[name]),
+                }
+                for name in names
+            }
+            last_perception = {name: time.time() for name in names}
+        for detector in detectors.values():
+            if args.sensor_stale_after is not None:
+                detector.config.stale_after = args.sensor_stale_after
+            else:
+                detector.config.stale_after = max(detector.config.stale_after, sensor_period + args.dt * 0.5)
         # Warm all sensors before starting the real-time deadline clock. The
         # first depth frame is intentionally expensive and must not become a
         # control-cycle deadline miss.
-        warmup_states = {name: facade.state(name) for name in names}
-        warmup_time = time.time()
-        for name in names:
-            obstacles, sensor_valid, sensor_view, trace = _capture_obstacles(facade, detector, name, types[name], warmup_states[name], warmup_time, camera_fovs)
-            if sensor_valid:
-                capture_id = "capture_{:06d}_{}".format(capture_sequence, name)
-                capture_sequence += 1
-                perception_trace.add(
-                    capture_id, name, sensor_view.get("sensor_type", "unknown"),
-                    trace.get("sensor_points", np.empty((0, 3))), trace.get("world_points", np.empty((0, 3))),
-                    trace.get("diagnostics"),
-                )
-                sensor_view["capture_id"] = capture_id
-                latest_obstacles[name] = obstacles
-                latest_sensor_views[name] = sensor_view
-                last_perception[name] = float(sensor_view.get("capture_timestamp", time.time()))
+        if not args.use_truth_obstacles:
+            warmup_states = {name: facade.state(name) for name in names}
+            warmup_time = time.time()
+            for name in names:
+                obstacles, sensor_valid, sensor_view, trace = _capture_obstacles(facade, detectors[types[name]], name, types[name], warmup_states[name], warmup_time, camera_fovs)
+                if sensor_valid:
+                    capture_id = "capture_{:06d}_{}".format(capture_sequence, name)
+                    capture_sequence += 1
+                    perception_trace.add(
+                        capture_id, name, sensor_view.get("sensor_type", "unknown"),
+                        trace.get("sensor_points", np.empty((0, 3))), trace.get("world_points", np.empty((0, 3))),
+                        trace.get("diagnostics"),
+                    )
+                    sensor_view["capture_id"] = capture_id
+                    latest_obstacles[name] = obstacles
+                    latest_sensor_views[name] = sensor_view
+                    last_perception[name] = float(sensor_view.get("capture_timestamp", time.time()))
+
         next_deadline = time.monotonic()
         for step in range(args.steps):
                 cycle_start = time.monotonic()
@@ -470,43 +709,51 @@ def main(argv: List[str] = None) -> int:
                 }
 
                 for name, agent in agents.items():
-                    if types[name] == "ugv" and args.cbf_method == "mestres":
+                    if types[name] == "ugv":
                         nominal = formation.nominal_unicycle_control(estimated_states[name], estimated_states, goal)
                     else:
                         nominal = formation.nominal_control(estimated_states[name], estimated_states, goal)
                     agent.set_nominal_control(nominal)
 
-                capture_count = max(1, int(np.ceil(len(names) * args.dt / sensor_period)))
-                capture_names = [sensor_order[(sensor_cursor + index) % len(sensor_order)] for index in range(capture_count)]
-                sensor_cursor = (sensor_cursor + capture_count) % len(sensor_order)
-                for name in capture_names:
-                    obstacles, sensor_valid, sensor_view, trace = _capture_obstacles(facade, detector, name, types[name], raw_states[name], now, camera_fovs)
-                    if sensor_valid:
-                        capture_id = "capture_{:06d}_{}".format(capture_sequence, name)
-                        capture_sequence += 1
-                        perception_trace.add(
-                            capture_id, name, sensor_view.get("sensor_type", "unknown"),
-                            trace.get("sensor_points", np.empty((0, 3))), trace.get("world_points", np.empty((0, 3))),
-                            trace.get("diagnostics"),
-                        )
-                        sensor_view["capture_id"] = capture_id
-                        latest_obstacles[name] = obstacles
-                        latest_sensor_views[name] = sensor_view
-                        last_perception[name] = float(sensor_view.get("capture_timestamp", time.time()))
+                # ``sensor_rate`` is per agent. The round-robin scheduler must
+                # budget that rate across the whole team; dividing by the
+                # sensor period under-captured each agent by a factor of the
+                # team size.
+                if not args.use_truth_obstacles:
+                    capture_count = max(1, int(np.ceil(len(names) * args.dt * args.sensor_rate)))
+                    capture_names = [sensor_order[(sensor_cursor + index) % len(sensor_order)] for index in range(capture_count)]
+                    sensor_cursor = (sensor_cursor + capture_count) % len(sensor_order)
+                    for name in capture_names:
+                        obstacles, sensor_valid, sensor_view, trace = _capture_obstacles(facade, detectors[types[name]], name, types[name], raw_states[name], now, camera_fovs)
+                        if sensor_valid:
+                            capture_id = "capture_{:06d}_{}".format(capture_sequence, name)
+                            capture_sequence += 1
+                            perception_trace.add(
+                                capture_id, name, sensor_view.get("sensor_type", "unknown"),
+                                trace.get("sensor_points", np.empty((0, 3))), trace.get("world_points", np.empty((0, 3))),
+                                trace.get("diagnostics"),
+                            )
+                            sensor_view["capture_id"] = capture_id
+                            latest_obstacles[name] = obstacles
+                            latest_sensor_views[name] = sensor_view
+                            last_perception[name] = float(sensor_view.get("capture_timestamp", time.time()))
                 phase_ms["perception"] = (time.monotonic() - phase_start) * 1000.0 - sum(phase_ms.values())
 
                 safe_commands = {}
                 obstacle_records = {}
                 for name, agent in agents.items():
                     neighbor_messages = [outbound[neighbor]["localization"] for neighbor in adjacency[name] if types[neighbor] == types[name]]
-                    age = max(0.0, now - last_perception.get(name, -float("inf")))
-                    sensor_valid = bool(age <= detector.config.stale_after)
+                    age = 0.0 if args.use_truth_obstacles else max(0.0, now - last_perception.get(name, -float("inf")))
+                    sensor_valid = True if args.use_truth_obstacles else bool(age <= detectors[types[name]].config.stale_after)
                     age_margin = 0.0
                     if sensor_valid:
                         speed_limit = cbf_config.uav_velocity_limit if types[name] == "drone" else cbf_config.ugv_speed_limit
                         acceleration_limit = cbf_config.uav_acceleration_limit if types[name] == "drone" else cbf_config.ugv_acceleration_limit
                         age_margin = speed_limit * age + 0.5 * acceleration_limit * age * age
-                    obstacles = [ObstacleProxy(item.obstacle_id, item.center, item.radius + age_margin, item.source, item.timestamp, item.point_count, item.is_planar) for item in latest_obstacles[name]]
+                    obstacles = [ObstacleProxy(
+                        item.obstacle_id, item.center, item.radius + age_margin, item.source,
+                        item.timestamp, item.point_count, item.is_planar
+                    ) for item in latest_obstacles[name]]
                     obstacle_records[name] = {
                         "sensor_valid": sensor_valid,
                         "age": age,
@@ -523,14 +770,51 @@ def main(argv: List[str] = None) -> int:
                         velocity = states[name].velocity + args.dt * command
                         velocity = np.clip(velocity, -cbf_config.uav_velocity_limit, cbf_config.uav_velocity_limit)
                         facade.command_uav(name, velocity, args.dt)
-                    elif args.cbf_method == "mestres":
-                        facade.command_ugv(name, command[0], command[1] / cbf_config.ugv_yaw_rate_limit, args.dt)
+                    elif types[name] == "ugv":
+                        turn_speed = float(command[0])
+                        # A physical AirSim car cannot realize the ideal
+                        # unicycle command [0, yaw_rate] by rotating in place.
+                        # Preserve the CBF output while using a small crawl
+                        # speed only when it requests a turn at zero speed.
+                        if turn_speed < 0.05 and abs(float(command[1])) > 0.05:
+                            turn_speed = min(0.3, cbf_config.ugv_speed_limit)
+                        facade.command_ugv(name, turn_speed, command[1] / cbf_config.ugv_yaw_rate_limit, args.dt)
                     else:
                         desired_velocity = states[name].velocity[:2] + args.dt * command[:2]
                         speed = float(np.linalg.norm(desired_velocity))
                         heading = float(np.arctan2(desired_velocity[1], desired_velocity[0])) if speed > 1e-6 else states[name].yaw
-                        steering = np.clip((heading - states[name].yaw) / np.pi, -1.0, 1.0)
-                        facade.command_ugv(name, speed, steering, args.dt)
+                        heading_error = float((heading - states[name].yaw + np.pi) % (2.0 * np.pi) - np.pi)
+                        steering = np.clip(heading_error / np.pi, -1.0, 1.0)
+
+                        # Wang's UGV CBF output is a planar acceleration.  A
+                        # car cannot realize that vector directly, so use its
+                        # magnitude as the forward-speed request and its
+                        # direction as the steering request.  Do not project
+                        # the speed onto the current heading: doing so brakes
+                        # whenever a fixed waypoint is more than 90 degrees
+                        # away and prevents the car from turning toward it.
+                        command_speed = speed
+                        forward = np.array([np.cos(states[name].yaw), np.sin(states[name].yaw)])
+                        longitudinal_acceleration = float(np.dot(command[:2], forward))
+                        acceleration_limit = max(cbf_config.ugv_acceleration_limit, 1e-6)
+                        lateral_acceleration = float(np.dot(command[:2], np.array([-forward[1], forward[0]])))
+                        command_magnitude = float(np.linalg.norm(command[:2]))
+                        # The car cannot realize lateral acceleration directly;
+                        # steering supplies that component, so retain throttle
+                        # for turn-dominated commands.  Apply brake only when
+                        # the command is clearly a longitudinal deceleration.
+                        turn_dominated = abs(lateral_acceleration) >= abs(longitudinal_acceleration)
+                        throttle = command_magnitude / acceleration_limit if turn_dominated else max(0.0, longitudinal_acceleration / acceleration_limit)
+                        needs_braking = longitudinal_acceleration < -0.05 and not turn_dominated
+                        brake = min(1.0, max(0.0, -longitudinal_acceleration / acceleration_limit))
+                        facade.command_ugv(
+                            name,
+                            command_speed,
+                            steering,
+                            args.dt,
+                            brake=brake if needs_braking else 0.0,
+                            throttle=throttle,
+                        )
                 phase_ms["actuation"] = (time.monotonic() - phase_start) * 1000.0 - sum(phase_ms.values())
 
                 collision_records = {}
@@ -576,7 +860,20 @@ def main(argv: List[str] = None) -> int:
                     "vehicle_types": types,
                     "vehicle_radii": vehicle_radii,
                     "formation": formation.metrics(estimated_states),
-                    "states": {name: {"position": states[name].position.tolist(), "velocity": states[name].velocity.tolist()} for name in names},
+                    "states": {
+                        name: {
+                            "position": states[name].position.tolist(),
+                            "velocity": states[name].velocity.tolist(),
+                            "yaw": float(states[name].yaw),
+                            "yaw_rate": float(states[name].yaw_rate),
+                            "kinematics_position": raw_states[name].get("kinematics_position", states[name].position).tolist(),
+                            "actor_position": (
+                                raw_states[name]["actor_position"].tolist()
+                                if raw_states[name].get("actor_position") is not None else None
+                            ),
+                        }
+                        for name in names
+                    },
                     "commands": {name: np.asarray(command).tolist() for name, command in safe_commands.items()},
                     "obstacles": obstacle_records,
                     "true_obstacles": true_obstacles,

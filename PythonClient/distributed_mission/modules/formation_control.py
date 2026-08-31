@@ -25,6 +25,11 @@ class FormationConfig:
     ugv_max_yaw_rate: float = 1.0
     ugv_heading_gain: float = 1.5
     uav_altitude: float = -5.0
+    # Optional course-level waypoint. This is deliberately a single static
+    # waypoint; no online waypoint generation is performed by formation
+    # control or perception.
+    intermediate_waypoint: Optional[np.ndarray] = None
+    waypoint_radius: float = 2.5
     slots: Dict[str, np.ndarray] = field(default_factory=lambda: {
         # Husky1 is the front vertex of an equilateral triangle with side
         # length 4 m. The two followers sit behind it, symmetrically.
@@ -41,6 +46,8 @@ class FormationConfig:
 
     def __post_init__(self) -> None:
         self.slots = {key: np.asarray(value, dtype=float).reshape(3) for key, value in self.slots.items()}
+        if self.intermediate_waypoint is not None:
+            self.intermediate_waypoint = np.asarray(self.intermediate_waypoint, dtype=float).reshape(3)
 
 
 class FormationController:
@@ -60,9 +67,23 @@ class FormationController:
             [0.0, 0.0, 1.0],
         ])
         rotated_offset = rotation @ offset
-        position = leader.position + rotated_offset
+        # During the one fixed course-waypoint approach, UAVs use that point
+        # as a virtual formation center. This starts the planned bypass before
+        # the UGV leader reaches the obstacle row; Husky followers continue to
+        # track the real leader and retain their own formation.
+        virtual_center = leader.position
+        virtual_velocity = leader.velocity
+        waypoint = self.config.intermediate_waypoint
+        if (
+            agent_id != self.config.leader_id
+            and waypoint is not None
+            and np.linalg.norm(leader.position[:2] - waypoint[:2]) > self.config.waypoint_radius
+        ):
+            virtual_center = waypoint
+            virtual_velocity = np.zeros(3)
+        position = virtual_center + rotated_offset
         angular_velocity = np.array([0.0, 0.0, leader.yaw_rate])
-        velocity = leader.velocity + np.cross(angular_velocity, rotated_offset)
+        velocity = virtual_velocity + np.cross(angular_velocity, rotated_offset)
         # Keep UAV altitude in the global AirSim NED frame. Husky body origins
         # sit above the ground, so deriving UAV Z from the leader causes a
         # vertical reference mismatch and visible bobbing.
@@ -83,7 +104,7 @@ class FormationController:
         controller itself remains independent of the CBF method.
         """
         if agent.agent_id == self.config.leader_id:
-            target_position = np.asarray(mission_goal, dtype=float)
+            target_position = self._leader_target(agent, mission_goal)
             target_velocity = np.zeros(3)
         else:
             target_position, target_velocity, _ = self.reference_for(agent.agent_id, states)
@@ -103,18 +124,34 @@ class FormationController:
         mission_goal: np.ndarray,
     ) -> np.ndarray:
         if agent.agent_id == self.config.leader_id:
-            target = np.asarray(mission_goal, dtype=float)[:2]
+            target = self._leader_target(agent, mission_goal)[:2]
         else:
             target, _, _ = self.reference_for(agent.agent_id, states)
             target = target[:2]
         delta = target - agent.position[:2]
         distance = float(np.linalg.norm(delta))
+        if distance <= 2.0:
+            return np.zeros(2, dtype=float)
         desired_heading = float(np.arctan2(delta[1], delta[0])) if distance > 1e-9 else agent.yaw
         heading_error = wrap_angle(desired_heading - agent.yaw)
         speed = min(self.config.max_speed, self.config.position_gain * distance)
-        speed *= max(0.0, np.cos(heading_error))
+        # Keep a small forward command while turning. AirSim's car cannot
+        # rotate in place, so an exact zero here creates a deadlock after the
+        # fixed course waypoint when the goal is behind the current heading.
+        if agent.agent_id == self.config.leader_id and distance > 1.5:
+            alignment = max(0.25, np.cos(heading_error))
+        else:
+            alignment = max(0.0, np.cos(heading_error))
+        speed *= alignment
         yaw_rate = np.clip(self.config.ugv_heading_gain * heading_error, -self.config.ugv_max_yaw_rate, self.config.ugv_max_yaw_rate)
         return np.array([speed, yaw_rate], dtype=float)
+
+    def _leader_target(self, agent: AgentState, mission_goal: np.ndarray) -> np.ndarray:
+        target = np.asarray(mission_goal, dtype=float)
+        waypoint = self.config.intermediate_waypoint
+        if waypoint is not None and np.linalg.norm(agent.position[:2] - waypoint[:2]) > self.config.waypoint_radius:
+            return waypoint.copy()
+        return target.copy()
 
     def metrics(self, states: Mapping[str, AgentState]) -> Dict[str, float]:
         if self.config.leader_id not in states:

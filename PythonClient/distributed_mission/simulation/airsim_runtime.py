@@ -181,17 +181,18 @@ class AirSimFacade:
         except Exception:
             self._vehicle_names = set()
 
-    def spawn_vehicle(self, name: str, vehicle_type: str, pose: Any) -> None:
+    def spawn_vehicle(self, name: str, vehicle_type: str, pose: Any) -> bool:
         if name in self._vehicle_names:
-            return
+            return False
         vehicle_name = "simpleflight" if vehicle_type == "drone" else "cphusky"
         try:
             self.multirotor.simAddVehicle(name, vehicle_name, pose)
             self._vehicle_names.add(name)
+            return True
         except Exception:
             # AirSim reports an error when the requested vehicle already exists.
             # Existing vehicles are intentionally reusable between runs.
-            pass
+            return False
 
     def spawn_object(self, name: str, asset_name: str, pose: Any, scale: Any) -> bool:
         result = self.multirotor.simSpawnObject(name, asset_name, pose, scale, False, False)
@@ -199,6 +200,33 @@ class AirSimFacade:
 
     def set_vehicle_pose(self, name: str, pose: Any) -> None:
         self.multirotor.simSetVehiclePose(pose, True, vehicle_name=name)
+
+    def vehicle_frame_origin(self, name: str) -> Optional[np.ndarray]:
+        """Return the world-NED origin of a configured vehicle frame.
+
+        AirSim reports kinematics relative to the vehicle's configured
+        starting point, while object poses are world-relative. Their
+        difference is the stable frame origin needed when positioning
+        settings-defined vehicles in a shared world.
+        """
+
+        try:
+            kinematics = self.multirotor.simGetGroundTruthKinematics(vehicle_name=name)
+            kinematics_position = np.array([
+                kinematics.position.x_val,
+                kinematics.position.y_val,
+                kinematics.position.z_val,
+            ], dtype=float)
+            pose = self.multirotor.simGetObjectPose(name, True)
+            raw_position = getattr(pose, "position", None)
+            if raw_position is None:
+                return None
+            actor_position = np.array([raw_position.x_val, raw_position.y_val, raw_position.z_val], dtype=float)
+            if np.all(np.isfinite(kinematics_position)) and np.all(np.isfinite(actor_position)):
+                return actor_position - kinematics_position
+        except Exception:
+            pass
+        return None
 
     def delete_object(self, name: str) -> None:
         self.multirotor.simDestroyObject(name)
@@ -211,21 +239,46 @@ class AirSimFacade:
 
     def state(self, name: str) -> Dict[str, Any]:
         kinematics = self.multirotor.simGetGroundTruthKinematics(vehicle_name=name)
-        position = np.array([kinematics.position.x_val, kinematics.position.y_val, kinematics.position.z_val], dtype=float)
+        kinematics_position = np.array([kinematics.position.x_val, kinematics.position.y_val, kinematics.position.z_val], dtype=float)
+        # Ground-truth kinematics are expressed in the vehicle's starting
+        # point frame. CBF obstacle truth and Unreal collision reports use
+        # world NED, so use the actor pose as the controller position when it
+        # is available and retain the kinematic value for diagnostics.
+        position = kinematics_position.copy()
+        actor_position = None
+        try:
+            actor_pose = self.multirotor.simGetObjectPose(name, True)
+            raw_position = getattr(actor_pose, "position", None)
+            if raw_position is not None:
+                candidate = np.array([raw_position.x_val, raw_position.y_val, raw_position.z_val], dtype=float)
+                if np.all(np.isfinite(candidate)):
+                    actor_position = candidate
+                    position = candidate
+        except Exception:
+            pass
         velocity = np.array([kinematics.linear_velocity.x_val, kinematics.linear_velocity.y_val, kinematics.linear_velocity.z_val], dtype=float)
         angular_velocity = getattr(kinematics, "angular_velocity", None)
         yaw_rate = float(getattr(angular_velocity, "z_val", 0.0)) if angular_velocity is not None else 0.0
         yaw = 0.0
         if hasattr(self.airsim, "quaternion_to_euler_angles"):
             _, _, yaw = self.airsim.quaternion_to_euler_angles(kinematics.orientation)
-        return {"position": position, "velocity": velocity, "yaw": float(yaw), "yaw_rate": yaw_rate, "kinematics": kinematics, "timestamp": time.time()}
+        return {
+            "position": position,
+            "velocity": velocity,
+            "kinematics_position": kinematics_position,
+            "actor_position": actor_position,
+            "yaw": float(yaw),
+            "yaw_rate": yaw_rate,
+            "kinematics": kinematics,
+            "timestamp": time.time(),
+        }
 
     def collision_info(self, name: str) -> Dict[str, Any]:
         """Return authoritative AirSim collision state for one vehicle."""
 
         try:
             info = self.multirotor.simGetCollisionInfo(vehicle_name=name)
-            return {
+            record = {
                 "available": True,
                 "has_collided": bool(getattr(info, "has_collided", False)),
                 "object_name": str(getattr(info, "object_name", "")),
@@ -233,6 +286,18 @@ class AirSimFacade:
                 "penetration_depth": float(getattr(info, "penetration_depth", 0.0)),
                 "time_stamp": float(getattr(info, "time_stamp", 0.0)),
             }
+            object_name = record["object_name"]
+            if object_name:
+                try:
+                    pose = self.multirotor.simGetObjectPose(object_name, True)
+                    position = getattr(pose, "position", None)
+                    if position is not None:
+                        candidate = np.array([position.x_val, position.y_val, position.z_val], dtype=float)
+                        if np.all(np.isfinite(candidate)):
+                            record["object_position"] = candidate.tolist()
+                except Exception:
+                    pass
+            return record
         except Exception as error:
             return {"available": False, "has_collided": False, "error": str(error)}
 
@@ -257,12 +322,33 @@ class AirSimFacade:
         vector = np.asarray(velocity, dtype=float)
         self.multirotor.moveByVelocityAsync(float(vector[0]), float(vector[1]), float(vector[2]), duration, vehicle_name=name)
 
-    def command_ugv(self, name: str, speed: float, steering: float, duration: float = 0.1) -> None:
+    def command_ugv(
+        self,
+        name: str,
+        speed: float,
+        steering: float,
+        duration: float = 0.1,
+        brake: float = 0.0,
+        throttle: Optional[float] = None,
+    ) -> None:
+        """Send a signed longitudinal command to an AirSim car.
+
+        The CBF and nominal controller operate on model-level planar
+        commands.  AirSim's car API instead consumes throttle, steering,
+        brake, and manual gear.  Keeping that conversion here makes the
+        controller independent of the simulator-specific command semantics.
+        A negative speed selects reverse; a positive brake request suppresses
+        throttle for that command.
+        """
         controls = self.airsim.CarControls()
-        controls.throttle = float(np.clip(speed / 2.0, 0.0, 1.0))
+        requested_speed = float(speed)
+        requested_brake = float(np.clip(brake, 0.0, 1.0))
+        controls.brake = requested_brake
+        throttle_request = abs(requested_speed) / 2.0 if throttle is None else float(throttle)
+        controls.throttle = 0.0 if requested_brake > 0.0 else float(np.clip(throttle_request, 0.0, 1.0))
         controls.steering = float(np.clip(steering, -1.0, 1.0))
         controls.is_manual_gear = True
-        controls.manual_gear = 1
+        controls.manual_gear = -1 if requested_speed < 0.0 and requested_brake <= 0.0 else 1
         self.car.setCarControls(controls, vehicle_name=name)
 
     def stop_ugv(self, name: str) -> None:
