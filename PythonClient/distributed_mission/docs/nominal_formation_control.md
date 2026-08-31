@@ -18,7 +18,11 @@ intended to be changed through configuration later. The default UAV slots are
 the four corners and center of a 4 m x 4 m horizontal box. The UGV slots are
 an equilateral triangle of side length 4 m, with `Husky1` at the front vertex.
 UAV altitude is held at a fixed global AirSim NED reference (`-5 m` by
-default), rather than being offset from the Husky body origin.
+default), rather than being offset from the Husky body origin. The UAV CBF
+altitude floor is separately calibrated to one metre above the map ground
+(`z=-1` for FlyingCPP and `z=+1` for RuralAustralia by default), allowing
+temporary downward avoidance beneath tree canopies. Override it with
+`--uav-altitude-floor` when testing another map frame.
 
 For the deterministic FlyingCPP block course, the mission goal is behind two
 staggered mixed-height obstacle rows. There is no bypass waypoint: the nominal

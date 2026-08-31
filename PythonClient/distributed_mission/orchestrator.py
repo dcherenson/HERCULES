@@ -189,6 +189,135 @@ def rotate_xy_right(point: np.ndarray) -> np.ndarray:
     return rotated
 
 
+def rotate_xy_heading(point: np.ndarray, heading: float) -> np.ndarray:
+    """Rotate a formation/course offset into a world heading."""
+
+    rotated = np.asarray(point, dtype=float).reshape(3).copy()
+    cosine = np.cos(float(heading))
+    sine = np.sin(float(heading))
+    x, y = rotated[:2]
+    rotated[:2] = [cosine * x - sine * y, sine * x + cosine * y]
+    return rotated
+
+
+def heading_to_goal(start: np.ndarray, goal: np.ndarray, fallback: float = 0.0) -> float:
+    """Return the planar heading from ``start`` to ``goal`` in NED radians."""
+
+    delta = np.asarray(goal, dtype=float).reshape(3)[:2] - np.asarray(start, dtype=float).reshape(3)[:2]
+    if not np.all(np.isfinite(delta)) or np.linalg.norm(delta) <= 1e-9:
+        return float(fallback)
+    return float(np.arctan2(delta[1], delta[0]))
+
+
+def _scene_object_position(facade: AirSimFacade, object_name: str) -> Optional[np.ndarray]:
+    """Read one named Unreal actor pose as a world-NED position."""
+
+    try:
+        pose = facade.multirotor.simGetObjectPose(object_name, True)
+        position = getattr(pose, "position", None)
+        if position is None:
+            return None
+        candidate = _vector3(position)
+        return candidate if np.all(np.isfinite(candidate)) else None
+    except Exception:
+        return None
+
+
+def resolve_goal_actor(
+    facade: AirSimFacade,
+    fallback_goal: np.ndarray,
+    actor_name: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[np.ndarray]]:
+    """Resolve an Unreal actor to use as the mission goal.
+
+    A user-created actor normally receives an automatically generated name
+    such as ``Actor_0``.  With ``actor_name`` omitted, only those generic
+    actor names are considered and the candidate must be substantially
+    opposite the existing RuralAustralia fallback route.  This avoids
+    accidentally selecting map infrastructure.  An explicit name bypasses
+    the directional gate and works on either map.
+    """
+
+    if actor_name:
+        position = _scene_object_position(facade, actor_name)
+        return (actor_name, position) if position is not None else (None, None)
+
+    fallback = np.asarray(fallback_goal, dtype=float).reshape(3)
+    fallback_xy = fallback[:2]
+    fallback_norm = float(np.linalg.norm(fallback_xy))
+    if fallback_norm <= 1e-9:
+        return None, None
+    fallback_direction = fallback_xy / fallback_norm
+    try:
+        candidates = facade.multirotor.simListSceneObjects(r"^Actor(?:_\d+)?$") or []
+    except Exception:
+        return None, None
+
+    scored = []
+    for candidate_name in candidates:
+        name = str(candidate_name)
+        position = _scene_object_position(facade, name)
+        if position is None:
+            continue
+        distance = float(np.linalg.norm(position[:2]))
+        if distance <= max(10.0, 0.5 * fallback_norm):
+            continue
+        opposite = float(np.dot(position[:2] / distance, -fallback_direction))
+        if opposite < 0.5:
+            continue
+        # Prefer a clear opposite-side actor, then the one furthest from the
+        # launch point. This remains deterministic if more than one generic
+        # actor is present in a map.
+        scored.append((opposite, distance, name, position))
+    if not scored:
+        return None, None
+    _, _, name, position = max(scored, key=lambda item: (item[0], item[1], item[2]))
+    return name, position
+
+
+def camera_pose_for_goal(
+    start: np.ndarray,
+    goal: np.ndarray,
+    horizontal_distance: float,
+    camera_z: float,
+    top_down: bool = False,
+) -> Tuple[np.ndarray, float]:
+    """Place the external camera behind the route and point it at the goal.
+
+    The returned yaw is in degrees because CameraDirector uses Unreal degree
+    fields, while all vehicle headings in the controller remain radians.
+    """
+
+    start = np.asarray(start, dtype=float).reshape(3)
+    goal = np.asarray(goal, dtype=float).reshape(3)
+    heading = heading_to_goal(start, goal)
+    distance = max(float(horizontal_distance), 1.0)
+    direction = np.asarray([np.cos(heading), np.sin(heading)])
+    position = start.copy()
+    position[:2] -= distance * direction
+    position[2] = float(camera_z)
+    # With a top-down camera, the yaw is rotated by 180 degrees so travel is
+    # away from the camera on screen. In the normal view, yaw points along the
+    # route toward the detected goal.
+    yaw = heading + (np.pi if top_down else 0.0)
+    yaw_degrees = float((np.degrees(yaw) + 180.0) % 360.0 - 180.0)
+    return position, yaw_degrees
+
+
+def startup_pose_position(
+    name: str,
+    initial_positions: Dict[str, np.ndarray],
+    newly_spawned: set,
+    vehicle_origins: Dict[str, np.ndarray],
+) -> np.ndarray:
+    """Convert a desired world pose to the correct AirSim vehicle-frame pose."""
+
+    position = np.asarray(initial_positions[name], dtype=float)
+    if name in newly_spawned:
+        return position.copy()
+    return position - np.asarray(vehicle_origins.get(name, np.zeros(3)), dtype=float)
+
+
 def rotate_course_left(course: Dict[str, Any]) -> Dict[str, Any]:
     """Return a course with its XY geometry rotated 90 degrees left."""
 
@@ -243,6 +372,15 @@ def map_ground_z_offset(map_name: str) -> float:
     # FlyingCPP mission reference. NED down is positive, so ground-referenced
     # points move from z=-1 to z=+1. UAV flight altitude remains independent.
     return 2.0 if map_name == "rural_australia" else 0.0
+
+
+def map_uav_altitude_floor(map_name: str, requested: Optional[float] = None) -> float:
+    """Return the UAV NED floor one metre above the calibrated map ground."""
+
+    if requested is not None:
+        return float(requested)
+    # One metre above a surface is one metre more negative in NED.
+    return map_ground_z_offset(map_name) - 1.0
 
 
 def shift_course_z(course: Dict[str, Any], offset: float) -> Dict[str, Any]:
@@ -418,6 +556,47 @@ def _pose(airsim: Any, position: np.ndarray, yaw: float = 0.0) -> Any:
     return airsim.Pose(airsim.Vector3r(*position.tolist()), airsim.to_quaternion(0, 0, yaw))
 
 
+def _camera_pose(
+    airsim: Any, position: np.ndarray, yaw_degrees: float, pitch_degrees: float, roll_degrees: float = 0.0
+) -> Any:
+    """Build a CameraDirector pose from NED position and Unreal angles."""
+
+    return airsim.Pose(
+        airsim.Vector3r(*np.asarray(position, dtype=float).tolist()),
+        airsim.to_quaternion(
+            np.radians(float(roll_degrees)), np.radians(float(pitch_degrees)), np.radians(float(yaw_degrees))
+        ),
+    )
+
+
+def _vehicle_tilt(facade: AirSimFacade, name: str) -> float:
+    """Return the absolute roll/pitch tilt of a vehicle actor in radians."""
+
+    try:
+        pose = facade.multirotor.simGetObjectPose(name, True)
+        orientation = getattr(pose, "orientation", None)
+        if orientation is None or not hasattr(facade.airsim, "quaternion_to_euler_angles"):
+            return 0.0
+        roll, pitch, _ = facade.airsim.quaternion_to_euler_angles(orientation)
+        return float(max(abs(roll), abs(pitch)))
+    except Exception:
+        return 0.0
+
+
+def _vehicle_is_inverted(facade: AirSimFacade, name: str) -> bool:
+    """Detect an actually inverted vehicle, rather than a normal road slope."""
+
+    try:
+        pose = facade.multirotor.simGetObjectPose(name, True)
+        orientation = getattr(pose, "orientation", None)
+        if orientation is None:
+            return False
+        # For an upright vehicle, the local vertical axis still points in the
+        # positive NED-Z direction. A negative value means the body has rolled
+        # or pitched past 90 degrees and is genuinely upside down.
+        return bool(_quaternion_matrix(orientation)[2, 2] < 0.0)
+    except Exception:
+        return False
 def _plot_route_markers(facade: AirSimFacade, waypoints: List[np.ndarray]) -> None:
     """Draw fixed mission route markers in Unreal when AirSim supports it."""
 
@@ -539,6 +718,10 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--dt", type=float, default=CONTROL_DT)
     parser.add_argument("--timing-mode", choices=("realtime", "stepped"), default="realtime")
     parser.add_argument("--uav-altitude", type=float, default=-5.0, help="UAV hover altitude in AirSim NED coordinates")
+    parser.add_argument(
+        "--uav-altitude-floor", type=float, default=None,
+        help="maximum UAV NED Z; defaults to 1 m above the calibrated map ground",
+    )
     parser.add_argument("--camera-height", type=float, default=30.0, help="top-down override camera height above the NED origin")
     parser.add_argument("--camera-x", type=float, default=6.0)
     parser.add_argument("--camera-y", type=float, default=0.0)
@@ -577,6 +760,10 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--car-port", type=int, default=41452)
     parser.add_argument("--uproject-path", default=None)
     parser.add_argument("--settings-path", default=None, help="AirSim settings.json to copy for launch-time camera overrides")
+    parser.add_argument(
+        "--goal-actor", default=None,
+        help="exact Unreal actor name to use as the goal; RuralAustralia auto-detects a generic opposite-side Actor_* by default",
+    )
     parser.add_argument("--resx", type=int, default=800)
     parser.add_argument("--resy", type=int, default=600)
     parser.add_argument("--no-spawn-obstacles", action="store_true")
@@ -606,6 +793,14 @@ def main(argv: List[str] = None) -> int:
         return 2
     initial_yaw = -np.pi / 2.0 if args.map_name == "rural_australia" else 0.0
     ground_z_offset = map_ground_z_offset(args.map_name)
+    uav_altitude_floor = map_uav_altitude_floor(args.map_name, args.uav_altitude_floor)
+    print(
+        "UAV altitude floor: z={:.3f} NED ({})".format(
+            uav_altitude_floor,
+            "1 m above calibrated ground" if args.uav_altitude_floor is None else "command-line override",
+        ),
+        flush=True,
+    )
     if args.map_name == "rural_australia":
         course = rotate_course_left(course)
     course = shift_course_z(course, ground_z_offset)
@@ -667,6 +862,7 @@ def main(argv: List[str] = None) -> int:
         k1=args.k1,
         k2=args.k2,
         alpha=args.alpha,
+        uav_altitude_floor=uav_altitude_floor,
     )
     vehicle_radii = {
         name: cbf_config.uav_radius if types[name] == "drone" else cbf_config.ugv_radius
@@ -706,6 +902,7 @@ def main(argv: List[str] = None) -> int:
         )),
     }
     goal = np.asarray(course["goal"], dtype=float)
+    goal_actor_name: Optional[str] = None
     route_markers = [np.asarray(point, dtype=float) for point in course.get("waypoints", [])]
     route_markers.extend([goal])
     log_path = os.path.join(args.debug_dir, "{}_{}.jsonl".format(args.cbf_method, int(time.time())))
@@ -715,21 +912,110 @@ def main(argv: List[str] = None) -> int:
     capture_sequence = 0
     camera_fovs: Dict[str, float] = {}
     active_collisions = set()
+    setup_paused = False
 
     try:
         launcher.launch()
         facade.connect()
         facade.multirotor.simRunConsoleCommand("DisableAllScreenMessages")
         if args.launch_mode == "existing" and (top_down_camera or args.map_name == "rural_australia"):
-            print("Warning: --launch-mode existing cannot apply the Rural/camera CameraDirector override; "
-                  "configure it before launching Unreal.", flush=True)
+            print(
+                "Warning: --launch-mode existing cannot apply launch-time CameraDirector settings; "
+                "runtime goal-camera alignment will still be attempted.",
+                flush=True,
+            )
+
+        # Freeze physics while all actors are placed. This prevents a
+        # settings-defined Husky from beginning to fall or skid before its
+        # formation pose and brake command have been applied.
+        facade.pause(True)
+        setup_paused = True
+
+        fallback_goal = goal.copy()
+        if args.map_name == "rural_australia" or args.goal_actor:
+            detected_name, detected_position = resolve_goal_actor(
+                facade, fallback_goal, actor_name=args.goal_actor
+            )
+            if detected_position is not None:
+                goal_actor_name = detected_name
+                goal = detected_position
+                route_markers = [np.asarray(point, dtype=float) for point in course.get("waypoints", [])]
+                route_markers.append(goal)
+                print(
+                    "Goal actor resolved: {} at NED ({:.3f}, {:.3f}, {:.3f})".format(
+                        goal_actor_name, goal[0], goal[1], goal[2]
+                    ),
+                    flush=True,
+                )
+            elif args.goal_actor:
+                print(
+                    "Warning: requested goal actor {!r} was not found; using course goal {}".format(
+                        args.goal_actor, fallback_goal.tolist()
+                    ),
+                    flush=True,
+                )
+            elif args.map_name == "rural_australia":
+                print(
+                    "Warning: no opposite-side generic Unreal actor was found; using course goal {}".format(
+                        fallback_goal.tolist()
+                    ),
+                    flush=True,
+                )
+
+        # The formation and its initial body frame follow the actual goal
+        # direction. This keeps the requested box/triangle geometry intact
+        # while avoiding a hard-coded RuralAustralia heading.
+        initial_yaw = heading_to_goal(np.zeros(3), goal, fallback=initial_yaw)
+
+        # Reorient only the external map camera. Vehicle-mounted camera poses
+        # remain untouched because they are used by obstacle perception.
+        current_camera_pose = facade.external_camera_pose()
+        camera_pitch = -25.0
+        if current_camera_pose is not None and getattr(current_camera_pose, "position", None) is not None:
+            current_camera_position = _vector3(current_camera_pose.position)
+            current_camera_distance = float(np.linalg.norm(current_camera_position[:2]))
+            current_camera_z = float(current_camera_position[2])
+            if not top_down_camera and hasattr(facade.airsim, "quaternion_to_euler_angles"):
+                try:
+                    orientation = getattr(current_camera_pose, "orientation")
+                    _, camera_pitch_rad, _ = facade.airsim.quaternion_to_euler_angles(orientation)
+                    if np.isfinite(camera_pitch_rad):
+                        camera_pitch = float(np.degrees(camera_pitch_rad))
+                except Exception:
+                    pass
+        else:
+            camera_reference = np.asarray(camera_position, dtype=float) if camera_position is not None else np.asarray([-20.0, 0.0])
+            current_camera_distance = float(np.linalg.norm(camera_reference[:2]))
+            current_camera_z = -abs(args.camera_height) if top_down_camera else -15.0
+        if not np.isfinite(current_camera_distance) or current_camera_distance < 1.0:
+            current_camera_distance = 6.0 if top_down_camera else 20.0
+        if not np.isfinite(current_camera_z):
+            current_camera_z = -abs(args.camera_height) if top_down_camera else -15.0
+        camera_target_position, camera_target_yaw = camera_pose_for_goal(
+            np.zeros(3), goal, current_camera_distance, current_camera_z, top_down=top_down_camera
+        )
+        try:
+            facade.set_external_camera_pose(
+                _camera_pose(
+                    facade.airsim, camera_target_position, camera_target_yaw,
+                    pitch_degrees=-90.0 if top_down_camera else camera_pitch,
+                    roll_degrees=0.0,
+                )
+            )
+            print(
+                "External camera aligned to {} (NED {}, yaw {:.1f} deg, roll 0.0 deg)".format(
+                    goal_actor_name or "mission goal", np.round(camera_target_position, 3).tolist(), camera_target_yaw
+                ),
+                flush=True,
+            )
+        except Exception as error:
+            print("Warning: external camera could not be aligned to goal: {}".format(error), flush=True)
 
         uav_start_position = np.array([0.0, 0.0, -1.0])
         ugv_start_position = np.array([0.0, 0.0, -1.0 + ground_z_offset])
         initial_positions = {
             name: (ugv_start_position if types[name] == "ugv" else uav_start_position) + (
-                rotate_xy_right(formation.config.slots[name])
-                if args.map_name == "rural_australia" else formation.config.slots[name]
+                rotate_xy_heading(formation.config.slots[name], initial_yaw)
             )
             for name in names
         }
@@ -755,20 +1041,61 @@ def main(argv: List[str] = None) -> int:
                 if origin is None:
                     origin = np.zeros(3)
                 vehicle_origins[name] = origin
-                facade.set_vehicle_pose(name, _pose(facade.airsim, initial_positions[name] - origin, initial_yaw))
+                facade.set_vehicle_pose(
+                    name,
+                    _pose(facade.airsim, startup_pose_position(name, initial_positions, newly_spawned, vehicle_origins), initial_yaw),
+                )
         for name in names:
             facade.enable(name, types[name], True)
         for name in names:
             if types[name] == "ugv":
                 facade.stop_ugv(name)
-        time.sleep(0.2)
-
         if args.map_name == "flyingcpp" and not args.no_spawn_obstacles:
             # Create the course before starting vehicle motion so obstacle
             # creation is not perceived as a delayed post-takeoff stage.
             blocks, true_obstacles = _spawn_block_course(facade, facade.airsim, course["obstacles"])
 
         _plot_route_markers(facade, route_markers)
+
+        # Let only the UGV physics settle, then validate their world position
+        # and tilt before the UAV takeoff sequence starts. A bad initial
+        # orientation is corrected while setup is still paused, so a flipped
+        # Husky cannot contaminate the mission or the formation check.
+        facade.pause(False)
+        setup_paused = False
+        time.sleep(0.35)
+        for attempt in range(3):
+            settled_states = {name: facade.state(name) for name in names[5:]}
+            ugv_xy_error = max(
+                float(np.linalg.norm(settled_states[name]["position"][:2] - initial_positions[name][:2]))
+                for name in names[5:]
+            )
+            ugv_tilt = max(_vehicle_tilt(facade, name) for name in names[5:])
+            ugv_inverted = any(_vehicle_is_inverted(facade, name) for name in names[5:])
+            # RuralAustralia's road is not perfectly level. Do not treat a
+            # steep but still upright road pose as a failure; only correct a
+            # clearly inverted Husky or a gross position error.
+            if ugv_xy_error <= 1.0 and not ugv_inverted:
+                break
+            print(
+                "Warning: UGV startup pose error {:.3f} m, tilt {:.1f} deg{}; "
+                "reapplying stable poses (attempt {})".format(
+                    ugv_xy_error, np.degrees(ugv_tilt), " (inverted)" if ugv_inverted else "", attempt + 1
+                ),
+                flush=True,
+            )
+            facade.pause(True)
+            setup_paused = True
+            for name in names:
+                facade.set_vehicle_pose(
+                    name,
+                    _pose(facade.airsim, startup_pose_position(name, initial_positions, newly_spawned, vehicle_origins), initial_yaw),
+                )
+                if types[name] == "ugv":
+                    facade.stop_ugv(name)
+            facade.pause(False)
+            setup_paused = False
+            time.sleep(0.35)
 
         takeoff_futures = [facade.multirotor.takeoffAsync(vehicle_name=name) for name in names[:5]]
         for future in takeoff_futures:
@@ -818,8 +1145,15 @@ def main(argv: List[str] = None) -> int:
                 startup_error, attempt + 1
             ), flush=True)
             if xy_error > 1.0:
+                facade.pause(True)
+                setup_paused = True
                 for name in names:
-                    facade.set_vehicle_pose(name, _pose(facade.airsim, initial_positions[name], initial_yaw))
+                    facade.set_vehicle_pose(
+                        name,
+                        _pose(facade.airsim, startup_pose_position(name, initial_positions, newly_spawned, vehicle_origins), initial_yaw),
+                    )
+                facade.pause(False)
+                setup_paused = False
             if altitude_error > 1.0:
                 altitude_futures = [
                     facade.multirotor.moveToZAsync(args.uav_altitude, 3.0, vehicle_name=name)
@@ -1099,7 +1433,9 @@ def main(argv: List[str] = None) -> int:
                     "timestamp": now,
                     "method": args.cbf_method,
                     "goal": goal.tolist(),
+                    "goal_actor": goal_actor_name,
                     "ground_z_offset": float(ground_z_offset),
+                    "uav_altitude_floor": float(uav_altitude_floor),
                     "route_markers": [point.tolist() for point in route_markers],
                     "vehicle_types": types,
                     "vehicle_radii": vehicle_radii,
@@ -1135,6 +1471,9 @@ def main(argv: List[str] = None) -> int:
         pass
     finally:
         try:
+            if setup_paused:
+                facade.pause(False)
+                setup_paused = False
             facade.close([(name, types[name]) for name in names])
             for block in blocks:
                 try:

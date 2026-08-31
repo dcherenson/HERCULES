@@ -64,6 +64,9 @@ class CBFConfig:
     ugv_speed_limit: float = 2.0
     ugv_yaw_rate_limit: float = 1.0
     lookahead_distance: float = 1.0
+    # Maximum permitted NED Z for UAVs. The mission supplies a map-specific
+    # value corresponding to one metre above the calibrated ground reference.
+    uav_altitude_floor: float = -1.0
     distributed_rounds: int = 20
     distributed_tolerance: float = 1e-3
     solver_eps_abs: float = 1e-5
@@ -346,7 +349,7 @@ class DistributedCBFModule:
         # AirSim uses NED coordinates. This altitude guard maintains the
         # initial UAV/UGV separation while cross-type pair CBFs remain off.
         if ego.vehicle_type == "drone":
-            altitude_floor = -3.0
+            altitude_floor = float(self.config.uav_altitude_floor)
             h = altitude_floor - p_i[2]
             rows.append(np.array([0.0, 0.0, -1.0]))
             rhs.append(-self.config.alpha * h + uncertainty)

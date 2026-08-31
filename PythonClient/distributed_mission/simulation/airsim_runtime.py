@@ -120,6 +120,9 @@ class AirSimLauncher:
             camera_director["X"] = y
             camera_director["Y"] = -x
             camera_director["Yaw"] = float(camera_director.get("Yaw", 0.0)) - 90.0
+            # Roll is not useful for the mission view and can make the
+            # horizon visibly tilted after the map-frame rotation.
+            camera_director["Roll"] = 0.0
         settings["CameraDirector"] = camera_director
         temporary = tempfile.NamedTemporaryFile(
             mode="w", suffix="_airsim_top_down_settings.json", delete=False, encoding="utf-8"
@@ -333,6 +336,38 @@ class AirSimFacade:
             "runtime camera pose would alter a vehicle-mounted sensor"
         )
 
+    def set_external_camera_pose(self, pose: Any) -> str:
+        """Move the map's external CameraDirector camera actor.
+
+        This deliberately addresses Unreal's ``ExternalCamera`` actor rather
+        than calling ``simSetCameraPose``. The latter selects a vehicle camera
+        in Hero mode and would change a perception sensor. Older AirSim builds
+        may expose the parent ``CameraDirector`` name instead, so it is kept as
+        a narrow fallback.
+        """
+
+        last_error = None
+        for object_name in ("ExternalCamera", "CameraDirector"):
+            try:
+                result = self.multirotor.simSetObjectPose(object_name, pose, True)
+                if result is None or bool(result):
+                    return object_name
+            except Exception as error:
+                last_error = error
+        raise RuntimeError("unable to move external camera actor: {}".format(last_error))
+
+    def external_camera_pose(self) -> Optional[Any]:
+        """Return the current external camera pose when the map exposes it."""
+
+        for object_name in ("ExternalCamera", "CameraDirector"):
+            try:
+                pose = self.multirotor.simGetObjectPose(object_name, True)
+                if getattr(pose, "position", None) is not None:
+                    return pose
+            except Exception:
+                continue
+        return None
+
     def command_uav(self, name: str, velocity: np.ndarray, duration: float) -> None:
         vector = np.asarray(velocity, dtype=float)
         self.multirotor.moveByVelocityAsync(float(vector[0]), float(vector[1]), float(vector[2]), duration, vehicle_name=name)
@@ -370,6 +405,11 @@ class AirSimFacade:
         controls = self.airsim.CarControls()
         controls.throttle = 0.0
         controls.brake = 1.0
+        # CPHusky's skid-steer adapter clears the ordinary brake field while
+        # processing a zero-throttle command. Handbrake is the reliable
+        # stationary hold during startup and between reused missions.
+        controls.handbrake = True
+        controls.steering = 0.0
         self.car.setCarControls(controls, vehicle_name=name)
 
     def pause(self, value: bool) -> None:

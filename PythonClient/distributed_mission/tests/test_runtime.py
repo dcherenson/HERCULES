@@ -13,9 +13,16 @@ from orchestrator import (
     camera_director_for_map,
     effective_obstacle_margin,
     map_ground_z_offset,
+    map_uav_altitude_floor,
     shift_course_z,
     rotate_course_left,
     rotate_xy_right,
+    rotate_xy_heading,
+    heading_to_goal,
+    resolve_goal_actor,
+    camera_pose_for_goal,
+    _camera_pose,
+    startup_pose_position,
 )
 
 
@@ -57,6 +64,12 @@ def test_top_down_camera_is_opt_in_and_default_preserves_simulator_view():
     assert effective_obstacle_margin("rural_australia", 0.0) == 0.0
 
 
+def test_uav_altitude_floor_is_one_meter_above_calibrated_ground():
+    assert map_uav_altitude_floor("flyingcpp") == -1.0
+    assert map_uav_altitude_floor("rural_australia") == 1.0
+    assert map_uav_altitude_floor("rural_australia", -2.5) == -2.5
+
+
 def test_rural_ground_offset_shifts_goal_waypoints_and_obstacles_only_for_map_frame():
     course = {"goal": [1.0, 2.0, -1.0], "waypoints": [[0.0, 1.0, -1.0]], "obstacles": [{"center": [3.0, 4.0, -2.0]}]}
     shifted = shift_course_z(course, map_ground_z_offset("rural_australia"))
@@ -87,7 +100,7 @@ def test_rural_default_camera_rotates_existing_camera_settings(tmp_path):
     try:
         override = json.loads(open(config._active_settings_path, encoding="utf-8").read())
         assert override["CameraDirector"] == {
-            "X": 0.0, "Y": 20.0, "Z": -15, "Pitch": -25, "Roll": 3, "Yaw": -80.0,
+            "X": 0.0, "Y": 20.0, "Z": -15, "Pitch": -25, "Roll": 0.0, "Yaw": -80.0,
         }
     finally:
         launcher.cleanup()
@@ -120,6 +133,69 @@ def test_rural_top_down_camera_is_behind_the_rotated_heading():
     flying_position, flying_yaw = camera_director_for_map("flyingcpp", 6.0, 0.0, 30.0)
     assert np.allclose(flying_position, [6.0, 0.0, -30.0])
     assert np.isclose(flying_yaw, 0.0)
+
+
+def test_goal_heading_rotates_initial_formation_offsets():
+    assert np.isclose(heading_to_goal([0.0, 0.0, 0.0], [0.0, 10.0, 0.0]), np.pi / 2.0)
+    assert np.allclose(rotate_xy_heading([2.0, 0.0, -4.0], np.pi / 2.0), [0.0, 2.0, -4.0])
+
+
+def test_camera_pose_is_behind_and_points_at_goal():
+    position, yaw = camera_pose_for_goal(
+        np.zeros(3), np.array([0.0, 36.0, 2.0]), 20.0, -15.0, top_down=False
+    )
+    assert np.allclose(position, [0.0, -20.0, -15.0])
+    assert np.isclose(yaw, 90.0)
+
+    top_down_position, top_down_yaw = camera_pose_for_goal(
+        np.zeros(3), np.array([0.0, 36.0, 2.0]), 6.0, -30.0, top_down=True
+    )
+    assert np.allclose(top_down_position, [0.0, -6.0, -30.0])
+    assert np.isclose(top_down_yaw, -90.0)
+
+
+def test_auto_goal_actor_selects_generic_actor_on_opposite_side():
+    class Position:
+        def __init__(self, x, y, z):
+            self.x_val, self.y_val, self.z_val = x, y, z
+
+    class Pose:
+        def __init__(self, position):
+            self.position = position
+
+    class Client:
+        def simListSceneObjects(self, pattern):
+            assert pattern == r"^Actor(?:_\d+)?$"
+            return ["Actor_0", "Actor_1"]
+
+        def simGetObjectPose(self, name, ned):
+            assert ned is True
+            if name == "Actor_0":
+                return Pose(Position(2.0, 36.0, 2.0))
+            return Pose(Position(3.0, -5.0, 2.0))
+
+    facade = AirSimFacade(multirotor_client=Client())
+    name, position = resolve_goal_actor(facade, np.array([1.0, -16.0, 1.0]))
+    assert name == "Actor_0"
+    assert np.allclose(position, [2.0, 36.0, 2.0])
+
+
+def test_explicit_goal_actor_bypasses_auto_direction_gate():
+    class Position:
+        x_val, y_val, z_val = 1.0, 2.0, 3.0
+
+    class Pose:
+        position = Position()
+
+    class Client:
+        def simGetObjectPose(self, name, ned):
+            return Pose()
+
+    name, position = resolve_goal_actor(
+        AirSimFacade(multirotor_client=Client()), np.array([1.0, -16.0, 1.0]), actor_name="MyGoal"
+    )
+    assert name == "MyGoal"
+    assert np.allclose(position, [1.0, 2.0, 3.0])
 
 
 def test_ground_object_filter_matches_unreal_ground_names_only():
@@ -194,6 +270,55 @@ def test_runtime_top_down_shim_never_calls_vehicle_camera_api():
     except RuntimeError:
         pass
     assert not client.called
+
+
+def test_external_camera_pose_uses_unreal_camera_actor_only():
+    class CameraClient:
+        def __init__(self):
+            self.calls = []
+
+        def simSetObjectPose(self, name, pose, teleport):
+            self.calls.append((name, pose, teleport))
+            return True
+
+    client = CameraClient()
+    facade = AirSimFacade(multirotor_client=client)
+    assert facade.set_external_camera_pose(object()) == "ExternalCamera"
+    assert client.calls[0][0] == "ExternalCamera"
+    assert client.calls[0][2] is True
+    assert not hasattr(client, "simSetCameraPose")
+
+
+def test_camera_pose_passes_roll_pitch_yaw_in_airsim_order():
+    class Vector3r:
+        def __init__(self, x, y, z):
+            self.values = (x, y, z)
+
+    class Pose:
+        def __init__(self, position, orientation):
+            self.position = position
+            self.orientation = orientation
+
+    vector_class = Vector3r
+    pose_class = Pose
+
+    class AirSim:
+        Vector3r = vector_class
+        Pose = pose_class
+
+        @staticmethod
+        def to_quaternion(roll, pitch, yaw):
+            return roll, pitch, yaw
+
+    pose = _camera_pose(AirSim, np.zeros(3), yaw_degrees=90.0, pitch_degrees=-25.0, roll_degrees=0.0)
+    assert np.allclose(pose.orientation, [0.0, np.radians(-25.0), np.radians(90.0)])
+
+
+def test_startup_pose_preserves_world_target_for_spawned_and_configured_vehicles():
+    targets = {"Drone1": np.array([4.0, 5.0, -5.0]), "Husky1": np.array([2.0, 3.0, 1.0])}
+    origins = {"Drone1": np.array([10.0, 10.0, 10.0]), "Husky1": np.array([-1.0, 2.0, 0.5])}
+    assert np.allclose(startup_pose_position("Drone1", targets, {"Drone1"}, origins), targets["Drone1"])
+    assert np.allclose(startup_pose_position("Husky1", targets, set(), origins), [3.0, 1.0, 0.5])
 
 
 def test_fixed_route_markers_use_multirotor_plot_api():
@@ -304,3 +429,28 @@ def test_ugv_command_maps_signed_speed_to_air_sim_car_controls():
     facade.command_ugv("Husky1", 0.1, 0.0, throttle=0.75)
     controls, _ = car.last
     assert controls.throttle == 0.75
+
+
+def test_stop_ugv_uses_handbrake_for_cphusky_stationary_hold():
+    class Controls:
+        def __init__(self):
+            self.throttle = None
+            self.brake = None
+            self.handbrake = None
+            self.steering = None
+
+    class AirSim:
+        CarControls = Controls
+
+    class Car:
+        def __init__(self):
+            self.last = None
+
+        def setCarControls(self, controls, vehicle_name=None):
+            self.last = controls
+
+    car = Car()
+    AirSimFacade(airsim_module=AirSim, car_client=car).stop_ugv("Husky1")
+    assert car.last.handbrake is True
+    assert car.last.throttle == 0.0
+    assert car.last.steering == 0.0

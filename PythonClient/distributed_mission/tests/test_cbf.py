@@ -75,3 +75,15 @@ def test_cross_type_neighbors_are_not_added():
     ))
     assert result.success
     assert result.constraint_count == 1  # altitude constraint only
+
+
+def test_uav_altitude_floor_is_configurable():
+    controller = DistributedCBFModule(
+        "Drone1", "drone", CBFConfig(method="wang", uncertainty_radius=0.0, uav_altitude_floor=1.0)
+    )
+    result = controller.filter(CBFRequest(
+        AgentState("Drone1", np.array([0.0, 0.0, 0.0]), vehicle_type="drone"),
+        np.zeros(3),
+    ))
+    assert result.success
+    assert result.minimum_barrier >= 0.0

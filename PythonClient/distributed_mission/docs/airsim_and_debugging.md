@@ -44,7 +44,11 @@ RuralAustralia run aligned with the desired map orientation without changing
 the CBF equations. RuralAustralia ground-referenced goal, waypoint, obstacle,
 and Husky startup heights receive a +2 m NED correction because its terrain is
 approximately 2 m lower than the FlyingCPP reference. UAV flight altitude is
-not shifted.
+not shifted. The UAV CBF altitude floor defaults to one metre above the
+calibrated ground (`z=+1` NED on RuralAustralia, versus `z=-1` on FlyingCPP),
+so the drones can descend beneath tree canopies when the safety filter needs
+the additional clearance. Use `--uav-altitude-floor` to override this test
+parameter.
 
 For RuralAustralia, the launch-time override rotates the existing default
 CameraDirector XY position and yaw with the mission, so the original camera
@@ -67,7 +71,8 @@ centered near the course at `(x=6, y=0)` and 30 m above the NED origin; adjust
 it with `--camera-height`, `--camera-x`, and `--camera-y`. The launcher applies
 this through a temporary `CameraDirector` settings override so the Hero-mode
 camera selector cannot move Drone1's vehicle-mounted perception camera. The
-older `--no-top-down-camera` flag remains accepted as an explicit disable. With
+The camera roll is forced to exactly zero in both launch-time and runtime
+poses. The older `--no-top-down-camera` flag remains accepted as an explicit disable. With
 `--launch-mode existing`, configure the CameraDirector before starting Unreal
 because a running world cannot safely receive this override.
 
