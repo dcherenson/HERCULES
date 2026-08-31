@@ -28,15 +28,34 @@ def parse_args():
     parser.add_argument("--settings-path", default=None)
     parser.add_argument("--resx", type=int, default=800)
     parser.add_argument("--resy", type=int, default=600)
-    parser.add_argument("--camera-height", type=float, default=30.0)
+    parser.add_argument("--camera-height", type=float, default=30.0, help="top-down override camera height above the NED origin")
     parser.add_argument("--camera-x", type=float, default=6.0)
     parser.add_argument("--camera-y", type=float, default=0.0)
-    parser.add_argument("--no-top-down-camera", action="store_true")
+    parser.add_argument(
+        "--top-down-camera",
+        action="store_true",
+        help="opt in to the launch-time external CameraDirector top-down view",
+    )
+    parser.add_argument(
+        "--no-top-down-camera",
+        action="store_true",
+        help="backward-compatible explicit disable for the top-down camera override",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    top_down_camera = args.top_down_camera and not args.no_top_down_camera
+    initial_yaw = -np.pi / 2.0 if args.map_name == "rural_australia" else 0.0
+    camera_position = None
+    camera_yaw = 0.0
+    if top_down_camera:
+        if args.map_name == "rural_australia":
+            camera_position = (-args.camera_y, args.camera_x, -abs(args.camera_height))
+            camera_yaw = initial_yaw
+        else:
+            camera_position = (args.camera_x, args.camera_y, -abs(args.camera_height))
     config = AirSimLaunchConfig(
         launch_mode=args.launch_mode,
         map_name=args.map_name,
@@ -45,7 +64,8 @@ def main() -> int:
         resolution=(args.resx, args.resy),
         startup_timeout=args.startup_timeout,
         settings_path=args.settings_path,
-        camera_director_position=None if args.no_top_down_camera else (args.camera_x, args.camera_y, -abs(args.camera_height)),
+        camera_director_position=camera_position,
+        camera_director_yaw=camera_yaw,
     )
     launcher = AirSimLauncher(config)
     facade = AirSimFacade(config)
@@ -56,7 +76,7 @@ def main() -> int:
         launcher.launch()
         facade.connect()
         facade.multirotor.simRunConsoleCommand("DisableAllScreenMessages")
-        if args.launch_mode == "existing" and not args.no_top_down_camera:
+        if args.launch_mode == "existing" and top_down_camera:
             print("Warning: --launch-mode existing cannot apply the top-down CameraDirector override; "
                   "configure it before launching Unreal.", flush=True)
         poses = {
@@ -66,9 +86,17 @@ def main() -> int:
             "Husky2": (-2 * np.sqrt(3), -2, -1),
             "Husky3": (-2 * np.sqrt(3), 2, -1),
         }
+        if args.map_name == "rural_australia":
+            poses = {
+                name: (-position[1], position[0], position[2])
+                for name, position in poses.items()
+            }
         for name, vehicle_type in names:
             position = poses[name]
-            pose = facade.airsim.Pose(facade.airsim.Vector3r(*position), facade.airsim.to_quaternion(0, 0, 0))
+            pose = facade.airsim.Pose(
+                facade.airsim.Vector3r(*position),
+                facade.airsim.to_quaternion(0, 0, initial_yaw),
+            )
             facade.spawn_vehicle(name, vehicle_type, pose)
             facade.enable(name, vehicle_type, True)
 

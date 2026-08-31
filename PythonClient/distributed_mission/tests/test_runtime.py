@@ -4,7 +4,16 @@ import numpy as np
 
 from simulation.airsim_runtime import AirSimLaunchConfig
 from simulation.airsim_runtime import AirSimFacade, AirSimLauncher
-from orchestrator import _is_ground_object, camera_response_world_pose, compose_sensor_world_pose
+from orchestrator import (
+    _is_ground_object,
+    _plot_route_markers,
+    camera_response_world_pose,
+    compose_sensor_world_pose,
+    parse_args,
+    camera_director_for_map,
+    rotate_course_left,
+    rotate_xy_right,
+)
 
 
 def test_launcher_preserves_start_formation_modes():
@@ -24,6 +33,53 @@ def test_launcher_rejects_unknown_mode_or_map():
         assert False
     except ValueError:
         pass
+
+
+def test_top_down_camera_is_opt_in_and_default_preserves_simulator_view():
+    defaults = parse_args([])
+    assert defaults.top_down_camera is False
+    assert defaults.no_top_down_camera is False
+
+    top_down = parse_args(["--top-down-camera", "--camera-height", "25"])
+    assert top_down.top_down_camera is True
+    assert top_down.camera_height == 25.0
+
+    explicit_disable = parse_args(["--top-down-camera", "--no-top-down-camera"])
+    assert explicit_disable.top_down_camera is True
+    assert explicit_disable.no_top_down_camera is True
+
+    default_config = AirSimLaunchConfig(launch_mode="headless")
+    assert default_config.camera_director_position is None
+    assert not any(argument.startswith("-settings=") for argument in default_config.command())
+
+
+def test_rural_mission_rotation_moves_goal_waypoints_and_obstacles_left():
+    course = {
+        "goal": [16.0, 1.0, -1.0],
+        "waypoints": [[8.0, -2.0, -1.0]],
+        "obstacles": [{
+            "id": "wall",
+            "shape": "box",
+            "center": [7.0, 2.0, -2.0],
+            "dimensions": [2.0, 3.0, 4.0],
+        }],
+    }
+    rotated = rotate_course_left(course)
+    assert np.allclose(rotated["goal"], [1.0, -16.0, -1.0])
+    assert np.allclose(rotated["waypoints"][0], [-2.0, -8.0, -1.0])
+    assert np.allclose(rotated["obstacles"][0]["center"], [2.0, -7.0, -2.0])
+    assert rotated["obstacles"][0]["dimensions"] == [3.0, 2.0, 4.0]
+    assert np.allclose(rotate_xy_right([1.0, 0.0, -5.0]), [0.0, -1.0, -5.0])
+
+
+def test_rural_top_down_camera_is_behind_the_rotated_heading():
+    position, yaw = camera_director_for_map("rural_australia", 6.0, 0.0, 30.0)
+    assert np.allclose(position, [0.0, 6.0, -30.0])
+    assert np.isclose(yaw, -np.pi / 2.0)
+
+    flying_position, flying_yaw = camera_director_for_map("flyingcpp", 6.0, 0.0, 30.0)
+    assert np.allclose(flying_position, [6.0, 0.0, -30.0])
+    assert np.isclose(flying_yaw, 0.0)
 
 
 def test_ground_object_filter_matches_unreal_ground_names_only():
@@ -77,6 +133,38 @@ def test_runtime_top_down_shim_never_calls_vehicle_camera_api():
     except RuntimeError:
         pass
     assert not client.called
+
+
+def test_fixed_route_markers_use_multirotor_plot_api():
+    class VectorClass:
+        def __init__(self, x, y, z):
+            self.x_val, self.y_val, self.z_val = x, y, z
+
+    class AirSim:
+        Vector3r = VectorClass
+
+    class PlotClient:
+        def __init__(self):
+            self.points = None
+            self.line = None
+
+        def simPlotPoints(self, points, **kwargs):
+            self.points = (points, kwargs)
+
+        def simPlotLineStrip(self, points, **kwargs):
+            self.line = (points, kwargs)
+
+    class Facade:
+        airsim = AirSim
+
+        def __init__(self):
+            self.multirotor = PlotClient()
+
+    facade = Facade()
+    _plot_route_markers(facade, [np.array([8.0, 0.0, -1.0]), np.array([16.0, 0.0, -1.0])])
+    assert len(facade.multirotor.points[0]) == 2
+    assert facade.multirotor.points[1]["is_persistent"] is True
+    assert len(facade.multirotor.line[0]) == 2
 
 
 def test_sensor_pose_composes_vehicle_world_pose_with_relative_mount():

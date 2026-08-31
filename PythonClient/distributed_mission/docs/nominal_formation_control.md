@@ -20,14 +20,13 @@ an equilateral triangle of side length 4 m, with `Husky1` at the front vertex.
 UAV altitude is held at a fixed global AirSim NED reference (`-5 m` by
 default), rather than being offset from the Husky body origin.
 
-For the deterministic FlyingCPP block course, the orchestrator supplies one
-preplanned bypass waypoint `(14, -14, -1)` (AirSim NED) before the mission
-goal. While the leader is outside the 3 m transition radius, all non-leader
-vehicles use that point as a temporary virtual formation center so each group
-can begin the bypass before the UGV leader reaches the obstacle row. This is a
-fixed course setup, not an online obstacle planner. The controller switches to
-the mission goal within the transition radius and does not generate additional
-waypoints.
+For the deterministic FlyingCPP block course, the mission goal is behind two
+staggered mixed-height obstacle rows. There is no bypass waypoint: the nominal
+leader-follower controller continues toward the shifted goal and the CBF layer
+is expected to produce the small formation deformation and heading change
+needed to pass through both central openings. A floating block in the first
+passage also tests UAV altitude avoidance. No online waypoint generation is
+used.
 
 Mestres' unicycle nominal control retains a small crawl speed while making a
 large heading correction, because an AirSim car cannot rotate in place. It

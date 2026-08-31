@@ -37,9 +37,11 @@ zero-motion detections.
 
 The CBF equations are unchanged by these perception repairs. The UGV
 Mestres adapter uses the existing 0.5 m unicycle lookahead tuned for the
-surface-based LiDAR proxy; UAVs retain the existing 1 m model. FlyingCPP uses
-one fixed course waypoint `(14, -14, -1)` (AirSim NED); UAVs use it as a
-temporary virtual formation center and no online waypoint generation is used.
+surface-based LiDAR proxy; UAVs retain the existing 1 m model. FlyingCPP's
+current test course has a centered goal and no bypass waypoint; the nominal
+formation is allowed to deform through the central opening while local CBF
+constraints handle the spawned obstacles. No online waypoint generation is
+used.
 The orchestrator contains only the minimal AirSim actuation adaptations needed
 to realize the requested model commands: a turn-dominated Wang command retains
 throttle, and a zero-speed Mestres turn uses a small crawl speed because a car

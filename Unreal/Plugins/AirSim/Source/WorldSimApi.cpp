@@ -93,7 +93,10 @@ std::string WorldSimApi::spawnObject(const std::string& object_name, const std::
     FString asset_name(load_object.c_str());
     FAssetData* load_asset = simmode_->asset_map.Find(asset_name);
 
-    if (!load_asset->IsValid()) {
+    // Find() returns nullptr for an unknown asset. Check the pointer before
+    // dereferencing it so a malformed simSpawnObject request is reported to
+    // the RPC client instead of crashing the Unreal process.
+    if (load_asset == nullptr || !load_asset->IsValid()) {
         throw std::invalid_argument("There were no objects with name " + load_object + " found in the Registry");
     }
 

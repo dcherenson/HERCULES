@@ -62,14 +62,41 @@ def truth_obstacle_proxies(
 
     proxies: List[ObstacleProxy] = []
     for obstacle in truth_obstacles or []:
-        if str(obstacle.get("shape", "box")).lower() != "box":
+        shape = str(obstacle.get("shape", "box")).lower()
+        if shape not in {"box", "sphere"}:
             continue
         try:
             center = np.asarray(obstacle["center"], dtype=float).reshape(3)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not np.all(np.isfinite(center)):
+            continue
+        obstacle_id = "truth_" + str(obstacle.get("id", len(proxies)))
+        if shape == "sphere":
+            try:
+                radius = float(obstacle["radius"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not np.isfinite(radius) or radius <= 0.0:
+                continue
+            if vehicle_type != "drone" and vehicle_z is not None:
+                if center[2] + radius < float(vehicle_z) - max(0.0, float(vehicle_radius)):
+                    continue
+            proxies.append(ObstacleProxy(
+                obstacle_id=obstacle_id,
+                center=center,
+                radius=radius,
+                source="truth",
+                timestamp=float(timestamp),
+                point_count=0,
+                is_planar=vehicle_type == "ugv",
+            ))
+            continue
+        try:
             dimensions = np.asarray(obstacle["dimensions"], dtype=float).reshape(3)
         except (KeyError, TypeError, ValueError):
             continue
-        if not np.all(np.isfinite(center)) or not np.all(np.isfinite(dimensions)):
+        if not np.all(np.isfinite(dimensions)):
             continue
         half_dimensions = np.abs(dimensions) / 2.0
         # The UGV CBF is planar, but a box floating well above the Husky must
@@ -81,7 +108,6 @@ def truth_obstacle_proxies(
             if obstacle_top < float(vehicle_z) - max(0.0, float(vehicle_radius)):
                 continue
         radius = float(np.linalg.norm(half_dimensions[:2]))
-        obstacle_id = "truth_" + str(obstacle.get("id", len(proxies)))
         if vehicle_type != "drone":
             centers = [(center, obstacle_id)]
         else:

@@ -28,14 +28,25 @@ names begin with `distributed_cbf_block_`; only those objects are deleted on
 cleanup. RuralAustralia Example 1 remains selectable, but is not yet a
 safety-certification scenario.
 
-The default FlyingCPP course places the mission goal at x=16 m, beyond a
-deterministic mixed-height obstacle course. It uses one fixed bypass waypoint
-`(14, -14, -1)` in AirSim NED and a 3 m transition radius. UAV references use
-that point as a temporary virtual formation center while the UGVs retain their
-leader-follower formation; no online waypoint generation is used. The first
-row has lateral passages smaller than the UAV box formation, and floating
-blocks create additional altitude changes. Use `--no-spawn-obstacles` to
-disable this course.
+The default FlyingCPP course places the mission goal at `(16, 1, -1)` in
+AirSim NED, beyond two staggered mixed-height obstacle rows. It has no bypass
+waypoint: the first central gap is near `y=0` and the second is shifted near
+`y=1`, so the conservative CBF corridors require a turn and slight formation
+compression. A floating block tests UAV altitude changes.
+Fixed route markers (the goal and any future
+course waypoint) are drawn in Unreal with AirSim's persistent plot API when
+supported. Use `--no-spawn-obstacles` to disable this course.
+
+For `--map rural_australia`, the mission frame is rotated 90 degrees left in
+AirSim's NED convention: the initial heading is -90 degrees and the goal, waypoints, formation layout,
+and any supplied course geometry are rotated with it. This keeps the
+RuralAustralia run aligned with the desired map orientation without changing
+the CBF equations.
+
+When `--top-down-camera` is selected for RuralAustralia, the external camera
+is placed behind the initial heading at the correspondingly rotated position
+and looks along the agents' travel direction. FlyingCPP keeps its existing
+camera placement.
 
 Startup launches all UAV takeoff commands concurrently, then launches all UAV
 altitude commands concurrently. FlyingCPP obstacle blocks are spawned before
@@ -44,14 +55,15 @@ UGV contact with Unreal ground, landscape, terrain, or floor actors is ignored
 for collision warnings and plot markers, while UGV contact with other objects
 remains reportable.
 
-The external simulator camera is configured top-down at launch, centered near
-the course at `(x=6, y=0)` and 30 m above the NED origin. Adjust it with
-`--camera-height`, `--camera-x`, and `--camera-y`, or disable it with
-`--no-top-down-camera`. The launcher applies this through a temporary
-`CameraDirector` settings override so the Hero-mode camera selector cannot
-move Drone1's vehicle-mounted perception camera. With `--launch-mode existing`,
-configure the CameraDirector before starting Unreal because a running world
-cannot safely receive this override.
+The external simulator camera keeps its original AirSim/Unreal angle by
+default. Add `--top-down-camera` to opt into a launch-time top-down view,
+centered near the course at `(x=6, y=0)` and 30 m above the NED origin; adjust
+it with `--camera-height`, `--camera-x`, and `--camera-y`. The launcher applies
+this through a temporary `CameraDirector` settings override so the Hero-mode
+camera selector cannot move Drone1's vehicle-mounted perception camera. The
+older `--no-top-down-camera` flag remains accepted as an explicit disable. With
+`--launch-mode existing`, configure the CameraDirector before starting Unreal
+because a running world cannot safely receive this override.
 
 Each run writes JSONL records containing configuration, states, formation
 errors, nominal/safe commands, barrier values, solver status, robust terms,

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from datetime import datetime
+import json
 import os
 import sys
 import time
@@ -27,6 +28,7 @@ from modules.obstacle_detection import (
     estimate_ground_z,
     truth_obstacle_proxies,
 )
+from modules.obstacle_course import course_from_tuples, load_course
 from modules.perception_diagnostics import PerceptionTraceStore
 from simulation.airsim_runtime import AsyncJsonlWriter, AirSimFacade, AirSimLaunchConfig, AirSimLauncher
 
@@ -35,16 +37,25 @@ CONTROL_DT = 0.1
 SIMULATION_STEPS = 100
 COMMUNICATION_RANGE_METERS = 30.0
 
-# Narrow lateral passages make the 4 m-wide UAV box split apart. The
-# blocks have deliberately different heights, so the UAVs must also change
-# altitude while crossing the course. All centers/scales use AirSim NED.
+# A short staggered through-gap course: the first central opening is near
+# y=0 and the second is shifted to y=1, so the team must turn instead of
+# driving straight through a symmetric wall. The conservative CBF corridors
+# are slightly narrower than the nominal formations, requiring modest
+# compression. Heights vary across both rows and a floating block tests UAV
+# altitude changes. All centers/scales use AirSim NED.
 BLOCK_COURSE = (
-    (8.0, -7.0, -2.0, (2.0, 2.0, 4.0)),  # low ground block
-    (8.0, 0.0, -4.0, (2.0, 2.0, 8.0)),   # tall ground block
-    (8.0, 7.0, -3.0, (2.0, 2.0, 6.0)),   # medium ground block
-    # Floating blocks occupy the two passages at different heights.
-    (12.0, -3.5, -5.5, (2.0, 1.5, 2.0)),
-    (12.0, 3.5, -7.0, (2.0, 1.5, 2.0)),
+    # First row: central gap centered at y=0.
+    (7.5, -10.0, -2.0, (2.0, 3.0, 4.0)),   # low ground block
+    (7.5, -5.5, -4.0, (2.0, 3.0, 8.0)),    # tall ground block
+    (7.5, 5.5, -3.0, (2.0, 3.0, 6.0)),     # medium ground block
+    (7.5, 10.0, -1.0, (2.0, 3.0, 2.0)),    # low ground block
+    # Second row: central gap shifted to y=1, forcing a turn.
+    (12.5, -9.0, -2.0, (2.0, 3.0, 4.0)),   # low ground block
+    (12.5, -4.5, -4.0, (2.0, 3.0, 8.0)),   # tall ground block
+    (12.5, 6.5, -3.0, (2.0, 3.0, 6.0)),    # medium ground block
+    (12.5, 10.5, -1.0, (2.0, 3.0, 2.0)),   # low ground block
+    # A floating block occupies the staggered UAV passage at nominal altitude.
+    (10.5, 0.0, -6.5, (1.0, 0.8, 2.0)),
 )
 
 
@@ -164,6 +175,52 @@ def camera_response_world_pose(
 
 def _yaw_quaternion(yaw: float) -> List[float]:
     return [float(np.cos(yaw / 2.0)), 0.0, 0.0, float(np.sin(yaw / 2.0))]
+
+
+def rotate_xy_right(point: np.ndarray) -> np.ndarray:
+    """Rotate an NED mission point 90 degrees left in the world view.
+
+    AirSim uses NED coordinates, so a visual left turn from the original
+    +X heading is a -90 degree yaw: ``(x, y) -> (y, -x)``. Z is unchanged.
+    """
+
+    rotated = np.asarray(point, dtype=float).reshape(3).copy()
+    rotated[:2] = np.asarray([rotated[1], -rotated[0]], dtype=float)
+    return rotated
+
+
+def rotate_course_left(course: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a course with its XY geometry rotated 90 degrees left."""
+
+    rotated = dict(course)
+    rotated["goal"] = rotate_xy_right(course["goal"]).tolist()
+    rotated["waypoints"] = [rotate_xy_right(point).tolist() for point in course.get("waypoints", [])]
+    rotated_obstacles = []
+    for obstacle in course.get("obstacles", []):
+        rotated_obstacle = dict(obstacle)
+        rotated_obstacle["center"] = rotate_xy_right(obstacle["center"]).tolist()
+        if str(obstacle.get("shape", "box")).lower() == "box":
+            dimensions = np.asarray(obstacle["dimensions"], dtype=float)
+            rotated_obstacle["dimensions"] = [float(dimensions[1]), float(dimensions[0]), float(dimensions[2])]
+        rotated_obstacles.append(rotated_obstacle)
+    rotated["obstacles"] = rotated_obstacles
+    return rotated
+
+
+def camera_director_for_map(
+    map_name: str, camera_x: float, camera_y: float, camera_height: float
+) -> Tuple[Tuple[float, float, float], float]:
+    """Return an optional top-down camera pose aligned behind the mission."""
+
+    camera_xy = np.asarray([camera_x, camera_y], dtype=float)
+    if map_name == "rural_australia":
+        # The route turns from +X to -Y. Put the camera on the rear (+Y)
+        # side while retaining the user-selected camera offset magnitude.
+        camera_xy = np.asarray([-camera_y, camera_x], dtype=float)
+        camera_yaw = -np.pi / 2.0
+    else:
+        camera_yaw = 0.0
+    return (float(camera_xy[0]), float(camera_xy[1]), -abs(float(camera_height))), float(camera_yaw)
 
 
 def _capture_obstacles(
@@ -310,15 +367,46 @@ def _capture_obstacles(
         return [], False, {}, {}
 
 
-def _pose(airsim: Any, position: np.ndarray) -> Any:
-    return airsim.Pose(airsim.Vector3r(*position.tolist()), airsim.to_quaternion(0, 0, 0))
+def _pose(airsim: Any, position: np.ndarray, yaw: float = 0.0) -> Any:
+    return airsim.Pose(airsim.Vector3r(*position.tolist()), airsim.to_quaternion(0, 0, yaw))
 
 
-def _spawn_block_course(facade: AirSimFacade, airsim: Any) -> Tuple[List[str], List[Dict[str, Any]]]:
+def _plot_route_markers(facade: AirSimFacade, waypoints: List[np.ndarray]) -> None:
+    """Draw fixed mission route markers in Unreal when AirSim supports it."""
+
+    if not waypoints:
+        return
+    try:
+        points = [facade.airsim.Vector3r(*np.asarray(point, dtype=float).tolist()) for point in waypoints]
+        facade.multirotor.simPlotPoints(
+            points, color_rgba=[1.0, 0.2, 0.0, 1.0], size=20.0,
+            duration=-1.0, is_persistent=True,
+        )
+        if len(points) > 1:
+            facade.multirotor.simPlotLineStrip(
+                points, color_rgba=[1.0, 0.6, 0.0, 1.0], thickness=8.0,
+                duration=-1.0, is_persistent=True,
+            )
+    except Exception as error:
+        # Route visualization is optional and must never prevent a mission.
+        print("Warning: Unreal route markers unavailable: {}".format(error), flush=True)
+
+
+def _spawn_block_course(
+    facade: AirSimFacade, airsim: Any, obstacles: List[Dict[str, Any]]
+) -> Tuple[List[str], List[Dict[str, Any]]]:
     names = []
     truth = []
+    try:
+        listed_assets = facade.multirotor.simListAssets()
+        available_assets = {str(asset) for asset in listed_assets} if listed_assets else None
+    except Exception:
+        # Older AirSim builds may not expose asset enumeration. The plugin
+        # still performs its own null-safe lookup and the spawn exception is
+        # handled below.
+        available_assets = None
     # Cleanup is limited to this prefix so user-created scene objects survive.
-    for index, (x, y, z, dimensions) in enumerate(BLOCK_COURSE):
+    for index, obstacle in enumerate(obstacles):
         name = "distributed_cbf_block_{}".format(index)
         try:
             # AirSim may reuse an already-running Unreal world between
@@ -327,15 +415,40 @@ def _spawn_block_course(facade: AirSimFacade, airsim: Any) -> Tuple[List[str], L
             facade.delete_object(name)
         except Exception:
             pass
-        pose = _pose(airsim, np.array([x, y, z]))
-        scale = airsim.Vector3r(*dimensions)
+        center = np.asarray(obstacle["center"], dtype=float)
+        requested_shape = str(obstacle.get("shape", "box")).lower()
+        shape = requested_shape
+        if shape == "sphere":
+            radius = float(obstacle["radius"])
+            asset_name = obstacle.get("asset_name", "SM_Sphere")
+            scale = airsim.Vector3r(2.0 * radius, 2.0 * radius, 2.0 * radius)
+        else:
+            dimensions = np.asarray(obstacle["dimensions"], dtype=float)
+            asset_name = obstacle.get("asset_name", "1M_Cube_Chamfer")
+            scale = airsim.Vector3r(*dimensions.tolist())
+        if available_assets and asset_name not in available_assets:
+            fallback_asset = "1M_Cube_Chamfer"
+            if shape == "sphere" and fallback_asset in available_assets:
+                # Keep the requested sphere's diameter as the fallback box
+                # dimensions so truth geometry still matches what spawned.
+                print("Warning: asset {!r} unavailable; spawning sphere {!r} as a box fallback".format(
+                    asset_name, name
+                ), flush=True)
+                shape = "box"
+                dimensions = np.full(3, 2.0 * radius, dtype=float)
+                asset_name = fallback_asset
+                scale = airsim.Vector3r(*dimensions.tolist())
+            else:
+                print("Warning: asset {!r} unavailable; skipping {!r}".format(asset_name, name), flush=True)
+                continue
+        pose = _pose(airsim, center)
         try:
-            if facade.spawn_object(name, "1M_Cube_Chamfer", pose, scale):
+            if facade.spawn_object(name, asset_name, pose, scale):
                 names.append(name)
                 # Record the pose Unreal actually assigned. This catches
                 # asset/world-origin surprises in the perception report and
                 # keeps the truth overlay tied to the spawned actor.
-                actual_center = np.array([x, y, z], dtype=float)
+                actual_center = center.copy()
                 try:
                     actual_pose = facade.multirotor.simGetObjectPose(name, True)
                     actual_position = getattr(actual_pose, "position", None)
@@ -345,9 +458,21 @@ def _spawn_block_course(facade: AirSimFacade, airsim: Any) -> Tuple[List[str], L
                             actual_center = candidate
                 except Exception:
                     pass
-                truth.append({"id": name, "shape": "box", "center": actual_center.tolist(), "dimensions": list(dimensions)})
-        except Exception:
-            pass
+                truth_entry = {
+                    "id": name,
+                    "source_id": obstacle.get("id", name),
+                    "shape": shape,
+                    "center": actual_center.tolist(),
+                }
+                if shape == "sphere":
+                    truth_entry["radius"] = radius
+                else:
+                    truth_entry["dimensions"] = dimensions.tolist()
+                if requested_shape != shape:
+                    truth_entry["requested_shape"] = requested_shape
+                truth.append(truth_entry)
+        except Exception as error:
+            print("Warning: failed to spawn {} {!r}: {}".format(shape, name, error), flush=True)
     return names, truth
 
 
@@ -367,10 +492,19 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--dt", type=float, default=CONTROL_DT)
     parser.add_argument("--timing-mode", choices=("realtime", "stepped"), default="realtime")
     parser.add_argument("--uav-altitude", type=float, default=-5.0, help="UAV hover altitude in AirSim NED coordinates")
-    parser.add_argument("--camera-height", type=float, default=30.0, help="top-down external camera height above the NED origin")
+    parser.add_argument("--camera-height", type=float, default=30.0, help="top-down override camera height above the NED origin")
     parser.add_argument("--camera-x", type=float, default=6.0)
     parser.add_argument("--camera-y", type=float, default=0.0)
-    parser.add_argument("--no-top-down-camera", action="store_true")
+    parser.add_argument(
+        "--top-down-camera",
+        action="store_true",
+        help="opt in to the launch-time external CameraDirector top-down view",
+    )
+    parser.add_argument(
+        "--no-top-down-camera",
+        action="store_true",
+        help="backward-compatible explicit disable for the top-down camera override",
+    )
     parser.add_argument("--animation-fps", type=float, default=None, help="post-run MP4 frame rate; defaults to 1/dt")
     parser.add_argument("--no-animation", action="store_true")
     parser.add_argument("--sensor-rate", type=float, default=2.5, help="per-agent obstacle perception rate")
@@ -397,6 +531,11 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--resy", type=int, default=600)
     parser.add_argument("--no-spawn-obstacles", action="store_true")
     parser.add_argument(
+        "--obstacle-course",
+        default=None,
+        help="JSON course from tools/obstacle_course_editor.py; otherwise use the built-in FlyingCPP course",
+    )
+    parser.add_argument(
         "--use-truth-obstacles",
         action="store_true",
         help="use successfully spawned obstacle boxes as fixed CBF test proxies instead of sensor detections",
@@ -409,6 +548,21 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
 
 def main(argv: List[str] = None) -> int:
     args = parse_args(argv)
+    top_down_camera = args.top_down_camera and not args.no_top_down_camera
+    try:
+        course = load_course(args.obstacle_course) if args.obstacle_course else course_from_tuples(BLOCK_COURSE)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        print("Error: unable to load obstacle course: {}".format(error), file=sys.stderr)
+        return 2
+    initial_yaw = -np.pi / 2.0 if args.map_name == "rural_australia" else 0.0
+    if args.map_name == "rural_australia":
+        course = rotate_course_left(course)
+    camera_position = None
+    camera_yaw = 0.0
+    if top_down_camera:
+        camera_position, camera_yaw = camera_director_for_map(
+            args.map_name, args.camera_x, args.camera_y, args.camera_height
+        )
     os.makedirs(args.debug_dir, exist_ok=True)
     launch_config = AirSimLaunchConfig(
         launch_mode=args.launch_mode,
@@ -420,7 +574,8 @@ def main(argv: List[str] = None) -> int:
         resolution=(args.resx, args.resy),
         startup_timeout=args.startup_timeout,
         settings_path=args.settings_path,
-        camera_director_position=None if args.no_top_down_camera else (args.camera_x, args.camera_y, -abs(args.camera_height)),
+        camera_director_position=camera_position,
+        camera_director_yaw=camera_yaw,
     )
     launcher = AirSimLauncher(launch_config)
     facade = AirSimFacade(launch_config)
@@ -429,12 +584,10 @@ def main(argv: List[str] = None) -> int:
     names = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5", "Husky1", "Husky2", "Husky3"]
     types = {name: "drone" for name in names[:5]}
     types.update({name: "ugv" for name in names[5:]})
+    # The through-gap experiment intentionally has no bypass waypoint. The
+    # nominal controller follows the leader and formation offsets; CBF
+    # constraints provide the small deformation needed at the central gap.
     intermediate_waypoint = None
-    if args.map_name == "flyingcpp" and not args.no_spawn_obstacles:
-        # Clear the wall laterally before advancing in +X. This is the one
-        # fixed course waypoint; obstacle perception still supplies all local
-        # CBF constraints and does not generate waypoints online.
-        intermediate_waypoint = np.array([14.0, -14.0, -1.0])
     formation = FormationController(FormationConfig(
         uav_altitude=args.uav_altitude,
         max_speed=args.nominal_speed,
@@ -479,7 +632,9 @@ def main(argv: List[str] = None) -> int:
         "drone": ObstacleDetector(PerceptionConfig(top_n=args.top_n_obstacles, fit_padding=0.75)),
         "ugv": ObstacleDetector(PerceptionConfig(top_n=args.top_n_obstacles, fit_padding=0.0, planar_surface_offset=0.75)),
     }
-    goal = np.array([16.0, -14.0, -1.0])
+    goal = np.asarray(course["goal"], dtype=float)
+    route_markers = [np.asarray(point, dtype=float) for point in course.get("waypoints", [])]
+    route_markers.extend([goal])
     log_path = os.path.join(args.debug_dir, "{}_{}.jsonl".format(args.cbf_method, int(time.time())))
     writer = AsyncJsonlWriter(log_path)
     perception_trace = PerceptionTraceStore()
@@ -492,13 +647,16 @@ def main(argv: List[str] = None) -> int:
         launcher.launch()
         facade.connect()
         facade.multirotor.simRunConsoleCommand("DisableAllScreenMessages")
-        if args.launch_mode == "existing" and not args.no_top_down_camera:
+        if args.launch_mode == "existing" and top_down_camera:
             print("Warning: --launch-mode existing cannot apply the top-down CameraDirector override; "
                   "configure it before launching Unreal.", flush=True)
 
         leader_position = np.array([0.0, 0.0, -1.0])
         initial_positions = {
-            name: leader_position + formation.config.slots[name]
+            name: leader_position + (
+                rotate_xy_right(formation.config.slots[name])
+                if args.map_name == "rural_australia" else formation.config.slots[name]
+            )
             for name in names
         }
         newly_spawned = set()
@@ -510,7 +668,7 @@ def main(argv: List[str] = None) -> int:
                 # runtime recovery/reset heuristic.
                 facade.stop_ugv(name)
         for name in names:
-            initial_pose = _pose(facade.airsim, initial_positions[name])
+            initial_pose = _pose(facade.airsim, initial_positions[name], initial_yaw)
             if facade.spawn_vehicle(name, types[name], initial_pose):
                 newly_spawned.add(name)
         # simAddVehicle already applies the requested pose. Applying it again
@@ -523,7 +681,7 @@ def main(argv: List[str] = None) -> int:
                 if origin is None:
                     origin = np.zeros(3)
                 vehicle_origins[name] = origin
-                facade.set_vehicle_pose(name, _pose(facade.airsim, initial_positions[name] - origin))
+                facade.set_vehicle_pose(name, _pose(facade.airsim, initial_positions[name] - origin, initial_yaw))
         for name in names:
             facade.enable(name, types[name], True)
         for name in names:
@@ -534,7 +692,9 @@ def main(argv: List[str] = None) -> int:
         if args.map_name == "flyingcpp" and not args.no_spawn_obstacles:
             # Create the course before starting vehicle motion so obstacle
             # creation is not perceived as a delayed post-takeoff stage.
-            blocks, true_obstacles = _spawn_block_course(facade, facade.airsim)
+            blocks, true_obstacles = _spawn_block_course(facade, facade.airsim, course["obstacles"])
+
+        _plot_route_markers(facade, route_markers)
 
         takeoff_futures = [facade.multirotor.takeoffAsync(vehicle_name=name) for name in names[:5]]
         for future in takeoff_futures:
@@ -585,7 +745,7 @@ def main(argv: List[str] = None) -> int:
             ), flush=True)
             if xy_error > 1.0:
                 for name in names:
-                    facade.set_vehicle_pose(name, _pose(facade.airsim, initial_positions[name]))
+                    facade.set_vehicle_pose(name, _pose(facade.airsim, initial_positions[name], initial_yaw))
             if altitude_error > 1.0:
                 altitude_futures = [
                     facade.multirotor.moveToZAsync(args.uav_altitude, 3.0, vehicle_name=name)
@@ -857,6 +1017,8 @@ def main(argv: List[str] = None) -> int:
                     "dt": args.dt,
                     "timestamp": now,
                     "method": args.cbf_method,
+                    "goal": goal.tolist(),
+                    "route_markers": [point.tolist() for point in route_markers],
                     "vehicle_types": types,
                     "vehicle_radii": vehicle_radii,
                     "formation": formation.metrics(estimated_states),

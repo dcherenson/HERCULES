@@ -311,10 +311,16 @@ def _animation_axis_limits(records: Sequence[Mapping], names: Sequence[str]) -> 
             if position is not None and len(position) == 3:
                 points.append(ned_to_display(position))
         for obstacle in record.get("true_obstacles") or []:
-            if obstacle.get("shape", "box") != "box":
-                continue
             try:
-                points.extend(ned_to_display(box_vertices(obstacle["center"], obstacle["dimensions"])))
+                if obstacle.get("shape", "box") == "sphere":
+                    center = np.asarray(obstacle["center"], dtype=float)
+                    radius = float(obstacle["radius"])
+                    points.extend(ned_to_display(center + offset) for offset in (
+                        [-radius, 0, 0], [radius, 0, 0], [0, -radius, 0],
+                        [0, radius, 0], [0, 0, -radius], [0, 0, radius],
+                    ))
+                else:
+                    points.extend(ned_to_display(box_vertices(obstacle["center"], obstacle["dimensions"])))
             except (KeyError, TypeError, ValueError):
                 continue
         for obstacle_data in (record.get("obstacles") or {}).values():
@@ -394,9 +400,14 @@ def plot_perception_animation_3d(
     def draw_frame(frame_index: int) -> None:
         axis.cla()
         for obstacle in true_obstacles or []:
-            if obstacle.get("shape", "box") != "box":
-                continue
             try:
+                if obstacle.get("shape", "box") == "sphere":
+                    _plot_segments(
+                        axis,
+                        sphere_wireframe_segments(obstacle["center"], obstacle["radius"]),
+                        "gray", 0.45, 1.0,
+                    )
+                    continue
                 vertices = ned_to_display(box_vertices(obstacle["center"], obstacle["dimensions"]))
             except (KeyError, TypeError, ValueError):
                 continue
