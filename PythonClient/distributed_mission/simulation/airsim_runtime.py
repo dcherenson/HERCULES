@@ -33,6 +33,7 @@ class AirSimLaunchConfig:
     settings_path: Optional[str] = None
     camera_director_position: Optional[tuple] = None
     camera_director_yaw: float = 0.0
+    rotate_camera_director: bool = False
 
     def __post_init__(self) -> None:
         if self.launch_mode not in {"visible", "headless", "existing"}:
@@ -83,28 +84,42 @@ class AirSimLauncher:
         self._temporary_settings_path: Optional[str] = None
 
     def _prepare_settings_override(self) -> None:
-        if self.config.launch_mode == "existing" or self.config.camera_director_position is None:
+        if self.config.launch_mode == "existing":
+            return
+        if self.config.camera_director_position is None and not self.config.rotate_camera_director:
             return
         source_path = self.config.settings_path
         if source_path is None:
             source_path = os.path.join(os.path.expanduser("~"), "Documents", "AirSim", "settings.json")
-        if not os.path.isfile(source_path):
-            # AirSim can still launch with its defaults. Do not silently move a
-            # vehicle camera just because a user's settings file is absent.
-            return
-        with open(source_path, "r", encoding="utf-8") as source:
-            settings = json.load(source)
+        if os.path.isfile(source_path):
+            with open(source_path, "r", encoding="utf-8") as source:
+                settings = json.load(source)
+        else:
+            # A minimal settings file is sufficient for CameraDirector. This
+            # also makes --top-down-camera work on clean machines where the
+            # user's optional Documents/AirSim/settings.json does not exist.
+            settings = {"SettingsVersion": 1.2}
         settings["ViewMode"] = "Manual"
         camera_director = dict(settings.get("CameraDirector") or {})
         position = self.config.camera_director_position
-        camera_director.update({
-            "X": position[0],
-            "Y": position[1],
-            "Z": position[2],
-            "Pitch": -90.0,
-            "Roll": 0.0,
-            "Yaw": float(self.config.camera_director_yaw),
-        })
+        if position is not None:
+            camera_director.update({
+                "X": position[0],
+                "Y": position[1],
+                "Z": position[2],
+                "Pitch": -90.0,
+                "Roll": 0.0,
+                "Yaw": float(self.config.camera_director_yaw),
+            })
+        elif self.config.rotate_camera_director:
+            # The Rural mission rotates the NED XY frame by -90 degrees. Keep
+            # the user's original default camera distance, height, pitch, and
+            # roll, but rotate its XY position and yaw with the mission.
+            x = float(camera_director.get("X", -3.0))
+            y = float(camera_director.get("Y", 0.0))
+            camera_director["X"] = y
+            camera_director["Y"] = -x
+            camera_director["Yaw"] = float(camera_director.get("Yaw", 0.0)) - 90.0
         settings["CameraDirector"] = camera_director
         temporary = tempfile.NamedTemporaryFile(
             mode="w", suffix="_airsim_top_down_settings.json", delete=False, encoding="utf-8"

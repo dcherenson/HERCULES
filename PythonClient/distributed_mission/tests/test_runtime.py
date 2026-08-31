@@ -11,6 +11,9 @@ from orchestrator import (
     compose_sensor_world_pose,
     parse_args,
     camera_director_for_map,
+    effective_obstacle_margin,
+    map_ground_z_offset,
+    shift_course_z,
     rotate_course_left,
     rotate_xy_right,
 )
@@ -39,6 +42,7 @@ def test_top_down_camera_is_opt_in_and_default_preserves_simulator_view():
     defaults = parse_args([])
     assert defaults.top_down_camera is False
     assert defaults.no_top_down_camera is False
+    assert defaults.obstacle_margin is None
 
     top_down = parse_args(["--top-down-camera", "--camera-height", "25"])
     assert top_down.top_down_camera is True
@@ -47,10 +51,46 @@ def test_top_down_camera_is_opt_in_and_default_preserves_simulator_view():
     explicit_disable = parse_args(["--top-down-camera", "--no-top-down-camera"])
     assert explicit_disable.top_down_camera is True
     assert explicit_disable.no_top_down_camera is True
+    assert parse_args(["--obstacle-margin", "0"]).obstacle_margin == 0.0
+    assert effective_obstacle_margin("rural_australia", None) == 1.0
+    assert effective_obstacle_margin("flyingcpp", None) == 0.0
+    assert effective_obstacle_margin("rural_australia", 0.0) == 0.0
+
+
+def test_rural_ground_offset_shifts_goal_waypoints_and_obstacles_only_for_map_frame():
+    course = {"goal": [1.0, 2.0, -1.0], "waypoints": [[0.0, 1.0, -1.0]], "obstacles": [{"center": [3.0, 4.0, -2.0]}]}
+    shifted = shift_course_z(course, map_ground_z_offset("rural_australia"))
+    assert shifted["goal"] == [1.0, 2.0, 1.0]
+    assert shifted["waypoints"] == [[0.0, 1.0, 1.0]]
+    assert shifted["obstacles"][0]["center"] == [3.0, 4.0, 0.0]
+    assert course["goal"] == [1.0, 2.0, -1.0]
+    assert map_ground_z_offset("flyingcpp") == 0.0
 
     default_config = AirSimLaunchConfig(launch_mode="headless")
     assert default_config.camera_director_position is None
     assert not any(argument.startswith("-settings=") for argument in default_config.command())
+
+
+def test_rural_default_camera_rotates_existing_camera_settings(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({
+        "SettingsVersion": 1.2,
+        "ViewMode": "Manual",
+        "CameraDirector": {"X": -20, "Y": 0, "Z": -15, "Pitch": -25, "Roll": 3, "Yaw": 10},
+    }), encoding="utf-8")
+    config = AirSimLaunchConfig(
+        launch_mode="headless", map_name="rural_australia", settings_path=str(settings_path),
+        rotate_camera_director=True,
+    )
+    launcher = AirSimLauncher(config)
+    launcher._prepare_settings_override()
+    try:
+        override = json.loads(open(config._active_settings_path, encoding="utf-8").read())
+        assert override["CameraDirector"] == {
+            "X": 0.0, "Y": 20.0, "Z": -15, "Pitch": -25, "Roll": 3, "Yaw": -80.0,
+        }
+    finally:
+        launcher.cleanup()
 
 
 def test_rural_mission_rotation_moves_goal_waypoints_and_obstacles_left():
@@ -75,7 +115,7 @@ def test_rural_mission_rotation_moves_goal_waypoints_and_obstacles_left():
 def test_rural_top_down_camera_is_behind_the_rotated_heading():
     position, yaw = camera_director_for_map("rural_australia", 6.0, 0.0, 30.0)
     assert np.allclose(position, [0.0, 6.0, -30.0])
-    assert np.isclose(yaw, -np.pi / 2.0)
+    assert np.isclose(yaw, 90.0)
 
     flying_position, flying_yaw = camera_director_for_map("flyingcpp", 6.0, 0.0, 30.0)
     assert np.allclose(flying_position, [6.0, 0.0, -30.0])
@@ -113,6 +153,27 @@ def test_top_down_override_is_written_to_camera_director_settings(tmp_path):
             "X": 6.0, "Y": 2.0, "Z": -30.0, "Pitch": -90.0, "Roll": 0.0, "Yaw": 0.0
         }
         assert any(argument.startswith("-settings=") for argument in config.command())
+    finally:
+        launcher.cleanup()
+
+
+def test_top_down_override_is_created_without_a_user_settings_file(tmp_path, monkeypatch):
+    missing_settings = tmp_path / "missing-settings.json"
+    config = AirSimLaunchConfig(
+        launch_mode="headless",
+        settings_path=str(missing_settings),
+        camera_director_position=(0.0, 6.0, -30.0),
+        camera_director_yaw=90.0,
+    )
+    launcher = AirSimLauncher(config)
+    launcher._prepare_settings_override()
+    try:
+        override = json.loads(open(config._active_settings_path, encoding="utf-8").read())
+        assert override["SettingsVersion"] == 1.2
+        assert override["ViewMode"] == "Manual"
+        assert override["CameraDirector"]["X"] == 0.0
+        assert override["CameraDirector"]["Y"] == 6.0
+        assert override["CameraDirector"]["Yaw"] == 90.0
     finally:
         launcher.cleanup()
 

@@ -28,6 +28,14 @@ class PerceptionConfig:
     # centers a bounded distance away from the sensor toward the occupied
     # volume; zero disables this geometric surface correction.
     planar_surface_offset: float = 0.75
+    # Sparse foliage often forms a long, irregular patch. Anchoring its proxy
+    # at the patch midpoint can place the CBF obstacle behind the first
+    # measured return. This remains opt-in so the established FlyingCPP box
+    # behavior is unchanged.
+    planar_use_nearest_surface: bool = False
+    # Some sparse planar patches have a distant centroid but a close visible
+    # surface. Rank those patches by their nearest return when requested.
+    rank_by_surface_distance: bool = False
     stale_after: float = 0.25
     depth_stride: int = 2
     max_points: int = 5000
@@ -279,13 +287,20 @@ class ObstacleDetector:
                 if is_planar:
                     xy_min = np.min(patch[:, :2], axis=0)
                     xy_max = np.max(patch[:, :2], axis=0)
-                    center[:2] = 0.5 * (xy_min + xy_max)
+                    if self.config.planar_use_nearest_surface:
+                        nearest_index = int(np.argmin(np.linalg.norm(patch[:, :2] - ego[:2], axis=1)))
+                        center[:2] = patch[nearest_index, :2]
+                    else:
+                        center[:2] = 0.5 * (xy_min + xy_max)
                     line_of_sight = center[:2] - ego[:2]
                     line_norm = float(np.linalg.norm(line_of_sight))
                     offset = min(max(0.0, float(self.config.planar_surface_offset)), line_norm)
                     if line_norm > 1e-9 and offset > 0.0:
                         center[:2] += offset * line_of_sight / line_norm
-                    radius = float(0.5 * np.linalg.norm(xy_max - xy_min) + self.config.fit_padding)
+                    if self.config.planar_use_nearest_surface:
+                        radius = float(np.max(np.linalg.norm(patch[:, :2] - center[:2], axis=1)) + self.config.fit_padding)
+                    else:
+                        radius = float(0.5 * np.linalg.norm(xy_max - xy_min) + self.config.fit_padding)
                 else:
                     radius = float(np.max(np.linalg.norm(patch - center, axis=1)) + self.config.fit_padding)
                 # ``max_proxy_radius`` is a safety-model limit as well as a
@@ -294,7 +309,15 @@ class ObstacleDetector:
                 # valid CBF problem infeasible.
                 radius = min(radius, float(self.config.max_proxy_radius))
                 clearance = float(np.linalg.norm(center - ego) - radius)
-                proxy_entries.append((clearance, ObstacleProxy(
+                if self.config.rank_by_surface_distance:
+                    if is_planar:
+                        ranking_distance = float(np.min(np.linalg.norm(patch[:, :2] - ego[:2], axis=1)))
+                    else:
+                        ranking_distance = float(np.min(np.linalg.norm(patch - ego, axis=1)))
+                    ranking_key = ranking_distance
+                else:
+                    ranking_key = clearance
+                proxy_entries.append((ranking_key, ObstacleProxy(
                     obstacle_id=f"{source}_{index}_{patch_index}",
                     center=center,
                     radius=radius,

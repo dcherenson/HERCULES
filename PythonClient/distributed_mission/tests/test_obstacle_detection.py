@@ -118,6 +118,44 @@ def test_truth_ugv_proxies_ignore_boxes_above_or_below_vehicle_footprint():
     assert [item.obstacle_id for item in proxies] == ["truth_ground"]
 
 
+def test_nearest_surface_mode_anchors_planar_proxy_at_first_return():
+    points = np.asarray([
+        [3.0, 0.0, 0.0],
+        [3.1, 0.1, 0.0],
+        [5.5, 0.2, 0.0],
+        [5.6, 0.3, 0.0],
+    ])
+    detector = ObstacleDetector(PerceptionConfig(
+        top_n=1,
+        min_range=0.1,
+        max_range=10.0,
+        voxel_size=0.01,
+        cluster_eps=2.6,
+        cluster_min_samples=2,
+        max_proxy_radius=5.0,
+        planar_use_nearest_surface=True,
+        planar_surface_offset=0.0,
+    ))
+    proxies = detector.detect(points, np.zeros(3), is_planar=True)
+    assert len(proxies) == 1
+    assert proxies[0].center[0] <= 3.1
+
+
+def test_surface_distance_ranking_keeps_nearest_sparse_patch():
+    points = np.asarray([
+        [2.0, 0.0, 0.0], [2.0, 0.1, 0.0],
+        [4.0, 0.0, 0.0], [4.0, 0.1, 0.0], [8.0, 0.0, 0.0],
+    ])
+    detector = ObstacleDetector(PerceptionConfig(
+        top_n=1, min_range=0.1, max_range=20.0, voxel_size=0.01,
+        cluster_eps=0.2, cluster_min_samples=2, max_proxy_radius=1.0,
+        rank_by_surface_distance=True, planar_surface_offset=0.0,
+    ))
+    proxies = detector.detect(points, np.zeros(3), is_planar=True)
+    assert len(proxies) == 1
+    assert proxies[0].center[0] == 2.0
+
+
 def test_ground_height_can_be_estimated_from_an_airborne_view():
     ego = np.array([0.0, 0.0, -5.0])
     ground = np.column_stack((np.linspace(-10.0, 10.0, 80), np.zeros(80), np.full(80, 2.02)))

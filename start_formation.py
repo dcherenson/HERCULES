@@ -48,12 +48,13 @@ def main() -> int:
     args = parse_args()
     top_down_camera = args.top_down_camera and not args.no_top_down_camera
     initial_yaw = -np.pi / 2.0 if args.map_name == "rural_australia" else 0.0
+    ugv_ground_z = 1.0 if args.map_name == "rural_australia" else -1.0
     camera_position = None
     camera_yaw = 0.0
     if top_down_camera:
         if args.map_name == "rural_australia":
             camera_position = (-args.camera_y, args.camera_x, -abs(args.camera_height))
-            camera_yaw = initial_yaw
+            camera_yaw = 90.0
         else:
             camera_position = (args.camera_x, args.camera_y, -abs(args.camera_height))
     config = AirSimLaunchConfig(
@@ -66,6 +67,7 @@ def main() -> int:
         settings_path=args.settings_path,
         camera_director_position=camera_position,
         camera_director_yaw=camera_yaw,
+        rotate_camera_director=args.map_name == "rural_australia",
     )
     launcher = AirSimLauncher(config)
     facade = AirSimFacade(config)
@@ -76,8 +78,8 @@ def main() -> int:
         launcher.launch()
         facade.connect()
         facade.multirotor.simRunConsoleCommand("DisableAllScreenMessages")
-        if args.launch_mode == "existing" and top_down_camera:
-            print("Warning: --launch-mode existing cannot apply the top-down CameraDirector override; "
+        if args.launch_mode == "existing" and (top_down_camera or args.map_name == "rural_australia"):
+            print("Warning: --launch-mode existing cannot apply the Rural/camera CameraDirector override; "
                   "configure it before launching Unreal.", flush=True)
         poses = {
             "Drone1": (-2, -2, -0.5), "Drone2": (2, -2, -0.5), "SimpleFlight": (0, 0, -0.5),
@@ -91,6 +93,8 @@ def main() -> int:
                 name: (-position[1], position[0], position[2])
                 for name, position in poses.items()
             }
+            for name in huskies:
+                poses[name] = (poses[name][0], poses[name][1], ugv_ground_z)
         for name, vehicle_type in names:
             position = poses[name]
             pose = facade.airsim.Pose(

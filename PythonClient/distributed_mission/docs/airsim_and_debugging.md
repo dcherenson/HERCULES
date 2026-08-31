@@ -41,12 +41,18 @@ For `--map rural_australia`, the mission frame is rotated 90 degrees left in
 AirSim's NED convention: the initial heading is -90 degrees and the goal, waypoints, formation layout,
 and any supplied course geometry are rotated with it. This keeps the
 RuralAustralia run aligned with the desired map orientation without changing
-the CBF equations.
+the CBF equations. RuralAustralia ground-referenced goal, waypoint, obstacle,
+and Husky startup heights receive a +2 m NED correction because its terrain is
+approximately 2 m lower than the FlyingCPP reference. UAV flight altitude is
+not shifted.
 
-When `--top-down-camera` is selected for RuralAustralia, the external camera
-is placed behind the initial heading at the correspondingly rotated position
-and looks along the agents' travel direction. FlyingCPP keeps its existing
-camera placement.
+For RuralAustralia, the launch-time override rotates the existing default
+CameraDirector XY position and yaw with the mission, so the original camera
+height and pitch are preserved while it views the agents from behind. When
+`--top-down-camera` is selected, the external camera instead uses the explicit
+rear-side position and a `+90` degree top-down yaw so the agents' `-Y` travel
+direction runs away from the camera (toward the top of the view). FlyingCPP
+keeps its existing camera placement.
 
 Startup launches all UAV takeoff commands concurrently, then launches all UAV
 altitude commands concurrently. FlyingCPP obstacle blocks are spawned before

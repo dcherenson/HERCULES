@@ -60,6 +60,43 @@ Reasonable next options are:
 4. Add an explicit map-truth obstacle export for controlled validation before
    requiring perception to represent every RuralAustralia mesh.
 
+## RuralAustralia perception calibration follow-up
+
+The detector now composes each Husky LiDAR mount with the vehicle pose, removes
+zero returns before clustering, and uses the nearest measured surface point
+for sparse planar foliage patches. A short 100-step run with the existing
+`--obstacle-margin 1.0` completed with zero relevant Unreal collisions and no
+invalid or negative-age sensor observations. The same margin is now the
+RuralAustralia default; FlyingCPP remains at its previous 0 m default, and an
+explicit `--obstacle-margin 0` still provides an uncalibrated baseline.
+
+A subsequent clean-start run exposed a `Spline_Fence_2` contact while the
+Husky formation was placed several metres from its requested startup pose.
+That is recorded as a startup-placement issue rather than evidence that the
+LiDAR transform is wrong. The run with the more conservative existing 2 m
+margin had zero relevant collisions, but the 1 m default remains the selected
+calibration because it allows substantially more progress. The generated
+`*_perception_report.md`, timeline, and per-agent point overlays should be
+reviewed for any future fence/foliage contact before increasing the margin.
+
+The final default-calibration smoke run completed with all three Huskies near
+their requested startup formation, zero relevant Unreal collisions, no invalid
+sensor observations, and no negative sensor ages. The earlier startup/fence
+contact was not reproduced.
+
+## RuralAustralia ground-height correction
+
+RuralAustralia Example 1 uses a ground reference approximately 2 m lower than
+the FlyingCPP course in the mission frame. Ground-referenced Rural geometry is
+therefore shifted by `+2 m` in NED: the goal and route markers use `z=+1`
+instead of `z=-1`, and Husky startup poses use `z=+1` instead of being dropped
+from `z=-1`. UAV flight altitude remains the configured `-5 m` NED value.
+
+The post-correction 100-step Rural smoke run logged goal `[1, -16, 1]`, Husky
+startup heights around `z=0.6–0.8` after settling on the terrain, and zero
+relevant Unreal collisions. FlyingCPP continues to use its original `z=-1`
+goal and startup references.
+
 ## Unreal route markers
 
 The orchestrator calls AirSim's persistent `simPlotPoints` API after connecting

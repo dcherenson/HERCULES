@@ -217,10 +217,57 @@ def camera_director_for_map(
         # The route turns from +X to -Y. Put the camera on the rear (+Y)
         # side while retaining the user-selected camera offset magnitude.
         camera_xy = np.asarray([-camera_y, camera_x], dtype=float)
-        camera_yaw = -np.pi / 2.0
+        # CameraDirector rotation fields are Unreal degrees; vehicle yaw is
+        # represented in radians elsewhere in the mission.
+        # With a top-down pitch, yaw controls the screen's north/up direction
+        # through the gimbal singularity. +90 degrees makes the -Y travel
+        # direction appear away from the rear-side camera.
+        camera_yaw = 90.0
     else:
         camera_yaw = 0.0
     return (float(camera_xy[0]), float(camera_xy[1]), -abs(float(camera_height))), float(camera_yaw)
+
+
+def effective_obstacle_margin(map_name: str, requested: Optional[float]) -> float:
+    """Select the existing CBF margin, with a calibrated Rural default."""
+
+    if requested is not None:
+        return float(requested)
+    return 1.0 if map_name == "rural_australia" else 0.0
+
+
+def map_ground_z_offset(map_name: str) -> float:
+    """Return the known NED ground-level correction for each map."""
+
+    # RuralAustralia Example 1 is approximately 2 m lower than the
+    # FlyingCPP mission reference. NED down is positive, so ground-referenced
+    # points move from z=-1 to z=+1. UAV flight altitude remains independent.
+    return 2.0 if map_name == "rural_australia" else 0.0
+
+
+def shift_course_z(course: Dict[str, Any], offset: float) -> Dict[str, Any]:
+    """Shift ground-referenced course geometry vertically in NED."""
+
+    if abs(float(offset)) <= 1e-12:
+        return course
+    shifted = dict(course)
+    shifted["goal"] = np.asarray(course["goal"], dtype=float).copy()
+    shifted["goal"][2] += float(offset)
+    shifted["goal"] = shifted["goal"].tolist()
+    shifted["waypoints"] = []
+    for point in course.get("waypoints", []):
+        value = np.asarray(point, dtype=float).copy()
+        value[2] += float(offset)
+        shifted["waypoints"].append(value.tolist())
+    shifted_obstacles = []
+    for obstacle in course.get("obstacles", []):
+        adjusted = dict(obstacle)
+        center = np.asarray(obstacle["center"], dtype=float).copy()
+        center[2] += float(offset)
+        adjusted["center"] = center.tolist()
+        shifted_obstacles.append(adjusted)
+    shifted["obstacles"] = shifted_obstacles
+    return shifted
 
 
 def _capture_obstacles(
@@ -513,7 +560,10 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--uncertainty-radius", type=float, default=0.0)
     parser.add_argument("--uav-radius", type=float, default=1.0)
     parser.add_argument("--ugv-radius", type=float, default=1.25)
-    parser.add_argument("--obstacle-margin", type=float, default=0.0, help="additional existing CBF obstacle clearance margin")
+    parser.add_argument(
+        "--obstacle-margin", type=float, default=None,
+        help="additional CBF obstacle clearance margin; defaults to 1.0 m on RuralAustralia and 0 m elsewhere",
+    )
     parser.add_argument("--uav-velocity-limit", type=float, default=2.0)
     parser.add_argument("--ugv-speed-limit", type=float, default=2.0)
     parser.add_argument("--uav-acceleration-limit", type=float, default=4.0)
@@ -555,8 +605,17 @@ def main(argv: List[str] = None) -> int:
         print("Error: unable to load obstacle course: {}".format(error), file=sys.stderr)
         return 2
     initial_yaw = -np.pi / 2.0 if args.map_name == "rural_australia" else 0.0
+    ground_z_offset = map_ground_z_offset(args.map_name)
     if args.map_name == "rural_australia":
         course = rotate_course_left(course)
+    course = shift_course_z(course, ground_z_offset)
+    # RuralAustralia's foliage returns represent a visible surface, while
+    # the collision body can extend beyond that sparse surface. Use the
+    # existing CBF obstacle-margin parameter as a map calibration only; the
+    # explicit command-line value always wins, including --obstacle-margin 0.
+    obstacle_margin = effective_obstacle_margin(args.map_name, args.obstacle_margin)
+    if args.map_name == "rural_australia" and args.obstacle_margin is None:
+        print("RuralAustralia perception calibration: using 1.0 m obstacle margin", flush=True)
     camera_position = None
     camera_yaw = 0.0
     if top_down_camera:
@@ -576,6 +635,7 @@ def main(argv: List[str] = None) -> int:
         settings_path=args.settings_path,
         camera_director_position=camera_position,
         camera_director_yaw=camera_yaw,
+        rotate_camera_director=args.map_name == "rural_australia",
     )
     launcher = AirSimLauncher(launch_config)
     facade = AirSimFacade(launch_config)
@@ -599,7 +659,7 @@ def main(argv: List[str] = None) -> int:
         uncertainty_radius=args.uncertainty_radius,
         uav_radius=args.uav_radius,
         ugv_radius=args.ugv_radius,
-        obstacle_margin=args.obstacle_margin,
+        obstacle_margin=obstacle_margin,
         uav_velocity_limit=args.uav_velocity_limit,
         ugv_speed_limit=args.ugv_speed_limit,
         uav_acceleration_limit=args.uav_acceleration_limit,
@@ -630,7 +690,20 @@ def main(argv: List[str] = None) -> int:
     # keeps the tighter fit used for UGVs.
     detectors = {
         "drone": ObstacleDetector(PerceptionConfig(top_n=args.top_n_obstacles, fit_padding=0.75)),
-        "ugv": ObstacleDetector(PerceptionConfig(top_n=args.top_n_obstacles, fit_padding=0.0, planar_surface_offset=0.75)),
+        "ugv": ObstacleDetector(PerceptionConfig(
+            top_n=args.top_n_obstacles,
+            planar_surface_offset=0.0 if args.map_name == "rural_australia" else 0.75,
+            # RuralAustralia foliage is a sparse collection of small LiDAR
+            # returns rather than a dense planar mesh. Keep FlyingCPP's
+            # stricter clustering unchanged while allowing those returns to
+            # form local obstacle patches on the RuralAustralia map.
+            cluster_eps=0.85 if args.map_name == "rural_australia" else 0.65,
+            cluster_min_samples=3 if args.map_name == "rural_australia" else 8,
+            fit_padding=0.35 if args.map_name == "rural_australia" else 0.0,
+            ground_band=0.15 if args.map_name == "rural_australia" else 0.25,
+            planar_use_nearest_surface=args.map_name == "rural_australia",
+            rank_by_surface_distance=args.map_name == "rural_australia",
+        )),
     }
     goal = np.asarray(course["goal"], dtype=float)
     route_markers = [np.asarray(point, dtype=float) for point in course.get("waypoints", [])]
@@ -647,13 +720,14 @@ def main(argv: List[str] = None) -> int:
         launcher.launch()
         facade.connect()
         facade.multirotor.simRunConsoleCommand("DisableAllScreenMessages")
-        if args.launch_mode == "existing" and top_down_camera:
-            print("Warning: --launch-mode existing cannot apply the top-down CameraDirector override; "
+        if args.launch_mode == "existing" and (top_down_camera or args.map_name == "rural_australia"):
+            print("Warning: --launch-mode existing cannot apply the Rural/camera CameraDirector override; "
                   "configure it before launching Unreal.", flush=True)
 
-        leader_position = np.array([0.0, 0.0, -1.0])
+        uav_start_position = np.array([0.0, 0.0, -1.0])
+        ugv_start_position = np.array([0.0, 0.0, -1.0 + ground_z_offset])
         initial_positions = {
-            name: leader_position + (
+            name: (ugv_start_position if types[name] == "ugv" else uav_start_position) + (
                 rotate_xy_right(formation.config.slots[name])
                 if args.map_name == "rural_australia" else formation.config.slots[name]
             )
@@ -807,7 +881,14 @@ def main(argv: List[str] = None) -> int:
             if args.sensor_stale_after is not None:
                 detector.config.stale_after = args.sensor_stale_after
             else:
-                detector.config.stale_after = max(detector.config.stale_after, sensor_period + args.dt * 0.5)
+                # Each agent is captured by a team-wide round-robin scheduler;
+                # allow one delayed cycle while the age margin expands the
+                # cached proxy. This avoids dropping all local obstacles for a
+                # brief RPC/sensor delay, while a much older observation is
+                # still rejected by the existing stale-sensor fail-safe.
+                detector.config.stale_after = max(
+                    detector.config.stale_after, 2.0 * sensor_period + args.dt
+                )
         # Warm all sensors before starting the real-time deadline clock. The
         # first depth frame is intentionally expensive and must not become a
         # control-cycle deadline miss.
@@ -1018,6 +1099,7 @@ def main(argv: List[str] = None) -> int:
                     "timestamp": now,
                     "method": args.cbf_method,
                     "goal": goal.tolist(),
+                    "ground_z_offset": float(ground_z_offset),
                     "route_markers": [point.tolist() for point in route_markers],
                     "vehicle_types": types,
                     "vehicle_radii": vehicle_radii,

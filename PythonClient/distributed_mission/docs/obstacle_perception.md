@@ -42,6 +42,13 @@ current test course has a centered goal and no bypass waypoint; the nominal
 formation is allowed to deform through the central opening while local CBF
 constraints handle the spawned obstacles. No online waypoint generation is
 used.
+
+RuralAustralia uses the existing CBF `obstacle_margin` parameter as a small
+map-specific calibration: the default is 1.0 m because foliage LiDAR returns
+describe a sparse visible surface rather than the full collision volume.
+FlyingCPP remains at the previous 0 m default. Passing `--obstacle-margin`
+explicitly overrides either default, including `--obstacle-margin 0` for a
+baseline experiment; no CBF equation or online route heuristic is changed.
 The orchestrator contains only the minimal AirSim actuation adaptations needed
 to realize the requested model commands: a turn-dominated Wang command retains
 throttle, and a zero-speed Mestres turn uses a small crawl speed because a car
