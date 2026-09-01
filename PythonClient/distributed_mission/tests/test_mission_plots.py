@@ -77,6 +77,22 @@ def test_topdown_limits_include_goal_location():
     assert lower[1] <= 20.0 <= upper[1]
 
 
+def test_topdown_limits_include_target_truth_not_noisy_estimate():
+    records = [_record(0, {"Drone1": [0.0, 0.0, -1.0]})]
+    records[0]["target_truth"] = {
+        "name": "Target1", "position": [30.0, 5.0, 0.0],
+        "pattern": {"center": [30.0, 5.0, 0.0], "route_heading": 0.0,
+                    "longitudinal_span": 10.0, "lateral_span": 8.0},
+    }
+    records[0]["target_tracking"] = {
+        "agents": {"Drone1": {"estimate": {"target_id": "Target1", "position": [-100.0, -100.0], "covariance": [[1.0, 0.0], [0.0, 1.0]]}}}
+    }
+    lower, upper = _topdown_limits(records, ["Drone1"], 0.0, np.zeros(2))
+    # Heading zero makes route-up coordinates [left=y, progress=x].
+    assert lower[0] <= 5.0 <= upper[0]
+    assert lower[1] <= 30.0 <= upper[1]
+
+
 def test_generate_mission_plots_writes_images_and_topdown_animations(tmp_path, monkeypatch):
     log_path = tmp_path / "mestres_test.jsonl"
     records = [
@@ -91,6 +107,21 @@ def test_generate_mission_plots_writes_images_and_topdown_animations(tmp_path, m
     ]
     for record in records:
         record["true_obstacles"] = [{"id": "block0", "shape": "box", "center": [2.0, 0.0, -1.0], "dimensions": [1.0, 2.0, 2.0]}]
+        record["target_truth"] = {
+            "name": "Target1", "position": [3.0 + record["step"], 0.5, 0.0],
+            "collision": {"relevant": False},
+            "pattern": {"center": [3.0, 0.5, 0.0], "route_heading": 0.0,
+                        "longitudinal_span": 10.0, "lateral_span": 8.0},
+        }
+        record["targets"] = {"Target1": record["target_truth"]}
+        record["target_tracking"] = {
+            "agents": {
+                "Drone1": {"estimate": {"target_id": "Target1", "position": [3.0 + record["step"], 0.4, 0.0], "covariance": [[0.25, 0.0], [0.0, 0.36]]}},
+                "Husky1": {"estimate": {"target_id": "Target1", "position": [3.0 + record["step"], 0.6, 0.0], "covariance": [[0.25, 0.0], [0.0, 0.36]]}},
+            }
+        }
+        record["tracking_communication_links"] = [["Drone1", "Husky1"]]
+        record["safety_communication_links"] = []
     with log_path.open("w", encoding="utf-8") as output:
         for record in records:
             output.write(json.dumps(record) + "\n")

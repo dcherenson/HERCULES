@@ -40,6 +40,8 @@ class AirSimLaunchConfig:
     video_resolution: tuple = (1280, 720)
     video_fps: float = 20.0
     recording_folder: Optional[str] = None
+    target_tracking: bool = False
+    target_uav_camera: str = "target_bottom"
 
     def __post_init__(self) -> None:
         if self.launch_mode not in {"visible", "headless", "existing"}:
@@ -100,6 +102,7 @@ class AirSimLauncher:
             self.config.camera_director_position is None
             and not self.config.rotate_camera_director
             and not self.config.record_video
+            and not self.config.target_tracking
         ):
             return
         source_path = self.config.settings_path
@@ -138,6 +141,8 @@ class AirSimLauncher:
             # horizon visibly tilted after the map-frame rotation.
             camera_director["Roll"] = 0.0
         settings["CameraDirector"] = camera_director
+        if self.config.target_tracking:
+            self._apply_target_tracking_settings(settings)
         if self.config.record_video:
             self._apply_recording_settings(settings)
         temporary = tempfile.NamedTemporaryFile(
@@ -147,6 +152,41 @@ class AirSimLauncher:
             json.dump(settings, temporary, indent=2)
         self._temporary_settings_path = temporary.name
         self.config._active_settings_path = temporary.name
+
+    def _apply_target_tracking_settings(self, settings: Dict[str, Any]) -> None:
+        """Add a downward tracking camera without replacing vehicle cameras."""
+
+        vehicles = settings.setdefault("Vehicles", {})
+        camera_name = str(self.config.target_uav_camera or "target_bottom")
+        for vehicle_name, vehicle_settings in vehicles.items():
+            vehicle_type = str(vehicle_settings.get("VehicleType", "")).lower()
+            if "simpleflight" not in vehicle_type and "multirotor" not in vehicle_type:
+                continue
+            cameras = vehicle_settings.get("Cameras")
+            if cameras is None:
+                cameras = {}
+                vehicle_settings["Cameras"] = cameras
+            if not isinstance(cameras, dict):
+                raise ValueError("vehicle Cameras setting must be an object")
+            existing = cameras.get(camera_name)
+            if existing is None:
+                existing = {}
+                cameras[camera_name] = existing
+            if not isinstance(existing, dict):
+                raise ValueError("tracking camera setting must be an object")
+            existing.update({
+                "External": False,
+                "X": 0.0,
+                "Y": 0.0,
+                "Z": 0.0,
+                "Roll": 0.0,
+                "Pitch": -90.0,
+                "Yaw": 0.0,
+                "CaptureSettings": [
+                    {"ImageType": 0, "Width": 320, "Height": 240, "FOV_Degrees": 120.0, "MotionBlurAmount": 0},
+                    {"ImageType": 2, "Width": 320, "Height": 240, "FOV_Degrees": 120.0, "MotionBlurAmount": 0},
+                ],
+            })
 
     def _apply_recording_settings(self, settings: Dict[str, Any]) -> None:
         """Add recording-only cameras without replacing perception cameras."""

@@ -151,6 +151,76 @@ class FormationController:
         yaw_rate = np.clip(self.config.ugv_heading_gain * heading_error, -self.config.ugv_max_yaw_rate, self.config.ugv_max_yaw_rate)
         return np.array([speed, yaw_rate], dtype=float)
 
+    def target_nominal_control(
+        self,
+        agent: AgentState,
+        target_estimate: Mapping[str, object],
+        fallback_heading: float,
+        target_z: float = 0.0,
+        ugv_circumradius: float = 6.0,
+    ) -> np.ndarray:
+        """Return acceleration toward this agent's target-centered slot."""
+
+        from .target_motion import target_centered_slot
+
+        if not target_estimate.get("active", False):
+            return np.zeros(3, dtype=float)
+        target_position = np.asarray(target_estimate.get("position", [0.0, 0.0]), dtype=float).reshape(-1)
+        target_velocity = np.asarray(target_estimate.get("velocity", [0.0, 0.0]), dtype=float).reshape(-1)
+        position = np.array([
+            target_position[0], target_position[1], float(target_z)
+        ], dtype=float)
+        velocity = np.array([
+            target_velocity[0], target_velocity[1], 0.0
+        ], dtype=float)
+        reference, reference_velocity, _ = target_centered_slot(
+            agent.agent_id, "drone", position, velocity, fallback_heading,
+            self.config.uav_altitude, target_z, ugv_circumradius,
+        )
+        desired_velocity = reference_velocity + self.config.position_gain * (reference - agent.position)
+        speed = float(np.linalg.norm(desired_velocity))
+        speed_limit = self._speed_limit(agent.agent_id)
+        if speed > speed_limit:
+            desired_velocity *= speed_limit / speed
+        return self.config.velocity_gain * (desired_velocity - agent.velocity)
+
+    def target_nominal_unicycle_control(
+        self,
+        agent: AgentState,
+        target_estimate: Mapping[str, object],
+        fallback_heading: float,
+        target_z: float = 0.0,
+        ugv_circumradius: float = 6.0,
+    ) -> np.ndarray:
+        """Return a unicycle command toward an equilateral target slot."""
+
+        from .target_motion import target_centered_slot
+
+        if not target_estimate.get("active", False):
+            return np.zeros(2, dtype=float)
+        target_position = np.asarray(target_estimate.get("position", [0.0, 0.0]), dtype=float).reshape(-1)
+        target_velocity = np.asarray(target_estimate.get("velocity", [0.0, 0.0]), dtype=float).reshape(-1)
+        position = np.array([target_position[0], target_position[1], float(target_z)], dtype=float)
+        velocity = np.array([target_velocity[0], target_velocity[1], 0.0], dtype=float)
+        reference, _, _ = target_centered_slot(
+            agent.agent_id, "ugv", position, velocity, fallback_heading,
+            self.config.uav_altitude, target_z, ugv_circumradius,
+        )
+        delta = reference[:2] - agent.position[:2]
+        distance = float(np.linalg.norm(delta))
+        if distance <= 0.5:
+            return np.zeros(2, dtype=float)
+        desired_heading = float(np.arctan2(delta[1], delta[0]))
+        heading_error = wrap_angle(desired_heading - agent.yaw)
+        speed = min(self._speed_limit(agent.agent_id), self.config.position_gain * distance)
+        speed *= max(0.25, np.cos(heading_error))
+        yaw_rate = np.clip(
+            self.config.ugv_heading_gain * heading_error,
+            -self.config.ugv_max_yaw_rate,
+            self.config.ugv_max_yaw_rate,
+        )
+        return np.array([speed, yaw_rate], dtype=float)
+
     def _speed_limit(self, agent_id: str) -> float:
         """Return the configured nominal speed limit for one agent."""
 

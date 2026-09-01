@@ -40,10 +40,13 @@ class ObstacleProxy:
     timestamp: float = 0.0
     point_count: int = 0
     is_planar: bool = False
+    velocity: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
         self.center = np.asarray(self.center, dtype=float).reshape(-1)
         self.radius = float(max(0.0, self.radius))
+        if self.velocity is not None:
+            self.velocity = np.asarray(self.velocity, dtype=float).reshape(-1)
 
 
 @dataclass
@@ -344,7 +347,13 @@ class DistributedCBFModule:
             )
 
         for obstacle in request.obstacles:
-            add_pair(obstacle.center, np.zeros(3), float(obstacle.radius), np.zeros(3), False)
+            add_pair(
+                obstacle.center,
+                obstacle.velocity if obstacle.velocity is not None else np.zeros(3),
+                float(obstacle.radius),
+                np.zeros(3),
+                False,
+            )
 
         # AirSim uses NED coordinates. This altitude guard maintains the
         # initial UAV/UGV separation while cross-type pair CBFs remain off.
@@ -393,7 +402,11 @@ class DistributedCBFModule:
             if neighbor.vehicle_type == ego.vehicle_type:
                 add_circle(neighbor.position, self._vehicle_radius(neighbor.vehicle_type), neighbor.velocity)
         for obstacle in request.obstacles:
-            add_circle(obstacle.center, obstacle.radius, np.zeros(3))
+            add_circle(
+                obstacle.center,
+                obstacle.radius,
+                obstacle.velocity if obstacle.velocity is not None else np.zeros(3),
+            )
 
     def _bounds(self, request: CBFRequest, dimension: int) -> Tuple[np.ndarray, np.ndarray]:
         if request.control_bounds is not None:

@@ -240,6 +240,34 @@ def _truth_xy_extent(obstacles: Sequence[Mapping[str, Any]]) -> List[np.ndarray]
     return extent
 
 
+def _target_truth(record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Read target truth from current or compatible older log schemas."""
+
+    value = record.get("target_truth") or record.get("target")
+    if isinstance(value, Mapping):
+        return value
+    targets = record.get("targets")
+    if isinstance(targets, Mapping):
+        for candidate in targets.values():
+            if isinstance(candidate, Mapping) and candidate.get("position") is not None:
+                return candidate
+    return None
+
+
+def _target_estimate(record: Mapping[str, Any], agent_name: str, target_name: str | None = None) -> Mapping[str, Any] | None:
+    tracking = record.get("target_tracking")
+    if not isinstance(tracking, Mapping):
+        return None
+    agents = tracking.get("agents")
+    if not isinstance(agents, Mapping) or not isinstance(agents.get(agent_name), Mapping):
+        return None
+    value = agents[agent_name].get("estimate")
+    if isinstance(value, Mapping) and value.get("position") is not None:
+        if target_name is None or value.get("target_id", target_name) == target_name:
+            return value
+    return None
+
+
 def _topdown_limits(records: Sequence[Mapping], names: Sequence[str], heading: float, origin: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     points: List[np.ndarray] = []
     for record in records:
@@ -257,6 +285,33 @@ def _topdown_limits(records: Sequence[Mapping], names: Sequence[str], heading: f
     truth = next((record.get("true_obstacles") for record in records if record.get("true_obstacles") is not None), [])
     if truth:
         points.extend(route_up_xy(point, heading, origin) for point in _truth_xy_extent(truth))
+    # Bounds use target truth, never noisy estimates. Include the complete
+    # configured pattern envelope when it is present so the camera does not
+    # resize as the target moves through the figure-eight.
+    target_positions = []
+    for record in records:
+        target = _target_truth(record)
+        if isinstance(target, Mapping) and target.get("position") is not None:
+            try:
+                target_positions.append(np.asarray(target["position"], dtype=float).reshape(3))
+            except (TypeError, ValueError):
+                pass
+        pattern = target.get("pattern") if isinstance(target, Mapping) else None
+        if isinstance(pattern, Mapping) and pattern.get("center") is not None:
+            try:
+                center = np.asarray(pattern["center"], dtype=float).reshape(3)
+                forward = np.array([np.cos(float(pattern.get("route_heading", heading))), np.sin(float(pattern.get("route_heading", heading)))])
+                left = np.array([-forward[1], forward[0]])
+                length = 0.5 * float(pattern.get("longitudinal_span", 0.0))
+                width = 0.5 * float(pattern.get("lateral_span", 0.0))
+                target_positions.extend([
+                    center + np.r_[length * sx * forward + width * sy * left, 0.0]
+                    for sx, sy in ((-1, -1), (-1, 1), (1, -1), (1, 1))
+                ])
+            except (TypeError, ValueError):
+                pass
+    if target_positions:
+        points.extend(route_up_xy(point, heading, origin) for point in target_positions)
     if not points:
         return np.asarray([-10.0, -10.0]), np.asarray([10.0, 10.0])
     values = np.vstack(points)
@@ -366,6 +421,8 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
                 obstacle_data = (record.get("obstacles") or {}).get(name, {})
                 for proxy in obstacle_data.get("proxies", []) if isinstance(obstacle_data, Mapping) else []:
                     try:
+                        if proxy.get("source") == "target_tracking":
+                            continue
                         proxy_center = route_up_xy(np.asarray(proxy["center"], dtype=float), heading, origin)
                         axis.add_patch(Circle(proxy_center, float(proxy.get("radius", 0.0)), fill=False,
                                               edgecolor=colors[name], alpha=0.35, linestyle=":", linewidth=1.0))
@@ -378,7 +435,47 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
                         footprint_xy = route_up_xy(footprint, heading, origin)
                         axis.add_patch(Polygon(footprint_xy[:, :2], closed=True, facecolor="deepskyblue",
                                               edgecolor="deepskyblue", alpha=0.10, linewidth=1.0))
-            for link in record.get("communication_links") or []:
+                target_estimate = _target_estimate(record, name)
+                if target_estimate is not None:
+                    try:
+                        estimate_xy = route_up_xy(np.asarray(target_estimate["position"], dtype=float), heading, origin)
+                        covariance = np.asarray(target_estimate.get("covariance", np.eye(2)), dtype=float).reshape((2, 2))
+                        covariance = 0.5 * (covariance + covariance.T)
+                        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+                        order = np.argsort(eigenvalues)[::-1]
+                        eigenvalues, eigenvectors = eigenvalues[order], eigenvectors[:, order]
+                        angle = np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+                        from matplotlib.patches import Ellipse
+                        axis.add_patch(Ellipse(
+                            estimate_xy[:2],
+                            2.0 * 2.0 * np.sqrt(max(float(eigenvalues[0]), 0.0)),
+                            2.0 * 2.0 * np.sqrt(max(float(eigenvalues[1]), 0.0)),
+                            angle=angle,
+                            facecolor=colors[name], edgecolor=colors[name], alpha=0.14,
+                            linewidth=1.0, zorder=3,
+                        ))
+                        axis.scatter([estimate_xy[0]], [estimate_xy[1]], marker="+", color=colors[name], s=60, linewidths=1.4, zorder=7)
+                    except (KeyError, TypeError, ValueError, np.linalg.LinAlgError):
+                        pass
+            target = _target_truth(record)
+            if isinstance(target, Mapping) and target.get("position") is not None:
+                try:
+                    target_point = route_up_xy(np.asarray(target["position"], dtype=float), heading, origin)
+                    truth_history = []
+                    for previous in records[:frame_index + 1]:
+                        previous_target = _target_truth(previous)
+                        if isinstance(previous_target, Mapping) and previous_target.get("position") is not None:
+                            truth_history.append(route_up_xy(np.asarray(previous_target["position"], dtype=float), heading, origin))
+                    if truth_history:
+                        target_trail = np.asarray(truth_history)
+                        axis.plot(target_trail[:, 0], target_trail[:, 1], color="red", linewidth=2.4, alpha=0.85)
+                    axis.scatter([target_point[0]], [target_point[1]], color="red", edgecolor="black", s=70, zorder=9)
+                except (KeyError, TypeError, ValueError):
+                    pass
+            tracking_links = record.get("tracking_communication_links")
+            if tracking_links is None:
+                tracking_links = record.get("communication_links") or []
+            for link in tracking_links:
                 if len(link) != 2 or link[0] not in names or link[1] not in names:
                     continue
                 first = (record.get("states") or {}).get(link[0], {}).get("position")
@@ -386,12 +483,24 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
                 if first is not None and second is not None:
                     segment = route_up_xy(np.asarray([first, second], dtype=float), heading, origin)
                     axis.plot(segment[:, 0], segment[:, 1], color="black", alpha=0.35, linestyle="--", linewidth=0.8)
+            for link in record.get("safety_communication_links") or []:
+                if len(link) != 2 or link[0] not in names or link[1] not in names:
+                    continue
+                first = (record.get("states") or {}).get(link[0], {}).get("position")
+                second = (record.get("states") or {}).get(link[1], {}).get("position")
+                if first is not None and second is not None:
+                    segment = route_up_xy(np.asarray([first, second], dtype=float), heading, origin)
+                    axis.plot(segment[:, 0], segment[:, 1], color="dimgray", alpha=0.30, linestyle=":", linewidth=0.8)
             for name in names:
                 collision = (record.get("collisions") or {}).get(name, {})
                 state = (record.get("states") or {}).get(name, {})
                 if collision.get("relevant", collision.get("has_collided", False)) and state.get("position") is not None:
                     point = route_up_xy(np.asarray(state["position"], dtype=float), heading, origin)
                     axis.scatter([point[0]], [point[1]], color="red", marker="x", s=75, linewidths=2.0, zorder=8)
+            target = _target_truth(record)
+            if isinstance(target, Mapping) and _collision_is_relevant(target.get("collision", {})) and target.get("position") is not None:
+                point = route_up_xy(np.asarray(target["position"], dtype=float), heading, origin)
+                axis.scatter([point[0]], [point[1]], color="red", marker="x", s=90, linewidths=2.2, zorder=10)
             axis.set_xlim(lower[0], upper[0])
             axis.set_ylim(lower[1], upper[1])
             axis.set_aspect("equal", adjustable="box")
@@ -403,7 +512,10 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
                 Line2D([0], [0], color="deepskyblue", lw=6, alpha=0.25, label="UAV camera FOV"),
                 Line2D([0], [0], marker="*", color="gold", markeredgecolor="black", linestyle="None", markersize=11, label="goal"),
                 Line2D([0], [0], color="gray", lw=6, alpha=0.35, label="true obstacle"),
-                Line2D([0], [0], color="black", lw=1, linestyle="--", alpha=0.5, label="communication"),
+                Line2D([0], [0], color="red", marker="o", linestyle="-", markersize=7, label="target truth"),
+                Line2D([0], [0], color="black", lw=1, linestyle="--", alpha=0.5, label="tracking communication"),
+                Line2D([0], [0], color="dimgray", lw=1, linestyle=":", alpha=0.5, label="safety communication"),
+                Line2D([0], [0], color="black", marker="+", linestyle="None", markersize=8, label="target estimate"),
                 Line2D([0], [0], color="black", lw=1, linestyle=":", alpha=0.5, label="obstacle estimate"),
                 Line2D([0], [0], color="red", marker="x", linestyle="None", markersize=7, label="collision"),
             ], loc="upper left", fontsize="x-small")

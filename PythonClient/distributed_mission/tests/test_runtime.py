@@ -76,8 +76,57 @@ def test_recording_settings_add_only_named_camera_and_preserve_perception_settin
         launcher.cleanup()
 
 
+def test_target_tracking_settings_adds_bottom_camera_without_replacing_depth_config(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    source = {
+        "SettingsVersion": 1.2,
+        "CameraDefaults": {"CaptureSettings": [{"ImageType": 2, "Width": 64, "Height": 48}]},
+        "Vehicles": {
+            "Drone1": {
+                "VehicleType": "SimpleFlight",
+                "Cameras": {
+                    "front_center": {
+                        "X": 0.4, "Y": 0.2, "Z": -0.1, "Pitch": 2.0,
+                        "CaptureSettings": [{"ImageType": 2, "Width": 800, "Height": 600, "FOV_Degrees": 75}]
+                    }
+                }
+            },
+            "Husky1": {"VehicleType": "CPHusky"},
+        },
+    }
+    settings_path.write_text(json.dumps(source), encoding="utf-8")
+    config = AirSimLaunchConfig(
+        launch_mode="headless", settings_path=str(settings_path), target_tracking=True,
+        target_uav_camera="target_bottom",
+    )
+    launcher = AirSimLauncher(config)
+    launcher._prepare_settings_override()
+    try:
+        override = json.loads(open(config._active_settings_path, encoding="utf-8").read())
+        cameras = override["Vehicles"]["Drone1"]["Cameras"]
+        assert cameras["front_center"] == source["Vehicles"]["Drone1"]["Cameras"]["front_center"]
+        assert cameras["target_bottom"]["Pitch"] == -90.0
+        assert cameras["target_bottom"]["Roll"] == 0.0
+        assert override["CameraDefaults"]["CaptureSettings"][0] == {"ImageType": 2, "Width": 64, "Height": 48}
+    finally:
+        launcher.cleanup()
+
+
 def test_record_video_existing_launch_is_rejected():
     assert parse_args(["--record-video", "--launch-mode", "existing"]).record_video is True
+
+
+def test_target_tracking_defaults_to_camera_and_target_centered_objective():
+    defaults = parse_args([])
+    assert defaults.target_observation_source == "camera"
+    assert defaults.mission_objective == "track-target"
+    assert defaults.target_name == "Target1"
+    assert defaults.tracking_rate == 4.0
+
+
+def test_existing_camera_tracking_requires_explicit_preconfigured_acknowledgement():
+    assert parse_args(["--launch-mode", "existing", "--target-observation-source", "camera"]).target_camera_preconfigured is False
+    assert parse_args(["--launch-mode", "existing", "--target-observation-source", "truth"]).target_observation_source == "truth"
 
 
 def test_top_down_camera_is_opt_in_and_default_preserves_simulator_view():

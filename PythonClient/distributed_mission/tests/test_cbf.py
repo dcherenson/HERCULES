@@ -1,6 +1,7 @@
 import numpy as np
 
 from modules.cbf import AgentState, CBFConfig, CBFRequest, DistributedCBFModule, ObstacleProxy
+from orchestrator import target_obstacle_proxy_for_agent
 
 
 def test_double_integrator_passes_nominal_when_far_from_neighbor():
@@ -87,3 +88,42 @@ def test_uav_altitude_floor_is_configurable():
     ))
     assert result.success
     assert result.minimum_barrier >= 0.0
+
+
+def test_moving_obstacle_velocity_enters_existing_relative_motion_barrier():
+    config = CBFConfig(method="mestres", uncertainty_radius=0.0, ugv_radius=1.25)
+    controller = DistributedCBFModule("Husky1", "ugv", config)
+    ego = AgentState("Husky1", np.zeros(3), yaw=0.0, vehicle_type="ugv")
+    static = controller.filter(CBFRequest(
+        ego, np.array([1.0, 0.0]),
+        obstacles=[ObstacleProxy("target", np.array([3.0, 0.0, 0.0]), 0.5)],
+    ))
+    closing = controller.filter(CBFRequest(
+        ego, np.array([1.0, 0.0]),
+        obstacles=[ObstacleProxy("target", np.array([3.0, 0.0, 0.0]), 0.5, velocity=np.array([-2.0, 0.0, 0.0]))],
+    ))
+    assert static.success
+    assert not closing.success
+    assert closing.fallback
+
+
+def test_target_proxy_is_only_added_to_ugv_cbf_requests():
+    estimate = {
+        "active": True,
+        "position": [3.0, -2.0],
+        "velocity": [0.5, 1.0],
+        "covariance": [[0.25, 0.0], [0.0, 0.25]],
+        "timestamp": 7.5,
+    }
+    assert target_obstacle_proxy_for_agent(
+        "drone", "Target1", estimate, -2.0, 1.25, 8.0
+    ) is None
+
+    proxy = target_obstacle_proxy_for_agent(
+        "ugv", "Target1", estimate, -2.0, 1.25, 8.0
+    )
+    assert proxy is not None
+    assert proxy.obstacle_id == "target_Target1"
+    assert np.allclose(proxy.center, [3.0, -2.0, -2.0])
+    assert np.allclose(proxy.velocity, [0.5, 1.0, 0.0])
+    assert proxy.source == "target_tracking"

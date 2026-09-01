@@ -555,6 +555,20 @@ def make_chase_overlay(records: Sequence[Mapping[str, Any]], vehicle_types: Mapp
             if -32 <= projected[0] <= width + 32 and -32 <= projected[1] <= height + 32:
                 color = (30, 255, 90) if vehicle_types.get(name) == "drone" else (40, 150, 255)
                 _draw_chase_marker(image, projected, color)
+        # Targets are intentionally not part of vehicle_types or formation
+        # state, but their truth actor pose is logged separately and gets a
+        # distinct red screen-space marker on the chase stream.
+        target_entries = record.get("targets")
+        if not isinstance(target_entries, Mapping):
+            target = record.get("target_truth") or record.get("target")
+            target_entries = {str(target.get("name", "Target1")): target} if isinstance(target, Mapping) else {}
+        for target in target_entries.values():
+            if not isinstance(target, Mapping):
+                continue
+            point = target.get("actor_position") or target.get("position")
+            projected = project_world_point(point, camera_position, orientation, 90.0, width, height) if point is not None else None
+            if projected is not None and -32 <= projected[0] <= width + 32 and -32 <= projected[1] <= height + 32:
+                _draw_chase_marker(image, projected, (255, 45, 45))
 
     return overlay
 

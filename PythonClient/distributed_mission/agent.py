@@ -18,7 +18,8 @@ from modules.target_tracking import TargetTrackingModule
 from modules.cbf import CBFConfig, DistributedCBFModule, ObstacleProxy
 
 class Agent:
-    def __init__(self, agent_id: str, vehicle_type: str = "drone", cbf_config: Optional[CBFConfig] = None):
+    def __init__(self, agent_id: str, vehicle_type: str = "drone", cbf_config: Optional[CBFConfig] = None,
+                 tracking_config: Optional[Dict[str, Any]] = None):
         """
         Initialize a decentralized agent.
 
@@ -32,7 +33,7 @@ class Agent:
         # Initialize internal algorithmic submodules
         self.cp_module = ConformalPredictionModule(agent_id)
         self.loc_module = CooperativeLocalizationModule(agent_id)
-        self.tracking_module = TargetTrackingModule(agent_id)
+        self.tracking_module = TargetTrackingModule(agent_id, **(tracking_config or {}))
         self.cbf_module = DistributedCBFModule(agent_id, vehicle_type, cbf_config)
 
         # Internal agent state storage
@@ -71,12 +72,17 @@ class Agent:
         )
 
         # 3. Update Distributed Target Tracking and produce nominal velocity
-        self.target_estimate, out_track_msg, self.nominal_velocity = self.tracking_module.update_and_track(
-            sensor_data=sensor_data,
-            inbound_msgs=inbound_msgs.get("tracking", {}),
-            robustness_margin=self.current_margin,
-            local_state_estimate=self.local_state_estimate
-        )
+        if sensor_data.get("skip_target_tracking", False):
+            self.target_estimate = {}
+            self.nominal_velocity = np.zeros(3)
+            out_track_msg = {"agent_id": self.agent_id, "targets": {}}
+        else:
+            self.target_estimate, out_track_msg, self.nominal_velocity = self.tracking_module.update_and_track(
+                sensor_data=sensor_data,
+                inbound_msgs=inbound_msgs.get("tracking", {}),
+                robustness_margin=self.current_margin,
+                local_state_estimate=self.local_state_estimate
+            )
 
         outbound_msgs = {
             "localization": out_loc_msg,
@@ -93,6 +99,12 @@ class Agent:
         out_loc_msg["yaw_rate"] = self.local_state_estimate["yaw_rate"]
 
         return outbound_msgs
+
+    def set_target_estimates(self, estimates: Dict[str, Dict[str, Any]]) -> None:
+        """Install the result of the synchronous distributed tracking phase."""
+
+        self.target_estimate = dict(estimates)
+        self.nominal_velocity = np.zeros(3)
 
     def set_nominal_control(self, nominal_control: np.ndarray) -> None:
         self.nominal_control = np.asarray(nominal_control, dtype=float).reshape(-1)

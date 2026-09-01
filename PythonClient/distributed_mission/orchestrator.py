@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -30,6 +30,13 @@ from modules.obstacle_detection import (
 )
 from modules.obstacle_course import course_from_tuples, load_course
 from modules.perception_diagnostics import PerceptionTraceStore
+from modules.target_motion import FigureEightTargetController, target_center_before_goal
+from modules.target_observation import TargetObservationWorker, truth_target_measurement
+from modules.target_tracking import (
+    DistributedTargetTracking,
+    TargetMeasurement,
+    TARGET_CBF_SIGMA_MULTIPLIER,
+)
 from modules.video_recording import (
     AirSimFrameRecorder,
     FollowCameraController,
@@ -77,6 +84,54 @@ def build_adjacency_matrix(positions: Dict[str, np.ndarray], comm_range: float) 
                 adjacency[first].append(second)
                 adjacency[second].append(first)
     return adjacency
+
+
+def target_obstacle_proxy_for_agent(
+    vehicle_type: str,
+    target_name: str,
+    target_estimate: Mapping[str, Any],
+    target_z: float,
+    target_radius: float,
+    now: float,
+) -> Optional[ObstacleProxy]:
+    """Build the moving-target CBF proxy for ground vehicles only.
+
+    Target estimates remain available to every agent for formation control.
+    The target is a CBF obstacle only for UGVs; UAVs are airborne and should
+    not spend barrier authority avoiding the target's planar footprint.
+    """
+    if vehicle_type != "ugv" or not target_estimate.get("active", False):
+        return None
+
+    target_covariance = np.asarray(
+        target_estimate.get("covariance", np.eye(2)), dtype=float
+    ).reshape((2, 2))
+    target_covariance = 0.5 * (target_covariance + target_covariance.T)
+    try:
+        target_sigma = float(np.sqrt(max(0.0, np.max(np.linalg.eigvalsh(target_covariance)))))
+    except np.linalg.LinAlgError:
+        target_sigma = 0.0
+
+    target_center = np.array([
+        float(target_estimate["position"][0]),
+        float(target_estimate["position"][1]),
+        float(target_z),
+    ])
+    target_velocity = np.array([
+        float(target_estimate.get("velocity", [0.0, 0.0])[0]),
+        float(target_estimate.get("velocity", [0.0, 0.0])[1]),
+        0.0,
+    ])
+    return ObstacleProxy(
+        "target_" + target_name,
+        target_center,
+        target_radius + TARGET_CBF_SIGMA_MULTIPLIER * target_sigma,
+        "target_tracking",
+        float(target_estimate.get("timestamp", now)),
+        0,
+        True,
+        target_velocity,
+    )
 
 
 def _quaternion_matrix(quaternion: Any) -> np.ndarray:
@@ -776,6 +831,25 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--resx", type=int, default=800)
     parser.add_argument("--resy", type=int, default=600)
     parser.add_argument("--no-spawn-obstacles", action="store_true")
+    parser.add_argument("--target-name", default="Target1")
+    parser.add_argument("--target-observation-source", choices=("camera", "truth"), default="camera")
+    parser.add_argument(
+        "--target-camera-preconfigured", action="store_true",
+        help="allow camera target tracking with --launch-mode existing when target_bottom/front_center are already configured",
+    )
+    parser.add_argument("--mission-objective", choices=("track-target", "fixed-goal"), default="track-target")
+    parser.add_argument("--tracking-rate", type=float, default=4.0)
+    parser.add_argument("--tracking-window", type=float, default=5.0)
+    parser.add_argument("--tracking-admm-rho", type=float, default=1.0)
+    parser.add_argument("--tracking-admm-max-iterations", type=int, default=20)
+    parser.add_argument("--tracking-admm-tolerance", type=float, default=1e-3)
+    parser.add_argument("--tracking-process-noise", type=float, default=1.0)
+    parser.add_argument("--tracking-measurement-std", type=float, default=0.5)
+    parser.add_argument("--target-sensing-range", type=float, default=100.0)
+    parser.add_argument("--target-speed", type=float, default=1.5)
+    parser.add_argument("--target-pattern-length", type=float, default=10.0)
+    parser.add_argument("--target-pattern-width", type=float, default=8.0)
+    parser.add_argument("--target-ugv-circumradius", type=float, default=6.0)
     parser.add_argument(
         "--obstacle-course",
         default=None,
@@ -797,9 +871,26 @@ def main(argv: List[str] = None) -> int:
     if args.record_video and args.launch_mode == "existing":
         print("Error: --record-video requires --launch-mode visible or headless so recording cameras can be configured before launch.", file=sys.stderr)
         return 2
+    if (
+        args.target_observation_source == "camera"
+        and args.launch_mode == "existing"
+        and not args.target_camera_preconfigured
+    ):
+        print(
+            "Error: camera target tracking requires --launch-mode visible/headless, "
+            "or --target-camera-preconfigured for an existing launch.",
+            file=sys.stderr,
+        )
+        return 2
     names = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5", "Husky1", "Husky2", "Husky3"]
-    types = {name: "drone" for name in names[:5]}
-    types.update({name: "ugv" for name in names[5:]})
+    uav_names = names[:5]
+    ugv_names = names[5:]
+    types = {name: "drone" for name in uav_names}
+    types.update({name: "ugv" for name in ugv_names})
+    target_name = str(args.target_name)
+    if not target_name or target_name in names:
+        print("Error: --target-name must be nonempty and distinct from controlled agents", file=sys.stderr)
+        return 2
     if args.record_video:
         if args.record_uav not in names or types[args.record_uav] != "drone":
             print("Error: --record-uav must name a configured UAV", file=sys.stderr)
@@ -817,6 +908,16 @@ def main(argv: List[str] = None) -> int:
         or args.leader_nominal_speed <= 0.0
     ):
         print("Error: nominal gains, yaw rate, speed, and formation scale must be positive", file=sys.stderr)
+        return 2
+    if (
+        args.tracking_rate <= 0.0 or args.tracking_window <= 0.0
+        or args.tracking_admm_rho <= 0.0 or args.tracking_admm_max_iterations <= 0
+        or args.tracking_admm_tolerance <= 0.0 or args.tracking_process_noise < 0.0
+        or args.tracking_measurement_std <= 0.0 or args.target_sensing_range <= 0.0
+        or args.target_speed <= 0.0 or args.target_pattern_length <= 0.0
+        or args.target_pattern_width <= 0.0 or args.target_ugv_circumradius <= 0.0
+    ):
+        print("Error: target tracking and target motion parameters must be positive", file=sys.stderr)
         return 2
     top_down_camera = args.top_down_camera and not args.no_top_down_camera
     try:
@@ -870,14 +971,20 @@ def main(argv: List[str] = None) -> int:
         video_resolution=tuple(args.video_resolution),
         video_fps=args.video_fps,
         recording_folder=recording_folder if args.record_video else None,
+        target_tracking=args.target_observation_source == "camera",
+        target_uav_camera="target_bottom",
     )
     launcher = AirSimLauncher(launch_config)
     facade = AirSimFacade(launch_config)
     blocks: List[str] = []
     true_obstacles: List[Dict[str, Any]] = []
-    # The direct goal route remains the default. Course waypoints are retained
-    # for explicit future route experiments; they are not inserted as an
-    # online recovery heuristic here.
+    target_controller: Optional[FigureEightTargetController] = None
+    target_observation_worker: Optional[TargetObservationWorker] = None
+    target_capture_ids: Dict[str, Optional[str]] = {name: None for name in names}
+    target_rng = np.random.default_rng(7)
+    # Course waypoints are retained for explicit fixed-goal route experiments;
+    # target tracking uses the deterministic target-centered objective and no
+    # online recovery waypoint generation.
     intermediate_waypoint = None
     formation = FormationController(FormationConfig(
         uav_altitude=args.uav_altitude,
@@ -920,9 +1027,26 @@ def main(argv: List[str] = None) -> int:
         cbf_config, method="mestres", lookahead_distance=args.ugv_lookahead_distance
     )
     agents = {
-        name: Agent(name, types[name], ugv_cbf_config if types[name] == "ugv" else cbf_config)
+        name: Agent(
+            name,
+            types[name],
+            ugv_cbf_config if types[name] == "ugv" else cbf_config,
+            tracking_config={
+                "window_seconds": args.tracking_window,
+                "process_noise_spectral_density": args.tracking_process_noise,
+                "measurement_std": args.tracking_measurement_std,
+                "rho": args.tracking_admm_rho,
+                "max_iterations": args.tracking_admm_max_iterations,
+                "tolerance": args.tracking_admm_tolerance,
+            },
+        )
         for name in names
     }
+    tracking = DistributedTargetTracking(
+        {name: agents[name].tracking_module for name in names},
+        max_iterations=args.tracking_admm_max_iterations,
+        tolerance=args.tracking_admm_tolerance,
+    )
     # Depth cameras observe partial obstacle surfaces, so their spherical
     # proxy needs a little more geometric padding to cover the unseen edge of
     # the surface. LiDAR already observes the planar footprint directly and
@@ -1021,6 +1145,23 @@ def main(argv: List[str] = None) -> int:
         # while avoiding a hard-coded RuralAustralia heading.
         initial_yaw = heading_to_goal(np.zeros(3), goal, fallback=initial_yaw)
 
+        target_ground_z = -1.0 + ground_z_offset
+        target_center = target_center_before_goal(np.zeros(3), goal, 0.7)
+        target_center[2] = target_ground_z
+        target_controller = FigureEightTargetController(
+            center=target_center,
+            route_heading=initial_yaw,
+            longitudinal_span=args.target_pattern_length,
+            lateral_span=args.target_pattern_width,
+            speed=args.target_speed,
+        )
+        target_start_position = target_controller.points[target_controller.index]
+        target_start_yaw = heading_to_goal(
+            target_start_position,
+            target_controller.reference(1),
+            fallback=initial_yaw,
+        )
+
         # Reorient only the external map camera. Vehicle-mounted camera poses
         # remain untouched because they are used by obstacle perception.
         current_camera_pose = facade.external_camera_pose()
@@ -1075,6 +1216,7 @@ def main(argv: List[str] = None) -> int:
         }
         newly_spawned = set()
         vehicle_origins = {}
+        target_newly_spawned = False
         for name in names:
             if types[name] == "ugv":
                 # Clear residual CarControls state when an Unreal world is
@@ -1085,6 +1227,11 @@ def main(argv: List[str] = None) -> int:
             initial_pose = _pose(facade.airsim, initial_positions[name], initial_yaw)
             if facade.spawn_vehicle(name, types[name], initial_pose):
                 newly_spawned.add(name)
+        target_newly_spawned = facade.spawn_vehicle(
+            target_name,
+            "ugv",
+            _pose(facade.airsim, target_start_position, target_start_yaw),
+        )
         # simAddVehicle already applies the requested pose. Applying it again
         # would add the formation offset a second time in Unreal. Only
         # settings-defined vehicles, which were not spawned above, need an
@@ -1101,13 +1248,24 @@ def main(argv: List[str] = None) -> int:
                 )
         for name in names:
             facade.enable(name, types[name], True)
+        facade.enable(target_name, "ugv", True)
         for name in names:
             if types[name] == "ugv":
                 facade.stop_ugv(name)
+        facade.stop_ugv(target_name)
         if args.map_name == "flyingcpp" and not args.no_spawn_obstacles:
             # Create the course before starting vehicle motion so obstacle
             # creation is not perceived as a delayed post-takeoff stage.
             blocks, true_obstacles = _spawn_block_course(facade, facade.airsim, course["obstacles"])
+
+        # Runtime-spawned targets are reusable between runs, but always get
+        # the same deterministic starting pose while the world is paused.
+        if not target_newly_spawned:
+            facade.set_vehicle_pose(
+                target_name,
+                _pose(facade.airsim, target_start_position, target_start_yaw),
+            )
+        facade.stop_ugv(target_name)
 
         _plot_route_markers(facade, route_markers)
 
@@ -1116,12 +1274,12 @@ def main(argv: List[str] = None) -> int:
         # their startup handbrakes and will be posed again below.
         facade.pause(False)
 
-        takeoff_futures = [facade.multirotor.takeoffAsync(vehicle_name=name) for name in names[:5]]
+        takeoff_futures = [facade.multirotor.takeoffAsync(vehicle_name=name) for name in uav_names]
         for future in takeoff_futures:
             future.join()
 
         altitude_futures = []
-        for name in names[:5]:
+        for name in uav_names:
             # moveToZAsync is less sensitive to the vehicle's collision-model
             # origin than a full-pose command and avoids starting the CBF loop
             # while a drone is still below the ground plane.
@@ -1136,11 +1294,11 @@ def main(argv: List[str] = None) -> int:
             facade.multirotor.moveByVelocityZAsync(
                 0.0, 0.0, args.uav_altitude, 1.0, vehicle_name=name
             )
-            for name in names[:5]
+            for name in uav_names
         ]
         for future in hold_futures:
             future.join()
-        for name in names[:5]:
+        for name in uav_names:
             facade.multirotor.hoverAsync(vehicle_name=name).join()
 
         # Apply the UGV poses only after UAV takeoff.  Letting a settings-
@@ -1151,7 +1309,7 @@ def main(argv: List[str] = None) -> int:
         # mission clock starts.
         facade.pause(True)
         setup_paused = True
-        for name in names[5:]:
+        for name in ugv_names:
             facade.set_vehicle_pose(
                 name,
                 _pose(facade.airsim, startup_pose_position(name, initial_positions, newly_spawned, vehicle_origins), initial_yaw),
@@ -1173,7 +1331,7 @@ def main(argv: List[str] = None) -> int:
             )
             altitude_error = max(
                 abs(float(settled_states[name]["position"][2]) - float(args.uav_altitude))
-                for name in names[:5]
+                for name in uav_names
             )
             startup_error = max(xy_error, altitude_error)
             if xy_error <= 1.0 and altitude_error <= 1.0:
@@ -1194,7 +1352,7 @@ def main(argv: List[str] = None) -> int:
             if altitude_error > 1.0:
                 altitude_futures = [
                     facade.multirotor.moveToZAsync(args.uav_altitude, 3.0, vehicle_name=name)
-                    for name in names[:5]
+                    for name in uav_names
                 ]
                 for future in altitude_futures:
                     future.join()
@@ -1202,11 +1360,31 @@ def main(argv: List[str] = None) -> int:
                     facade.multirotor.moveByVelocityZAsync(
                         0.0, 0.0, args.uav_altitude, 1.0, vehicle_name=name
                     )
-                    for name in names[:5]
+                    for name in uav_names
                 ]
                 for future in hold_futures:
                     future.join()
             time.sleep(0.25)
+
+        if args.target_observation_source == "camera":
+            target_observation_worker = TargetObservationWorker(
+                facade.airsim,
+                args.multirotor_port,
+                {name: "target_bottom" for name in uav_names} | {name: "front_center" for name in ugv_names},
+                target_id=target_name,
+                target_actor_pattern=target_name + "*",
+                sensing_range=args.target_sensing_range,
+                measurement_std=args.tracking_measurement_std,
+                target_radius=cbf_config.ugv_radius,
+                rate_hz=args.tracking_rate,
+            )
+            target_observation_worker.start()
+            print(
+                "Target tracking camera capture started at {:.2f} Hz per agent (UAV target_bottom, UGV front_center)".format(
+                    args.tracking_rate
+                ),
+                flush=True,
+            )
 
         if args.timing_mode == "stepped":
             facade.pause(True)
@@ -1217,6 +1395,10 @@ def main(argv: List[str] = None) -> int:
         sensor_period = 1.0 / max(args.sensor_rate, 1e-3)
         latest_sensor_views: Dict[str, Dict[str, Any]] = {name: {} for name in names}
         last_perception: Dict[str, float] = {}
+        tracking_period = 1.0 / max(args.tracking_rate, 1e-3)
+        next_tracking_time = 0.0
+        last_tracking_result: Dict[str, Any] = {"estimates": {}, "iterations": 0, "residual": 0.0, "handoffs": []}
+        tracking_measurement_records: Dict[str, Dict[str, Any]] = {name: {} for name in names}
         truth_control_obstacles = {
             name: truth_obstacle_proxies(
                 true_obstacles,
@@ -1289,7 +1471,9 @@ def main(argv: List[str] = None) -> int:
                 position_map: Dict[str, np.ndarray],
             ) -> Dict[str, Any]:
                 nonlocal recording_camera_base
-                chase_camera = follow_camera.update([position_map[name] for name in names], args.dt)
+                # Include the moving target in the tracked volume, while
+                # keeping it out of the ordinary formation/controller set.
+                chase_camera = follow_camera.update(list(position_map.values()), args.dt)
                 world_position = np.asarray(chase_camera["world_position"], dtype=float)
                 world_orientation = chase_camera["orientation_quaternion"]
                 measured = {}
@@ -1345,7 +1529,9 @@ def main(argv: List[str] = None) -> int:
                 # its first frame is already a chase frame.  The dedicated
                 # worker uses AirSim SceneCapture requests because this fork's
                 # native recorder can report active without writing PNGs.
-                update_recording_camera(initial_positions)
+                initial_recording_positions = dict(initial_positions)
+                initial_recording_positions[target_name] = target_start_position
+                update_recording_camera(initial_recording_positions)
                 frame_recorder = AirSimFrameRecorder(
                     facade.airsim,
                     args.multirotor_port,
@@ -1376,6 +1562,16 @@ def main(argv: List[str] = None) -> int:
                 phase_ms = {}
                 now = time.time()
                 raw_states = {name: facade.state(name) for name in names}
+                raw_target_state = facade.state(target_name)
+                target_state = AgentState(
+                    target_name,
+                    raw_target_state["position"],
+                    raw_target_state["velocity"],
+                    raw_target_state.get("yaw", target_start_yaw),
+                    vehicle_type="target",
+                    timestamp=now,
+                    yaw_rate=raw_target_state.get("yaw_rate", 0.0),
+                )
                 phase_ms["state"] = (time.monotonic() - phase_start) * 1000.0
                 states = {
                     name: AgentState(name, value["position"], value["velocity"], value["yaw"], vehicle_type=types[name], timestamp=now, yaw_rate=value.get("yaw_rate", 0.0))
@@ -1383,15 +1579,21 @@ def main(argv: List[str] = None) -> int:
                 }
                 positions = {name: value.position for name, value in states.items()}
                 adjacency = build_adjacency_matrix(positions, args.communication_range)
-                communication_links = sorted(
+                tracking_communication_links = sorted(
+                    [sorted((name, neighbor)) for name in names for neighbor in adjacency[name]
+                     if name < neighbor]
+                )
+                safety_communication_links = sorted(
                     [sorted((name, neighbor)) for name in names for neighbor in adjacency[name]
                      if types[neighbor] == types[name] and name < neighbor]
                 )
                 recording_data = {}
                 if args.record_video and follow_camera is not None and recording_started:
-                    recording_data = update_recording_camera(positions)
+                    recording_positions = dict(positions)
+                    recording_positions[target_name] = target_state.position
+                    recording_data = update_recording_camera(recording_positions)
                 sensor_data = {
-                    name: dict(raw_states[name], obstacle_points=None)
+                    name: dict(raw_states[name], obstacle_points=None, skip_target_tracking=True)
                     for name in names
                 }
 
@@ -1400,8 +1602,56 @@ def main(argv: List[str] = None) -> int:
                     outbound[name] = agent.compute_step(sensor_data[name], {"localization": {}, "tracking": {}})
                 phase_ms["estimate"] = (time.monotonic() - phase_start) * 1000.0 - phase_ms["state"]
 
-                # Formation control consumes the estimator interface. The
-                # estimator is truth-backed in v1 and can later be replaced.
+                target_command = target_controller.update(target_state.position, target_state.yaw, args.dt)
+                # Consume each asynchronous camera capture at most once. A
+                # missing camera observation remains a missing measurement for
+                # this DRWT epoch; cached control cycles never masquerade as
+                # fresh sensor data.
+                if args.target_observation_source == "camera" and target_observation_worker is not None:
+                    latest_target_observations = target_observation_worker.snapshot()
+                else:
+                    latest_target_observations = {}
+                if step * args.dt + 1e-9 >= next_tracking_time:
+                    epoch_measurements: Dict[str, Dict[str, Optional[TargetMeasurement]]] = {}
+                    for name in names:
+                        measurement = None
+                        if args.target_observation_source == "truth":
+                            measurement = truth_target_measurement(
+                                target_name,
+                                target_state.position,
+                                states[name].position,
+                                now,
+                                args.tracking_measurement_std,
+                                args.target_sensing_range,
+                                target_rng,
+                                "target_truth_{:06d}_{}".format(step, name),
+                            )
+                        else:
+                            candidate = latest_target_observations.get(name)
+                            capture_id = candidate.capture_id if candidate is not None else None
+                            if capture_id is not None and capture_id != target_capture_ids.get(name):
+                                target_capture_ids[name] = capture_id
+                                measurement = candidate if candidate.valid else None
+                        epoch_measurements[name] = {target_name: measurement} if measurement is not None else {}
+                        if measurement is not None:
+                            tracking_measurement_records[name] = dict(
+                                measurement.to_dict(),
+                                age=max(0.0, float(now) - float(measurement.timestamp)),
+                            )
+                        elif args.target_observation_source == "camera":
+                            candidate = latest_target_observations.get(name)
+                            tracking_measurement_records[name] = dict(candidate.to_dict(), age=max(0.0, float(now) - float(candidate.timestamp))) if candidate is not None else {
+                                "target_id": target_name, "valid": False, "source": "camera", "capture_id": None,
+                            }
+                    last_tracking_result = tracking.update(now, epoch_measurements, adjacency)
+                    tracking.perform_handoffs(now, adjacency)
+                    next_tracking_time += tracking_period
+                predicted_targets = tracking.predicted_estimates(now)
+                for name, agent in agents.items():
+                    agent.set_target_estimates(predicted_targets.get(name, {}))
+
+                # Formation control consumes the estimator interface. Its
+                # source is selected explicitly by --target-observation-source.
                 estimated_states = {
                     name: AgentState(
                         name,
@@ -1435,7 +1685,25 @@ def main(argv: List[str] = None) -> int:
                     )
 
                 for name, agent in agents.items():
-                    if types[name] == "ugv":
+                    if args.mission_objective == "track-target":
+                        target_estimate = agent.target_estimate.get(target_name, {})
+                        if types[name] == "ugv":
+                            nominal = formation.target_nominal_unicycle_control(
+                                estimated_states[name],
+                                target_estimate,
+                                initial_yaw,
+                                target_z=target_state.position[2],
+                                ugv_circumradius=args.target_ugv_circumradius,
+                            )
+                        else:
+                            nominal = formation.target_nominal_control(
+                                estimated_states[name],
+                                target_estimate,
+                                initial_yaw,
+                                target_z=target_state.position[2],
+                                ugv_circumradius=args.target_ugv_circumradius,
+                            )
+                    elif types[name] == "ugv":
                         nominal = formation.nominal_unicycle_control(estimated_states[name], estimated_states, goal)
                     else:
                         nominal = formation.nominal_control(estimated_states[name], estimated_states, goal)
@@ -1490,13 +1758,24 @@ def main(argv: List[str] = None) -> int:
                         item.obstacle_id, item.center, item.radius + age_margin, item.source,
                         item.timestamp, item.point_count, item.is_planar
                     ) for item in latest_obstacles[name]]
+                    target_estimate = agents[name].target_estimate.get(target_name, {})
+                    target_proxy = target_obstacle_proxy_for_agent(
+                        types[name],
+                        target_name,
+                        target_estimate,
+                        target_state.position[2],
+                        cbf_config.ugv_radius,
+                        now,
+                    )
+                    if target_proxy is not None:
+                        obstacles.append(target_proxy)
                     obstacle_records[name] = {
                         "sensor_valid": sensor_valid,
                         "age": age,
                         "age_margin": age_margin,
                         "count": len(obstacles),
                         "sensor_view": dict(latest_sensor_views[name], age=age, valid=sensor_valid),
-                        "proxies": [{"id": item.obstacle_id, "center": item.center.tolist(), "radius": item.radius, "source": item.source, "points": item.point_count} for item in obstacles],
+                        "proxies": [{"id": item.obstacle_id, "center": item.center.tolist(), "radius": item.radius, "source": item.source, "points": item.point_count, "velocity": item.velocity.tolist() if item.velocity is not None else None} for item in obstacles],
                     }
                     safe_commands[name] = agent.control_step(neighbor_messages, obstacles, sensor_valid)
                 phase_ms["cbf"] = (time.monotonic() - phase_start) * 1000.0 - sum(phase_ms.values())
@@ -1568,13 +1847,32 @@ def main(argv: List[str] = None) -> int:
                             brake=brake if needs_braking else 0.0,
                             throttle=throttle,
                         )
+                # Target1 is deliberately outside the distributed CBF and
+                # formation controllers.  It follows its fixed startup
+                # figure-eight route with the deterministic UGV command.
+                target_speed = float(target_command[0])
+                target_yaw_rate = float(target_command[1])
+                target_steering = np.clip(
+                    UGV_STEERING_SCALE * target_yaw_rate / max(cbf_config.ugv_yaw_rate_limit, 1e-6),
+                    -1.0,
+                    1.0,
+                )
+                facade.command_ugv(
+                    target_name,
+                    target_speed,
+                    target_steering,
+                    args.dt,
+                    brake=1.0 if target_speed < 0.05 else 0.0,
+                )
                 phase_ms["actuation"] = (time.monotonic() - phase_start) * 1000.0 - sum(phase_ms.values())
 
                 collision_records = {}
-                for name in names:
+                collision_names = names + [target_name]
+                collision_types = dict(types, **{target_name: "target"})
+                for name in collision_names:
                     collision = facade.collision_info(name)
                     ignored_ground = (
-                        types[name] == "ugv"
+                        collision_types[name] in ("ugv", "target")
                         and collision["has_collided"]
                         and _is_ground_object(collision.get("object_name", ""))
                     )
@@ -1638,10 +1936,68 @@ def main(argv: List[str] = None) -> int:
                         for name in names
                     },
                     "commands": {name: np.asarray(command).tolist() for name, command in safe_commands.items()},
+                    "target": {
+                        "name": target_name,
+                        "position": target_state.position.tolist(),
+                        "velocity": target_state.velocity.tolist(),
+                        "yaw": float(target_state.yaw),
+                        "command": np.asarray(target_command).tolist(),
+                        "phase": float(target_controller.phase),
+                        "pattern": target_controller.diagnostics(),
+                        "collision": collision_records.get(target_name, {}),
+                    },
+                    "target_truth": {
+                        "name": target_name,
+                        "position": target_state.position.tolist(),
+                        "velocity": target_state.velocity.tolist(),
+                        "yaw": float(target_state.yaw),
+                        "phase": float(target_controller.phase),
+                        "command": np.asarray(target_command).tolist(),
+                        "pattern": target_controller.diagnostics(),
+                        "collision": collision_records.get(target_name, {}),
+                    },
+                    "targets": {
+                        target_name: {
+                            "position": target_state.position.tolist(),
+                            "velocity": target_state.velocity.tolist(),
+                            "yaw": float(target_state.yaw),
+                            "phase": float(target_controller.phase),
+                            "command": np.asarray(target_command).tolist(),
+                            "pattern": target_controller.diagnostics(),
+                            "collision": collision_records.get(target_name, {}),
+                        }
+                    },
+                    "target_tracking": {
+                        "observation_source": args.target_observation_source,
+                        "target_id": target_name,
+                        "agents": {
+                            name: {
+                                "measurement": tracking_measurement_records.get(name, {}),
+                                "estimate": predicted_targets.get(name, {}).get(target_name, {}),
+                                "active": bool(predicted_targets.get(name, {}).get(target_name, {}).get("active", False)),
+                            }
+                            for name in names
+                        },
+                        "iterations": int(last_tracking_result.get("iterations", 0)),
+                        "consensus_residual": float(last_tracking_result.get("residual", 0.0)),
+                        "handoffs": [
+                            {
+                                key: value
+                                for key, value in handoff.items()
+                                if key not in ("information_matrix", "information_vector")
+                            }
+                            for handoff in (last_tracking_result.get("handoffs") or [])
+                        ],
+                    },
                     "obstacles": obstacle_records,
                     "true_obstacles": true_obstacles,
                     "collisions": collision_records,
-                    "communication_links": communication_links,
+                    # The legacy field is retained as the all-type graph;
+                    # consumers that need safety-only edges use the explicit
+                    # safety field below.
+                    "communication_links": tracking_communication_links,
+                    "tracking_communication_links": tracking_communication_links,
+                    "safety_communication_links": safety_communication_links,
                     "recording": recording_data,
                     "cbf": {name: agents[name].last_cbf_result.__dict__ if agents[name].last_cbf_result else {} for name in names},
                     "timing": {"cycle_ms": cycle_ms, "deadline_miss": deadline_miss, "timing_mode": args.timing_mode, "phase_ms": phase_ms},
@@ -1671,7 +2027,12 @@ def main(argv: List[str] = None) -> int:
                     )
                 except Exception as error:
                     print("Warning: unable to stop AirSim frame capture: {}".format(error), flush=True)
-            facade.close([(name, types[name]) for name in names])
+            if target_observation_worker is not None:
+                try:
+                    target_observation_worker.stop()
+                except Exception as error:
+                    print("Warning: unable to stop target observation worker: {}".format(error), flush=True)
+            facade.close([(name, types[name]) for name in names] + [(target_name, "ugv")])
             for block in blocks:
                 try:
                     facade.delete_object(block)

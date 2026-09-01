@@ -10,6 +10,7 @@ from modules.video_recording import (
     analyze_camera_alignment,
     find_recorded_frames,
     load_capture_metadata,
+    make_chase_overlay,
     project_world_point,
     render_recordings,
     world_camera_pose_to_vehicle,
@@ -113,3 +114,27 @@ def test_camera_alignment_report_flags_large_pose_error(tmp_path):
     assert paths[0].endswith("run_camera_alignment.json")
     assert report["pass"] is False
     assert report["max_position_error_m"] == 4.0
+
+
+def test_chase_overlay_draws_red_target_marker_separately_from_robot_markers():
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    records = [{
+        "timestamp": 0.0,
+        "states": {
+            "Drone1": {"position": [2.0, 0.0, 0.0]},
+            "Husky1": {"position": [2.0, 1.0, 0.0]},
+        },
+        "targets": {"Target1": {"name": "Target1", "position": [2.0, -1.0, 0.0]}},
+        "recording": {"chase_camera": {
+            "world_position": [0.0, 0.0, 0.0],
+            "orientation_quaternion": [1.0, 0.0, 0.0, 0.0],
+        }},
+    }]
+    image = Image.new("RGB", (100, 100), (0, 0, 0))
+    make_chase_overlay(records, {"Drone1": "drone", "Husky1": "ugv"}, 100, 100)(image, 0.0)
+    pixels = list(image.getdata())
+    assert (255, 45, 45) in pixels
+    assert (30, 255, 90) in pixels
+    assert (40, 150, 255) in pixels
