@@ -6,13 +6,19 @@ import numpy as np
 import pytest
 
 from modules.video_recording import (
+    CHASE_GROUND_VEHICLE_MARKER_HEIGHT_M,
     FollowCameraController,
+    RecordedFrame,
     analyze_camera_alignment,
+    camera_position_to_world,
     find_recorded_frames,
     load_capture_metadata,
     make_chase_overlay,
     project_world_point,
+    retime_recorded_frames,
     render_recordings,
+    observed_frame_rate,
+    _presentation_marker_position,
     world_camera_pose_to_vehicle,
 )
 
@@ -96,6 +102,23 @@ def test_capture_metadata_round_trips_camera_pose(tmp_path):
     assert result == [metadata]
 
 
+def test_recorded_frames_are_retimed_from_wall_clock_to_mission_time():
+    frames = [
+        RecordedFrame(100.0, "first.png"),
+        RecordedFrame(103.0, "second.png"),
+        RecordedFrame(106.0, "third.png"),
+    ]
+    records = [
+        {"timestamp": 0.0, "wall_timestamp": 100.0},
+        {"timestamp": 1.0, "wall_timestamp": 103.0},
+        {"timestamp": 2.0, "wall_timestamp": 106.0},
+    ]
+    retimed = retime_recorded_frames(frames, records)
+    assert [frame.timestamp for frame in retimed] == [0.0, 1.0, 2.0]
+    assert [frame.source_timestamp for frame in retimed] == [100.0, 103.0, 106.0]
+    assert observed_frame_rate(frames) == pytest.approx(1.0 / 3.0)
+
+
 def test_camera_alignment_report_flags_large_pose_error(tmp_path):
     staging = tmp_path / "frames"
     staging.mkdir()
@@ -114,6 +137,51 @@ def test_camera_alignment_report_flags_large_pose_error(tmp_path):
     assert paths[0].endswith("run_camera_alignment.json")
     assert report["pass"] is False
     assert report["max_position_error_m"] == 4.0
+
+
+def test_vehicle_start_frame_camera_position_is_resolved_to_world_ned():
+    records = [{
+        "timestamp": 0.0,
+        "states": {
+            "Drone1": {
+                "actor_position": [10.0, -4.0, 2.0],
+                "kinematics_position": [8.0, -1.0, 3.0],
+            },
+        },
+    }]
+    position, frame, origin = camera_position_to_world(
+        [1.0, 2.0, 3.0], "vehicle_start_frame_ned", records, "Drone1"
+    )
+    assert np.allclose(origin, [2.0, -3.0, -1.0])
+    assert np.allclose(position, [3.0, -1.0, 2.0])
+    assert frame == "world_ned_from_vehicle_start_frame"
+
+
+def test_external_chase_camera_position_stays_in_world_ned():
+    records = [{
+        "timestamp": 0.0,
+        "states": {
+            "Drone1": {
+                "actor_position": [10.0, -4.0, 2.0],
+                "kinematics_position": [8.0, -1.0, 3.0],
+            },
+        },
+    }]
+    position, frame, origin = camera_position_to_world(
+        [4.0, 5.0, 6.0], "external_world_ned", records, "Drone1"
+    )
+    assert np.allclose(position, [4.0, 5.0, 6.0])
+    assert frame == "external_world_ned"
+    assert origin is None
+
+
+def test_ground_vehicle_marker_uses_visual_chassis_anchor_only():
+    point = _presentation_marker_position([2.0, 3.0, 4.0], "ugv")
+    assert np.allclose(point, [2.0, 3.0, 4.0 - CHASE_GROUND_VEHICLE_MARKER_HEIGHT_M])
+    assert np.allclose(
+        _presentation_marker_position([2.0, 3.0, 4.0], "drone"),
+        [2.0, 3.0, 4.0],
+    )
 
 
 def test_chase_overlay_draws_red_target_marker_separately_from_robot_markers():
@@ -138,3 +206,108 @@ def test_chase_overlay_draws_red_target_marker_separately_from_robot_markers():
     assert (255, 45, 45) in pixels
     assert (30, 255, 90) in pixels
     assert (40, 150, 255) in pixels
+
+
+def test_chase_overlay_can_disable_all_map_markers():
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    records = [{
+        "timestamp": 0.0,
+        "states": {"Drone1": {"position": [2.0, 0.0, 0.0]}},
+        "vehicle_types": {"Drone1": "drone"},
+        "targets": {"Target1": {"name": "Target1", "position": [2.0, 1.0, 0.0]}},
+        "recording": {"chase_camera": {
+            "world_position": [0.0, 0.0, 0.0],
+            "orientation_quaternion": [1.0, 0.0, 0.0, 0.0],
+        }},
+    }]
+    image = Image.new("RGB", (100, 100), (0, 0, 0))
+    make_chase_overlay(records, {"Drone1": "drone"}, 100, 100, markers_enabled=False)(image, 0.0)
+    assert set(image.getdata()) == {(0, 0, 0)}
+
+
+def test_chase_overlay_interpolates_robot_pose_at_png_capture_time():
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    records = [
+        {
+            "timestamp": 0.0,
+            "states": {"Drone1": {"position": [2.0, -1.0, 0.0]}},
+            "vehicle_types": {"Drone1": "drone"},
+            "recording": {"chase_camera": {
+                "world_position": [0.0, 0.0, 0.0],
+                "orientation_quaternion": [1.0, 0.0, 0.0, 0.0],
+            }},
+        },
+        {
+            "timestamp": 1.0,
+            "states": {"Drone1": {"position": [2.0, 1.0, 0.0]}},
+            "vehicle_types": {"Drone1": "drone"},
+            "recording": {"chase_camera": {
+                "world_position": [0.0, 0.0, 0.0],
+                "orientation_quaternion": [1.0, 0.0, 0.0, 0.0],
+            }},
+        },
+    ]
+    image = Image.new("RGB", (100, 100), (0, 0, 0))
+    make_chase_overlay(
+        records, {"Drone1": "drone"}, 100, 100,
+        camera_metadata=[{
+            "timestamp": 0.5,
+            "camera_position": [0.0, 0.0, 0.0],
+            "camera_orientation_quaternion": [1.0, 0.0, 0.0, 0.0],
+        }],
+    )(image, 0.5)
+    pixels = np.asarray(image)
+    marker = (pixels[:, :, 0] == 30) & (pixels[:, :, 1] == 255) & (pixels[:, :, 2] == 90)
+    ys, xs = np.where(marker)
+    assert len(xs) > 0
+    # At the midpoint the robot is [2, 0, 0], which projects to the image
+    # center. Holding the t=0 pose would put the ring at x=25 instead.
+    assert np.isclose(float(xs.mean()), 50.0, atol=1.0)
+
+
+def test_chase_overlay_uses_wall_timestamp_for_recorded_pngs():
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    records = [
+        {
+            "timestamp": 0.0,
+            "wall_timestamp": 100.0,
+            "states": {"Drone1": {"position": [2.0, -1.0, 0.0]}},
+            "vehicle_types": {"Drone1": "drone"},
+            "recording": {"chase_camera": {
+                "world_position": [0.0, 0.0, 0.0],
+                "orientation_quaternion": [1.0, 0.0, 0.0, 0.0],
+            }},
+        },
+        {
+            "timestamp": 1.0,
+            "wall_timestamp": 101.0,
+            "states": {"Drone1": {"position": [2.0, 1.0, 0.0]}},
+            "vehicle_types": {"Drone1": "drone"},
+            "recording": {"chase_camera": {
+                "world_position": [0.0, 0.0, 0.0],
+                "orientation_quaternion": [1.0, 0.0, 0.0, 0.0],
+            }},
+        },
+    ]
+    image = Image.new("RGB", (100, 100), (0, 0, 0))
+    make_chase_overlay(
+        records, {"Drone1": "drone"}, 100, 100,
+        camera_metadata=[{
+            "timestamp": 100.5,
+            "camera_position": [0.0, 0.0, 0.0],
+            "camera_orientation_quaternion": [1.0, 0.0, 0.0, 0.0],
+        }],
+    )(image, 100.5)
+    pixels = np.asarray(image)
+    marker = (pixels[:, :, 0] == 30) & (pixels[:, :, 1] == 255) & (pixels[:, :, 2] == 90)
+    ys, xs = np.where(marker)
+    assert len(xs) > 0
+    # The PNG timestamp is Unix time.  It must select the midpoint actor
+    # pose, not the final mission record.
+    assert np.isclose(float(xs.mean()), 50.0, atol=1.0)

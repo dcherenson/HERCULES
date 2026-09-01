@@ -11,6 +11,7 @@ from modules.mission_plots import (
     ned_to_display,
     route_up_xy,
     sensor_view_for_record,
+    _target_tracking_enabled,
     _topdown_limits,
 )
 
@@ -75,6 +76,16 @@ def test_topdown_limits_include_goal_location():
     lower, upper = _topdown_limits(records, ["Drone1"], 0.0, np.zeros(2))
     assert lower[0] <= 20.0 <= upper[0]
     assert lower[1] <= 20.0 <= upper[1]
+
+
+def test_target_tracking_topdown_limits_do_not_include_goal():
+    records = [_record(0, {"Drone1": [0.0, 0.0, -1.0]})]
+    records[0]["goal"] = [100.0, 100.0, -1.0]
+    records[0]["target_tracking"] = {"enabled": True, "agents": {}}
+    assert _target_tracking_enabled(records[0])
+    lower, upper = _topdown_limits(records, ["Drone1"], 0.0, np.zeros(2), include_goal=False)
+    assert upper[0] < 20.0
+    assert upper[1] < 20.0
 
 
 def test_topdown_limits_include_target_truth_not_noisy_estimate():

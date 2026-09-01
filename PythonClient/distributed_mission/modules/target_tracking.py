@@ -15,7 +15,9 @@ import numpy as np
 
 
 # This remains deliberately separate from the conformal robustness placeholder.
-# Edit this constant while tuning the target obstacle footprint.
+# Edit this constant while tuning the target obstacle footprint. Camera ROI
+# errors in the current AirSim maps are larger than the covariance floor, so
+# four reported sigmas are used until that measurement calibration improves.
 TARGET_CBF_SIGMA_MULTIPLIER = 2.0
 
 STATE_DIM = 4
@@ -240,6 +242,7 @@ class _Track:
     information: Optional[np.ndarray] = None
     information_vector: Optional[np.ndarray] = None
     covariance: np.ndarray = field(default_factory=lambda: np.eye(STATE_DIM) * 25.0)
+    consensus_covariance: Optional[np.ndarray] = None
     latest_time: Optional[float] = None
     last_direct_observation: Optional[float] = None
     active: bool = False
@@ -250,6 +253,12 @@ class _Track:
     pending_handoff_vector: Optional[np.ndarray] = None
     last_handoff_time: Optional[float] = None
     last_handoff_sent: Optional[float] = None
+    # A receiver can remain supported by a current neighbor trajectory even
+    # when its own sensor is not looking at the target.  This timestamp is
+    # used only for the rolling-window expiry rule; it is deliberately not
+    # added to the information matrix, so ordinary consensus does not
+    # repeatedly count the same information or inflate covariance.
+    last_consensus_support: Optional[float] = None
 
     def ensure_initialized(self, measurement: Optional[TargetMeasurement], timestamp: float) -> bool:
         if self.prior_mean is not None:
@@ -268,13 +277,28 @@ class _Track:
         return True
 
     def append_sample(self, timestamp: float, measurement: Optional[TargetMeasurement]) -> None:
-        self.times.append(float(timestamp))
-        self.measurements.append(measurement)
-        self.latest_time = float(timestamp)
-        if measurement is not None and measurement.valid:
-            self.last_direct_observation = float(measurement.timestamp)
+        epoch_timestamp = float(timestamp)
+        sample_timestamp = epoch_timestamp
+        if measurement is not None and measurement.valid and np.isfinite(measurement.timestamp):
+            # Camera observations are asynchronous. Keep the factor at the
+            # completed capture time rather than pretending it was acquired
+            # at the later estimator epoch.
+            sample_timestamp = min(epoch_timestamp, float(measurement.timestamp))
 
-        cutoff = float(timestamp) - max(0.0, self.window_seconds)
+        index = int(np.searchsorted(np.asarray(self.times, dtype=float), sample_timestamp))
+        if index < len(self.times) and np.isclose(self.times[index], sample_timestamp, atol=1e-9):
+            self.measurements[index] = measurement
+        else:
+            self.times.insert(index, sample_timestamp)
+            self.measurements.insert(index, measurement)
+        self.latest_time = max(float(self.latest_time or epoch_timestamp), epoch_timestamp)
+        if measurement is not None and measurement.valid:
+            self.last_direct_observation = max(
+                float(self.last_direct_observation or measurement.timestamp),
+                float(measurement.timestamp),
+            )
+
+        cutoff = epoch_timestamp - max(0.0, self.window_seconds)
         while len(self.times) > 1 and self.times[1] < cutoff:
             self.times.pop(0)
             self.measurements.pop(0)
@@ -284,7 +308,13 @@ class _Track:
 
     def begin(self, timestamp: float, measurement: Optional[TargetMeasurement], active_count: int) -> bool:
         timestamp = float(timestamp)
-        support_times = [value for value in (self.last_direct_observation, self.last_handoff_time)
+        if measurement is not None and measurement.valid:
+            self.consensus_covariance = None
+        support_times = [value for value in (
+            self.last_direct_observation,
+            self.last_handoff_time,
+            self.last_consensus_support,
+        )
                          if value is not None]
         if self.active and support_times and timestamp - max(support_times) > self.window_seconds:
             self.active = False
@@ -331,11 +361,21 @@ class _Track:
         return np.asarray(self.x[-STATE_DIM:], dtype=float).copy()
 
     def message(self) -> Dict[str, Any]:
+        latest_covariance = (
+            self.consensus_covariance
+            if self.consensus_covariance is not None
+            else (
+                self.covariance[-STATE_DIM:, -STATE_DIM:]
+                if self.covariance is not None
+                else np.eye(STATE_DIM) * 25.0
+            )
+        )
         return {
             "target_id": self.target_id,
             "trajectory": self.x.tolist() if self.x is not None else None,
             "times": list(self.times),
             "state": self.latest_state().tolist() if self.x is not None else None,
+            "state_covariance": latest_covariance.tolist(),
             "active": bool(self.active and self.x is not None),
             "last_direct_observation": self.last_direct_observation,
         }
@@ -383,9 +423,16 @@ class _Track:
 
     def finalize(self) -> Dict[str, Any]:
         state = self.latest_state()
-        covariance = self.covariance[-STATE_DIM:, -STATE_DIM:] if self.covariance is not None else np.eye(STATE_DIM)
+        covariance = (
+            self.consensus_covariance
+            if self.consensus_covariance is not None
+            else (self.covariance[-STATE_DIM:, -STATE_DIM:] if self.covariance is not None else np.eye(STATE_DIM))
+        )
         residual = None
-        latest_measurement = self.measurements[-1] if self.measurements else None
+        latest_measurement = next(
+            (item for item in reversed(self.measurements) if item is not None and item.valid),
+            None,
+        )
         if latest_measurement is not None and latest_measurement.valid:
             residual = (state[:2] - latest_measurement.position[:2]).tolist()
         return {
@@ -422,7 +469,10 @@ class _Track:
     def handoff_message(self, timestamp: float) -> Optional[Dict[str, Any]]:
         if not self.active:
             return None
-        support_times = [value for value in (self.last_direct_observation, self.last_handoff_time)
+        support_times = [value for value in (
+            self.last_direct_observation,
+            self.last_handoff_time,
+        )
                          if value is not None]
         if not support_times or float(timestamp) - max(support_times) < self.window_seconds:
             return None
@@ -460,6 +510,9 @@ class _Track:
             self.dual = np.zeros_like(self.x)
             self.information = matrix.copy()
             self.information_vector = vector.copy()
+        state_covariance = np.asarray(message.get("state_covariance"), dtype=float)
+        if state_covariance.shape == (STATE_DIM, STATE_DIM):
+            self.consensus_covariance = _positive_definite(state_covariance)
         self.active = True
         self.last_handoff_time = float(message.get("timestamp", 0.0))
         if self.pending_handoff_information is None:
@@ -529,19 +582,30 @@ class TargetTrackingModule:
         for message in messages:
             target_id = message.get("target_id")
             state = message.get("state")
-            if target_id is None or state is None or str(target_id) in self.tracks:
+            if target_id is None or state is None:
                 continue
             values = np.asarray(state, dtype=float).reshape(-1)
             if values.size != STATE_DIM:
                 continue
             track = self._track(str(target_id))
+            if track.active:
+                continue
+            # A receiver whose propagated track has expired may be
+            # reinitialized from a currently connected neighbor.  This is a
+            # handoff-like prior, not a second measurement: clear the stale
+            # rolling window and use the announced trajectory state once.
             track.prior_mean = values.copy()
             track.prior_covariance = np.eye(STATE_DIM) * 16.0
             track.latest_time = float(timestamp)
             track.last_handoff_time = float(timestamp)
+            track.last_consensus_support = float(timestamp)
             track.active = True
             track.times = [float(timestamp)]
             track.measurements = [None]
+            track.x = None
+            track.dual = None
+            track.information = None
+            track.information_vector = None
             track.information, track.information_vector = assemble_window_information(
                 track.times, track.measurements, track.prior_mean, track.prior_covariance,
                 track.process_noise_spectral_density, 1,
@@ -685,6 +749,58 @@ class DistributedTargetTracking:
             residual = round_residual
             if residual <= self.tolerance:
                 break
+
+        # Keep a silent receiver alive while it is connected to an active
+        # trajectory source.  This is support metadata only; the consensus
+        # trajectory above remains the sole estimate update and no extra
+        # information factor is added here.
+        support_messages: Dict[str, Dict[str, Mapping[str, Any]]] = {}
+        for agent_id in self.modules:
+            support_messages[agent_id] = {}
+            for neighbor in adjacency.get(agent_id, []):
+                for target_id, message in messages.get(neighbor, {}).items():
+                    if bool(message.get("active", True)):
+                        previous = support_messages[agent_id].get(target_id)
+                        if previous is None:
+                            support_messages[agent_id][target_id] = message
+                            continue
+                        candidate_covariance = np.asarray(
+                            message.get("state_covariance"), dtype=float
+                        )
+                        previous_covariance = np.asarray(
+                            previous.get("state_covariance"), dtype=float
+                        )
+                        if candidate_covariance.shape == (STATE_DIM, STATE_DIM):
+                            candidate_score = float(np.trace(candidate_covariance))
+                        else:
+                            candidate_score = float("inf")
+                        if previous_covariance.shape == (STATE_DIM, STATE_DIM):
+                            previous_score = float(np.trace(previous_covariance))
+                        else:
+                            previous_score = float("inf")
+                        if candidate_score < previous_score:
+                            support_messages[agent_id][target_id] = message
+
+        for agent_id, module in self.modules.items():
+            for target_id, track in module.tracks.items():
+                if not track.active:
+                    continue
+                local_measurement = measurements.get(agent_id, {}).get(target_id)
+                if local_measurement is not None and local_measurement.valid:
+                    continue
+                support_message = support_messages[agent_id].get(target_id)
+                if support_message is not None:
+                    track.last_consensus_support = float(timestamp)
+                    # A silent receiver's information matrix contains no
+                    # local target measurement and can become weak over a
+                    # long rolling window. Carry the current neighbor
+                    # covariance with the communicated estimate so the
+                    # reported uncertainty remains conservative but bounded.
+                    state_covariance = np.asarray(
+                        support_message.get("state_covariance"), dtype=float
+                    )
+                    if state_covariance.shape == (STATE_DIM, STATE_DIM):
+                        track.consensus_covariance = _positive_definite(state_covariance)
 
         estimates = {
             agent_id: module.finish_epoch()

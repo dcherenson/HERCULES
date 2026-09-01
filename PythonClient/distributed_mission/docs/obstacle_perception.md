@@ -1,6 +1,11 @@
 # Local obstacle perception
 
-UAVs use `front_center` `DepthPerspective` images. Huskies use `Lidar1`.
+UAVs use a bounded `DepthPerspective` fan over the three cameras already
+registered by the multirotor pawn: `front_center`, `front_left`, and
+`front_right`. The launcher leaves `front_center` unchanged and gives the two
+side cameras fixed rear-side yaws so a target-centered formation is not blind
+to an obstacle approaching from behind. Their diagnostic depth profiles are
+small and only support obstacle ranging. Huskies use `Lidar1`.
 Measurements are transformed into world coordinates, range filtered,
 downsampled, ground filtered, and clustered with DBSCAN. Large clusters are
 split along their principal axis so each proxy has bounded size. UAV depth
@@ -28,12 +33,21 @@ tracker, or online waypoint generator. An empty fresh sensor frame means no
 locally detected obstacle; stale or malformed data invokes the controller
 fail-safe.
 
-The forward-facing UAV sensor creates a field-of-view limitation: occluded or
-behind-camera obstacles are outside the v1 perception guarantee. Every fresh
-capture receives a stable ID and stores bounded intermediate point-cloud
-samples in a compressed NPZ sidecar. The offline perception report compares
-only fresh captures; cached control cycles do not appear as artificial
-zero-motion detections.
+Before the CBF receives a perception frame, clusters centered within 0.5 m of a
+known controlled vehicle body are discarded. This prevents a UAV's own body or
+another controlled vehicle from being inserted a second time as a static
+obstacle; same-type inter-agent CBF constraints already handle those vehicles.
+Explicit truth-course and target-tracking proxies are not removed. The JSONL
+cycle records `perception_proxy_count` and `rejected_agent_proxy_count` so this
+filter can be checked against the raw point-cloud sidecar.
+
+The UAV fan still cannot see through occlusion, and its individual views are
+not a map or identity tracker. Every fresh capture receives a stable ID and
+stores bounded intermediate point-cloud samples in a compressed NPZ sidecar.
+The offline perception report compares only fresh captures; cached control
+cycles do not appear as artificial zero-motion detections. For a CPU-limited
+machine, tune the existing `--sensor-rate` option; the side-camera settings
+are launch-time only and do not change the CBF equations.
 
 The CBF equations are unchanged by these perception repairs. The UGV
 Mestres adapter uses the existing 0.5 m unicycle lookahead tuned for the

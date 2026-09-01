@@ -211,11 +211,31 @@ def analyze_perception_records(records: Sequence[Mapping], sidecar_metadata: Map
             vehicle_position = view.get("vehicle_position", state.get("position"))
             if view.get("position") is not None and vehicle_position is not None:
                 offsets.append(float(np.linalg.norm(np.asarray(view["position"], dtype=float) - np.asarray(vehicle_position, dtype=float))))
-            if view.get("sensor_type") == "uav_camera" and view.get("position") is not None:
-                rotation = _quaternion_to_matrix(view.get("orientation_quaternion"))
-                sensor_position = np.asarray(view["position"], dtype=float)
+            if view.get("sensor_type") == "uav_camera":
+                # A current UAV capture may combine several camera-local
+                # clouds.  A proxy is only anomalous when it is behind every
+                # contributing camera; checking the primary front_center
+                # entry alone incorrectly flags valid rear-view estimates.
+                camera_entries = view.get("cameras")
+                if not isinstance(camera_entries, list) or not camera_entries:
+                    camera_entries = [view]
+                camera_poses = []
+                for camera in camera_entries:
+                    if not isinstance(camera, Mapping) or camera.get("position") is None:
+                        continue
+                    try:
+                        camera_poses.append((
+                            _quaternion_to_matrix(camera.get("orientation_quaternion")),
+                            np.asarray(camera["position"], dtype=float),
+                        ))
+                    except (TypeError, ValueError):
+                        continue
                 for center in current_centers:
-                    behind_count += int((rotation.T @ (center - sensor_position))[0] < 0.0)
+                    if camera_poses and not any(
+                        float((rotation.T @ (center - sensor_position))[0]) >= 0.0
+                        for rotation, sensor_position in camera_poses
+                    ):
+                        behind_count += 1
         anomalies = []
         if offsets and max(offsets) > 2.0:
             anomalies.append("sensor-to-vehicle offset exceeds 2 m")

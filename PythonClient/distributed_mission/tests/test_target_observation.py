@@ -1,6 +1,17 @@
 import numpy as np
 
-from modules.target_observation import TargetObservationWorker, backproject_target_roi, truth_target_measurement
+from modules.target_observation import MissionTimeMapper, TargetObservationWorker, backproject_target_roi, truth_target_measurement
+
+
+def test_mission_time_mapper_handles_slower_than_real_time_capture_clock():
+    mapper = MissionTimeMapper()
+    mapper.update(100.0, 0.0)
+    mapper.update(102.0, 1.0)
+    mapper.update(106.0, 2.0)
+    assert mapper.mission_timestamp(101.0) == 0.5
+    assert mapper.mission_timestamp(104.0) == 1.5
+    assert mapper.mission_timestamp(99.0) == 0.0
+    assert mapper.mission_timestamp(110.0) == 2.0
 
 
 def test_target_roi_backprojection_returns_forward_camera_point_and_covariance():
@@ -40,7 +51,7 @@ class _Point:
 class _Box:
     def __init__(self):
         self.min = _Point(1.0, 1.0)
-        self.max = _Point(3.0, 3.0)
+        self.max = _Point(2.0, 2.0)
 
 
 class _Detection:

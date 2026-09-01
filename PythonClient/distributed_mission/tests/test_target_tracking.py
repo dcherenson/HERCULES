@@ -121,3 +121,27 @@ def test_handoff_is_information_keyed_and_sustains_receiver():
     assert result["handoffs"][0]["target_id"] == "Target1"
     assert result["handoffs"][0]["receiver_id"] == "b"
     assert modules["b"].tracks["Target1"].active
+
+
+def test_connected_silent_receiver_stays_active_without_covariance_inflation():
+    modules = {
+        name: TargetTrackingModule(name, window_seconds=2.0, max_iterations=10)
+        for name in ("Drone1", "Husky1")
+    }
+    tracker = DistributedTargetTracking(modules, max_iterations=10)
+    graph = {"Drone1": ["Husky1"], "Husky1": ["Drone1"]}
+
+    for epoch in range(7):
+        timestamp = float(epoch) * 0.5
+        tracker.update(
+            timestamp,
+            {
+                "Drone1": {"Target1": measurement("Target1", [timestamp, 0.0], timestamp)},
+                "Husky1": {},
+            },
+            graph,
+        )
+
+    estimate = tracker.predicted_estimates(3.0)["Husky1"]["Target1"]
+    assert estimate["active"]
+    assert np.max(np.linalg.eigvalsh(np.asarray(estimate["covariance"]))) < 10.0

@@ -268,7 +268,20 @@ def _target_estimate(record: Mapping[str, Any], agent_name: str, target_name: st
     return None
 
 
-def _topdown_limits(records: Sequence[Mapping], names: Sequence[str], heading: float, origin: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _target_tracking_enabled(record: Mapping[str, Any]) -> bool:
+    """Return whether a record belongs to a target-tracking mission."""
+
+    tracking = record.get("target_tracking")
+    if not isinstance(tracking, Mapping):
+        return False
+    # Current logs carry ``enabled``.  The agents fallback keeps synthetic and
+    # older target-tracking logs objective-aware without requiring a schema
+    # rewrite.
+    return bool(tracking.get("enabled", False) or isinstance(tracking.get("agents"), Mapping))
+
+
+def _topdown_limits(records: Sequence[Mapping], names: Sequence[str], heading: float, origin: np.ndarray,
+                    include_goal: bool = True) -> Tuple[np.ndarray, np.ndarray]:
     points: List[np.ndarray] = []
     for record in records:
         for name in names:
@@ -276,12 +289,13 @@ def _topdown_limits(records: Sequence[Mapping], names: Sequence[str], heading: f
             position = state.get("position") if isinstance(state, Mapping) else None
             if position is not None:
                 points.append(route_up_xy(np.asarray(position, dtype=float), heading, origin))
-    goal = next((record.get("goal") for record in records if record.get("goal") is not None), None)
-    if goal is not None:
-        try:
-            points.append(route_up_xy(np.asarray(goal, dtype=float), heading, origin))
-        except (TypeError, ValueError):
-            pass
+    if include_goal:
+        goal = next((record.get("goal") for record in records if record.get("goal") is not None), None)
+        if goal is not None:
+            try:
+                points.append(route_up_xy(np.asarray(goal, dtype=float), heading, origin))
+            except (TypeError, ValueError):
+                pass
     truth = next((record.get("true_obstacles") for record in records if record.get("true_obstacles") is not None), [])
     if truth:
         points.extend(route_up_xy(point, heading, origin) for point in _truth_xy_extent(truth))
@@ -349,7 +363,8 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
     first_position = np.mean(np.asarray(initial_positions), axis=0) if initial_positions else np.zeros(3)
     goal = np.asarray(records[0].get("goal", first_position + [0.0, 1.0, 0.0]), dtype=float)
     heading = float(np.arctan2(goal[1] - first_position[1], goal[0] - first_position[0]))
-    lower, upper = _topdown_limits(records, names, heading, origin)
+    target_tracking = any(_target_tracking_enabled(record) for record in records)
+    lower, upper = _topdown_limits(records, names, heading, origin, include_goal=not target_tracking)
     source_fps = max(float(fps if fps is not None else 1.0 / max(float(records[0].get("dt", 0.1)), 1e-6)), 1.0)
     if playback_speed <= 0.0:
         raise ValueError("playback_speed must be positive")
@@ -392,17 +407,18 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
                         axis.add_patch(Polygon(corners, closed=True, color="gray", alpha=0.28, linewidth=1.0))
                 except (KeyError, TypeError, ValueError):
                     continue
-            goal_point = route_up_xy(goal, heading, origin)
-            axis.scatter(
-                [goal_point[0]], [goal_point[1]], marker="*", s=190,
-                facecolor="gold", edgecolor="black", linewidth=1.0,
-                zorder=10,
-            )
-            axis.annotate(
-                "GOAL", (goal_point[0], goal_point[1]), xytext=(6, 6),
-                textcoords="offset points", color="black", fontsize="small",
-                fontweight="bold", zorder=11,
-            )
+            if not target_tracking:
+                goal_point = route_up_xy(goal, heading, origin)
+                axis.scatter(
+                    [goal_point[0]], [goal_point[1]], marker="*", s=190,
+                    facecolor="gold", edgecolor="black", linewidth=1.0,
+                    zorder=10,
+                )
+                axis.annotate(
+                    "GOAL", (goal_point[0], goal_point[1]), xytext=(6, 6),
+                    textcoords="offset points", color="black", fontsize="small",
+                    fontweight="bold", zorder=11,
+                )
             for name in names:
                 state = (record.get("states") or {}).get(name, {})
                 position = state.get("position") if isinstance(state, Mapping) else None
@@ -506,11 +522,8 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
             axis.set_aspect("equal", adjustable="box")
             axis.set_xlabel("Route-left (m)")
             axis.set_ylabel("Progress to goal (m)")
-            mission_time = float(record.get("step", frame_index)) * float(record.get("dt", 0.1))
-            axis.set_title("Distributed mission — top down (t = {:.1f} s)".format(mission_time))
-            axis.legend(handles=[
+            legend_handles = [
                 Line2D([0], [0], color="deepskyblue", lw=6, alpha=0.25, label="UAV camera FOV"),
-                Line2D([0], [0], marker="*", color="gold", markeredgecolor="black", linestyle="None", markersize=11, label="goal"),
                 Line2D([0], [0], color="gray", lw=6, alpha=0.35, label="true obstacle"),
                 Line2D([0], [0], color="red", marker="o", linestyle="-", markersize=7, label="target truth"),
                 Line2D([0], [0], color="black", lw=1, linestyle="--", alpha=0.5, label="tracking communication"),
@@ -518,7 +531,13 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
                 Line2D([0], [0], color="black", marker="+", linestyle="None", markersize=8, label="target estimate"),
                 Line2D([0], [0], color="black", lw=1, linestyle=":", alpha=0.5, label="obstacle estimate"),
                 Line2D([0], [0], color="red", marker="x", linestyle="None", markersize=7, label="collision"),
-            ], loc="upper left", fontsize="x-small")
+            ]
+            if not target_tracking:
+                legend_handles.insert(1, Line2D(
+                    [0], [0], marker="*", color="gold", markeredgecolor="black",
+                    linestyle="None", markersize=11, label="goal",
+                ))
+            axis.legend(handles=legend_handles, loc="upper left", fontsize=10.0)
 
         movie = animation.FuncAnimation(figure, draw, frames=indices, interval=1000.0 / output_fps, blit=False)
         movie.save(output_path, writer=writer, dpi=dpi)

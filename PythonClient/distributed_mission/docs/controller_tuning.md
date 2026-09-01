@@ -1,13 +1,13 @@
 # Controller tuning
 
 The nominal controller structure and the fixed formations are unchanged. The
-current defaults are tuned for the FlyingCPP headless course:
+nominal defaults are the same for FlyingCPP and RuralAustralia:
 
-- nominal speed: `3.0 m/s`
-- nominal position gain: `1.0`
+- nominal speed: `1.0 m/s`
+- nominal position gain: `0.5`
 - nominal velocity gain: `3.0`
-- UGV heading gain: `2.0`
-- UGV maximum yaw rate: `1.5 rad/s`
+- UGV heading gain: `1.0`
+- UGV maximum yaw rate: `1.0 rad/s`
 - UAV velocity limit: `3.0 m/s`
 - UGV speed limit: `3.0 m/s`
 - UAV acceleration limit: `6.0 m/s²`
@@ -34,6 +34,17 @@ Example:
 PYTHONPATH=. python PythonClient/distributed_mission/orchestrator.py \
   --launch-mode headless --use-truth-obstacles --steps 200 --dt 0.1
 ```
+
+The target-centered UGV triangle defaults to a 5 m circumradius; override it
+with `--target-ugv-circumradius` when another map needs a different clearance.
+
+The latest FlyingCPP oscillation was not caused by a different nominal
+controller tuning. Its log used the same nominal gains as the RuralAustralia
+run, but used the Wang UAV CBF method and the looser FlyingCPP perception
+settings. The UAV detector was inserting self/neighbor returns as static
+obstacles, producing repeated infeasible CBF solves and saturated vertical
+commands. Those controlled-agent perception proxies are now filtered before
+the CBF; the CBF equations and nominal controller were not changed.
 
 Override only the parameters under test, for example
 `--nominal-speed 5 --leader-nominal-speed 3 --ugv-speed-limit 5` or

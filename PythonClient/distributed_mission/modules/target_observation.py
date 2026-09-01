@@ -8,7 +8,7 @@ are cached asynchronously so image RPCs do not consume the CBF deadline.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import threading
 import time
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
@@ -17,6 +17,47 @@ import numpy as np
 
 from .obstacle_detection import decode_depth_response
 from .target_tracking import TargetMeasurement
+
+
+@dataclass
+class MissionTimeMapper:
+    """Map asynchronous wall-clock captures onto the mission clock.
+
+    AirSim image RPCs complete asynchronously, while the target dynamics and
+    controller advance on the fixed mission ``dt``.  A piecewise-linear map
+    through control-cycle samples keeps estimator timestamps in that same
+    mission-time domain without discarding the original capture timestamp.
+    """
+
+    samples: list = field(default_factory=list)
+
+    def update(self, wall_timestamp: float, mission_timestamp: float) -> None:
+        wall = float(wall_timestamp)
+        mission = float(mission_timestamp)
+        if not np.isfinite(wall) or not np.isfinite(mission):
+            return
+        if self.samples and wall <= self.samples[-1][0]:
+            # Control-cycle timestamps should be monotonic.  Keep the newest
+            # mission value for an equal wall timestamp and ignore late
+            # samples rather than creating a non-invertible segment.
+            if np.isclose(wall, self.samples[-1][0]):
+                self.samples[-1] = (wall, mission)
+            return
+        self.samples.append((wall, mission))
+
+    def mission_timestamp(self, wall_timestamp: float) -> float:
+        """Return the best bounded mission-time estimate for a capture."""
+
+        wall = float(wall_timestamp)
+        if not self.samples or not np.isfinite(wall):
+            return 0.0
+        if wall <= self.samples[0][0]:
+            return float(self.samples[0][1])
+        if wall >= self.samples[-1][0]:
+            return float(self.samples[-1][1])
+        walls = np.asarray([sample[0] for sample in self.samples], dtype=float)
+        missions = np.asarray([sample[1] for sample in self.samples], dtype=float)
+        return float(np.interp(wall, walls, missions))
 
 
 def _quaternion_matrix(quaternion: Any) -> np.ndarray:
@@ -64,11 +105,31 @@ def _bbox_values(detection: Any) -> Optional[Tuple[float, float, float, float]]:
     return tuple(values.tolist())
 
 
+def _usable_target_bbox(
+    bbox: Tuple[float, float, float, float], width: int, height: int
+) -> Tuple[bool, str]:
+    """Reject detections whose ROI is clipped and cannot back-project a center."""
+
+    x0, y0, x1, y1 = bbox
+    if (
+        x0 <= 0.0
+        or y0 <= 0.0
+        or x1 >= float(width - 1)
+        or y1 >= float(height - 1)
+    ):
+        return False, "bbox_clipped_at_image_edge"
+    area_fraction = max(0.0, (x1 - x0) * (y1 - y0)) / max(1.0, float(width * height))
+    if area_fraction >= 0.5:
+        return False, "bbox_near_full_frame"
+    return True, ""
+
+
 def backproject_target_roi(
     depth: np.ndarray,
     bbox: Tuple[float, float, float, float],
     horizontal_fov_rad: float,
     target_radius: float = 1.25,
+    position_std_floor: float = 0.25,
     min_range: float = 0.4,
     max_range: float = 100.0,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
@@ -118,7 +179,7 @@ def backproject_target_roi(
     ray /= max(np.linalg.norm(ray), 1e-12)
     point = depth_value * ray + float(max(0.0, target_radius)) * ray
     spread = float(np.median(np.abs(ranges - np.median(ranges))) * 1.4826)
-    position_std = max(0.25, spread, 0.02 * depth_value)
+    position_std = max(float(position_std_floor), spread, 0.02 * depth_value)
     covariance = np.eye(2, dtype=float) * position_std ** 2
     return point, covariance, {
         "bbox": [float(x0), float(y0), float(x1), float(y1)],
@@ -249,6 +310,28 @@ class TargetObservationWorker:
         if bbox is None:
             raise RuntimeError("target detection had no valid 2D box")
         depth = decode_depth_response(response)
+        bbox_usable, rejection_reason = _usable_target_bbox(
+            bbox, int(depth.shape[1]), int(depth.shape[0])
+        )
+        if not bbox_usable:
+            return TargetMeasurement(
+                target_id=self.target_id,
+                position=np.zeros(2),
+                covariance=np.eye(2) * float(self.measurement_std) ** 2,
+                timestamp=capture_time,
+                valid=False,
+                source="camera",
+                capture_id=capture_id,
+                sensor=camera,
+                visible=False,
+                metadata={
+                    "detections": len(detections),
+                    "bbox": [float(value) for value in bbox],
+                    "image_width": int(depth.shape[1]),
+                    "image_height": int(depth.shape[0]),
+                    "rejection_reason": rejection_reason,
+                },
+            )
         fov_key = (agent, camera)
         horizontal_fov_deg = self._fov_by_camera.get(fov_key, self.horizontal_fov_deg)
         try:
@@ -264,6 +347,7 @@ class TargetObservationWorker:
             bbox,
             np.deg2rad(horizontal_fov_deg),
             self.target_radius,
+            position_std_floor=self.measurement_std,
             max_range=self.sensing_range,
         )
         response_position = getattr(response, "camera_position", None)

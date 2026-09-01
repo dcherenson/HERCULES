@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import copy
 import json
 import os
 import queue
@@ -42,6 +43,14 @@ class AirSimLaunchConfig:
     recording_folder: Optional[str] = None
     target_tracking: bool = False
     target_uav_camera: str = "target_bottom"
+    # Prevent settings-defined CPHusky pawns from simulating before the
+    # orchestrator can pause and place them. Their sensor profile is retained
+    # in the temporary settings override and used by the runtime-spawn path.
+    runtime_spawn_ugvs: bool = True
+    # Use the three cameras already registered by the multirotor pawn for a
+    # bounded obstacle-perception fan.  This changes only the side-camera
+    # mount yaw; front_center remains untouched for FPV and other consumers.
+    uav_obstacle_camera_fan: bool = True
 
     def __post_init__(self) -> None:
         if self.launch_mode not in {"visible", "headless", "existing"}:
@@ -103,6 +112,7 @@ class AirSimLauncher:
             and not self.config.rotate_camera_director
             and not self.config.record_video
             and not self.config.target_tracking
+            and not self.config.runtime_spawn_ugvs
         ):
             return
         source_path = self.config.settings_path
@@ -143,6 +153,9 @@ class AirSimLauncher:
         settings["CameraDirector"] = camera_director
         if self.config.target_tracking:
             self._apply_target_tracking_settings(settings)
+        self._apply_runtime_ugv_settings(settings)
+        if self.config.uav_obstacle_camera_fan:
+            self._apply_obstacle_camera_settings(settings)
         if self.config.record_video:
             self._apply_recording_settings(settings)
         temporary = tempfile.NamedTemporaryFile(
@@ -152,6 +165,38 @@ class AirSimLauncher:
             json.dump(settings, temporary, indent=2)
         self._temporary_settings_path = temporary.name
         self.config._active_settings_path = temporary.name
+
+    def _apply_runtime_ugv_settings(self, settings: Dict[str, Any]) -> None:
+        """Defer controlled Husky creation until the mission is paused.
+
+        A CPHusky created from settings starts its Chaos body as soon as the
+        map begins play. On RuralAustralia it can acquire a large vertical
+        velocity before the client reaches ``simPause``. Marking only the
+        controlled Husky entries as non-auto-created avoids that startup
+        race; the orchestrator subsequently calls ``simAddVehicle`` once at
+        the final pose. AirSim's runtime-add path uses ``DefaultSensors``, so
+        copy the configured Husky LiDAR entry there without touching the
+        source settings file.
+        """
+
+        if not self.config.runtime_spawn_ugvs:
+            return
+        vehicles = settings.setdefault("Vehicles", {})
+        default_sensors = settings.setdefault("DefaultSensors", {})
+        lidar_profile = None
+        for name in ("Husky1", "Husky2", "Husky3"):
+            vehicle = vehicles.get(name)
+            if not isinstance(vehicle, dict):
+                continue
+            vehicle_type = str(vehicle.get("VehicleType", "")).lower()
+            if vehicle_type and "husky" not in vehicle_type and "skid" not in vehicle_type:
+                continue
+            sensors = vehicle.get("Sensors")
+            if isinstance(sensors, dict) and isinstance(sensors.get("Lidar1"), dict) and lidar_profile is None:
+                lidar_profile = copy.deepcopy(sensors["Lidar1"])
+            vehicle["AutoCreate"] = False
+        if lidar_profile is not None and "Lidar1" not in default_sensors:
+            default_sensors["Lidar1"] = lidar_profile
 
     def _apply_target_tracking_settings(self, settings: Dict[str, Any]) -> None:
         """Add a downward tracking camera without replacing vehicle cameras."""
@@ -187,6 +232,66 @@ class AirSimLauncher:
                     {"ImageType": 2, "Width": 320, "Height": 240, "FOV_Degrees": 120.0, "MotionBlurAmount": 0},
                 ],
             })
+
+    def _apply_obstacle_camera_settings(self, settings: Dict[str, Any]) -> None:
+        """Give the existing UAV side cameras a small, fixed view fan.
+
+        The stock FlyingPawn registers ``front_center``, ``front_left`` and
+        ``front_right``, but this fork's blueprint can leave all three facing
+        forward.  Configuring only the two side entries adds no camera actor
+        and leaves the mounted front-center camera, including its depth
+        settings, unchanged.  Explicit user side-camera settings win.
+        """
+
+        vehicles = settings.setdefault("Vehicles", {})
+        for vehicle_settings in vehicles.values():
+            vehicle_type = str(vehicle_settings.get("VehicleType", "")).lower()
+            if "simpleflight" not in vehicle_type and "multirotor" not in vehicle_type:
+                continue
+            cameras = vehicle_settings.get("Cameras")
+            if cameras is None:
+                cameras = {}
+                vehicle_settings["Cameras"] = cameras
+            if not isinstance(cameras, dict):
+                raise ValueError("vehicle Cameras setting must be an object")
+            # Keep front_center forward and place the two side views at +/-120
+            # degrees.  AirSim may clamp the configured capture FOV, so the
+            # detector always uses the FOV returned by simGetCameraInfo when
+            # projecting each response.
+            for camera_name, yaw in (("front_left", -120.0), ("front_right", 120.0)):
+                existing = cameras.get(camera_name)
+                if existing is None:
+                    existing = {}
+                    cameras[camera_name] = existing
+                if not isinstance(existing, dict):
+                    raise ValueError("obstacle camera setting must be an object")
+                existing.setdefault("External", False)
+                existing.setdefault("X", 0.0)
+                existing.setdefault("Y", 0.0)
+                existing.setdefault("Z", 0.0)
+                existing.setdefault("Roll", 0.0)
+                existing.setdefault("Pitch", 0.0)
+                existing.setdefault("Yaw", yaw)
+                # Side cameras only support obstacle ranging here. Keep their
+                # depth payload small so the three-view fan does not consume
+                # the control-loop budget; an explicit user capture profile
+                # is preserved.
+                existing.setdefault("CaptureSettings", [
+                    {
+                        "ImageType": 0,
+                        "Width": 96,
+                        "Height": 72,
+                        "FOV_Degrees": 120.0,
+                        "MotionBlurAmount": 0,
+                    },
+                    {
+                        "ImageType": 2,
+                        "Width": 96,
+                        "Height": 72,
+                        "FOV_Degrees": 120.0,
+                        "MotionBlurAmount": 0,
+                    },
+                ])
 
     def _apply_recording_settings(self, settings: Dict[str, Any]) -> None:
         """Add recording-only cameras without replacing perception cameras."""
@@ -340,6 +445,11 @@ class AirSimFacade:
             # AirSim reports an error when the requested vehicle already exists.
             # Existing vehicles are intentionally reusable between runs.
             return False
+
+    def has_vehicle(self, name: str) -> bool:
+        """Return whether a vehicle API is currently registered in AirSim."""
+
+        return name in self._vehicle_names
 
     def spawn_object(self, name: str, asset_name: str, pose: Any, scale: Any) -> bool:
         result = self.multirotor.simSpawnObject(name, asset_name, pose, scale, False, False)
@@ -540,6 +650,10 @@ class AirSimFacade:
         requested_speed = float(speed)
         requested_brake = float(np.clip(brake, 0.0, 1.0))
         controls.brake = requested_brake
+        # stop_ugv() uses the handbrake for a reliable stationary startup
+        # hold. Every drive command must explicitly release it; relying on
+        # AirSim's default can leave a reused CPHusky motionless.
+        controls.handbrake = False
         throttle_request = abs(requested_speed) / 2.0 if throttle is None else float(throttle)
         controls.throttle = 0.0 if requested_brake > 0.0 else float(np.clip(throttle_request, 0.0, 1.0))
         controls.steering = float(np.clip(steering, -1.0, 1.0))

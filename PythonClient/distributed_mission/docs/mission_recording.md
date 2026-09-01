@@ -8,9 +8,9 @@ cd /Users/dmrc/git/HERCULES/PythonClient/distributed_mission
 python3 orchestrator.py --launch-mode headless --record-video
 ```
 
-The defaults capture a 1280x720, 20 fps chase stream, Drone1 front-camera
+The defaults capture a 1280x720, 30 fps chase stream, Drone1 front-camera
 stream, and Husky1 front-camera stream. Outputs are played at 2x mission time
-by default, so their output rate is 40 fps. To capture at 10 fps and play at
+by default, so their output rate is 60 fps. To capture at 10 fps and play at
 20 fps, use:
 
 ```bash
@@ -19,7 +19,9 @@ python3 orchestrator.py --launch-mode headless --record-video \
 ```
 
 Each stream produces an MP4 and a 540-pixel-high GIF in the configured debug
-directory. Select different vehicles with `--record-uav NAME` and
+directory. The shared filename stem includes the CBF method, map name, and
+run timestamp, for example `mestres_flyingcpp_1750000000_chase.mp4`.
+Select different vehicles with `--record-uav NAME` and
 `--record-ugv NAME`. Set `--playback-speed 1` for real-time playback.
 
 Every normal run also produces the route-up top-down animation unless
@@ -50,10 +52,16 @@ to the manifest.
 The post-run encoder converts and verifies all requested MP4s before deleting
 that folder. Use `--keep-recording-frames` to retain the source images, or to
 preserve them for diagnosing a failed encode. A JSON recording manifest lists
-camera names, source counts, output paths, timing, duplicate/dropped frame
-counts, and capture-worker errors. Recording runs also produce
+camera names, source counts, measured source FPS, output paths, timing,
+duplicate/dropped frame counts, and capture-worker errors. The manifest's
+`playback_fps` is the encoded MP4 rate; `observed_source_fps` and the
+duplicate count show whether the simulator actually supplied new images at
+that rate. Recording runs also produce
 `<run>_camera_alignment.json` and `.md`, which compare each captured chase
 image's returned pose with the logged commanded pose.
+The encoder matches image timestamps against the log's `wall_timestamp` when
+available; this keeps marker projections synchronized even though the log's
+primary `timestamp` is mission time.
 
 ## Chase-camera diagnosis
 

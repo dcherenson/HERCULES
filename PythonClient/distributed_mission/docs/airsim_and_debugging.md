@@ -12,15 +12,18 @@ The orchestrator defaults to `--timing-mode realtime`, which leaves AirSim
 running and schedules the control loop against a 10 Hz monotonic deadline.
 Use `--timing-mode stepped` when deterministic `simPause`/
 `simContinueForTime` execution is needed. Obstacle perception defaults to
-2.5 Hz per vehicle and is staggered across the team; cached proxies are
-inflated by age and expire into the safety fail-safe.
+2.5 Hz per vehicle and is staggered across the team; UAV captures use the
+existing three-camera depth fan while cached proxies are inflated by age and
+expire into the safety fail-safe. Use the existing `--sensor-rate` option to
+trade capture cost against observation freshness.
 
 The control loop is scheduled against a 10 Hz deadline, but live sensor
-perception is the expensive path: a recent 800-step FlyingCPP run averaged
-about 115 ms per cycle, with perception averaging about 67 ms and occasional
-longer RPC/depth calls. Deadline misses are recorded in the JSONL timing
+perception is the expensive path. On the current macOS/AirSim setup, a
+three-camera UAV obstacle fan can take hundreds of milliseconds per cycle even
+when captures are staggered; deadline misses are recorded in the JSONL timing
 fields. Truth-obstacle mode skips sensor captures and is useful for isolating
-CBF/formation behavior from this perception cost.
+CBF/formation behavior from this perception cost. Keep this distinction in
+mind when judging chase-video timing versus controller real-time performance.
 
 Launch modes are `visible`, `headless`, and `existing`. FlyingCPP is the
 default orchestrator map. It uses deterministic `1M_Cube_Chamfer` blocks whose
@@ -37,18 +40,31 @@ Fixed route markers (the goal and any future
 course waypoint) are drawn in Unreal with AirSim's persistent plot API when
 supported. Use `--no-spawn-obstacles` to disable this course.
 
-For `--map rural_australia`, the mission frame is rotated 90 degrees left in
-AirSim's NED convention: the initial heading is -90 degrees and the goal, waypoints, formation layout,
-and any supplied course geometry are rotated with it. This keeps the
-RuralAustralia run aligned with the desired map orientation without changing
-the CBF equations. RuralAustralia ground-referenced goal, waypoint, obstacle,
-and Husky startup heights receive a +2 m NED correction because its terrain is
-approximately 2 m lower than the FlyingCPP reference. UAV flight altitude is
-not shifted. The UAV CBF altitude floor defaults to one metre above the
-calibrated ground (`z=+1` NED on RuralAustralia, versus `z=-1` on FlyingCPP),
-so the drones can descend beneath tree canopies when the safety filter needs
-the additional clearance. Use `--uav-altitude-floor` to override this test
-parameter.
+For `--map rural_australia`, the goal actor determines the route heading and
+the optional `--initial-heading-offset-deg` rotates the startup formation and
+target pattern around that route. The validated target-tracking configuration
+uses `--initial-heading-offset-deg 90 --target-ugv-circumradius 5`; this keeps
+the deterministic figure-eight clear of the observed foliage/vehicle contact
+region. FlyingCPP uses the unoffset route and a 5 m target-centered UGV radius
+by default. These are route/initialization choices, not changes to the CBF
+equations.
+RuralAustralia ground-referenced goal, waypoint, and obstacle geometry receives
+a +2 m NED correction because its terrain is approximately 2 m lower than the
+FlyingCPP reference. UAV flight altitude is not shifted. The UAV CBF altitude
+floor defaults to one metre above the calibrated ground (`z=+1` NED on
+RuralAustralia, versus `z=-1` on FlyingCPP), so the drones can descend beneath
+tree canopies when the safety filter needs the additional clearance. Use
+`--uav-altitude-floor` to override this test parameter.
+
+In managed `visible`/`headless` launches, the three controlled Huskies are
+deliberately not auto-created from `settings.json`. The map's auto-created
+CPHusky bodies can begin falling before the client pauses physics; on
+RuralAustralia that can produce invalid Chaos actors and a later Unreal crash.
+The launcher copies the configured `Lidar1` profile into the temporary
+`DefaultSensors` section and the orchestrator runtime-spawns each Husky while
+paused at `z=-1` NED, above the uneven terrain, before applying the handbrake.
+The source settings file is never modified. Existing-launch mode cannot apply
+this protection, so use a managed launch when reliable UGV startup is needed.
 
 For RuralAustralia, the launch-time override rotates the existing default
 CameraDirector XY position and yaw with the mission, so the original camera
@@ -76,7 +92,15 @@ poses. The older `--no-top-down-camera` flag remains accepted as an explicit dis
 `--launch-mode existing`, configure the CameraDirector before starting Unreal
 because a running world cannot safely receive this override.
 
-Each run writes JSONL records containing configuration, states, formation
+Target tracking uses a 0.10 m/s figure-eight by default and the existing UGV
+CBF control-point lookahead defaults to 0.1 m; both remain command-line tuning
+parameters. It is active only for `--mission-objective track-target`. With
+`--mission-objective fixed-goal`, the target actor is not spawned and the
+tracking cameras, worker, estimator, target CBF proxy, target commands, and
+target collision polling are all disabled; the original goal-directed
+formation controller is used. As a first target-centered CBF baseline, use
+truth observations with `--tracking-measurement-std 0.25` and the default
+target speed; this is a tuning command, not a new controller structure. Each run writes JSONL records containing configuration, states, formation
 errors, nominal/safe commands, barrier values, solver status, robust terms,
 sensor/proxy counts, and fallback events. The AirSim-specific tests are marked
 for explicit execution because they require a running Unreal instance.

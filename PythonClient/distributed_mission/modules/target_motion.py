@@ -42,11 +42,14 @@ class FigureEightTargetController:
     waypoint_radius: float = 1.0
     heading_gain: float = 2.0
     max_yaw_rate: float = 1.5
+    minimum_alignment: float = 0.75
     index: int = 0
+    direction: int = 1
 
     def __post_init__(self) -> None:
         self.center = np.asarray(self.center, dtype=float).reshape(3)
         self.sample_count = max(8, int(self.sample_count))
+        self.direction = 1 if int(self.direction) >= 0 else -1
         self._points = self._build_points()
         # Start on a lateral lobe, avoiding the crossing point at startup.
         self.index = int(round(self.sample_count * 0.125)) % self.sample_count
@@ -71,16 +74,53 @@ class FigureEightTargetController:
         return float(2.0 * np.pi * self.index / self.sample_count)
 
     def reference(self, lookahead: int = 2) -> np.ndarray:
-        return self._points[(self.index + int(lookahead)) % self.sample_count].copy()
+        return self._points[(self.index + self.direction * int(lookahead)) % self.sample_count].copy()
+
+    def place_start_at(self, position: np.ndarray) -> None:
+        """Translate the fixed route so the selected startup sample is exact.
+
+        The controller still starts on its lateral lobe, but callers can
+        choose the world location of that sample.  This is useful when a
+        mission specifies the target's initial location independently of the
+        figure-eight's geometric center; it does not change the route shape,
+        phase progression, or online control law.
+        """
+
+        desired = np.asarray(position, dtype=float).reshape(3)
+        self.center = self.center + (desired - self._points[self.index])
+        self._points = self._build_points()
 
     def update(self, position: np.ndarray, yaw: float, dt: float) -> np.ndarray:
         """Return AirSim model-level ``[speed, yaw_rate]`` for the target."""
 
         position = np.asarray(position, dtype=float).reshape(3)
+        # The target is a physical skid-steer vehicle, so it can overshoot a
+        # sampled path point before the next RPC is processed.  Advancing only
+        # when the vehicle is inside the current point's radius can then leave
+        # the route index permanently behind the vehicle.  First consume the
+        # current point, then allow monotone progress to the nearest point in
+        # a short *forward* section of the fixed route.  This is path progress,
+        # not online waypoint generation or replanning, and avoids selecting
+        # the wrong branch at the figure-eight crossing.
+        starting_index = self.index
         while np.linalg.norm(position[:2] - self._points[self.index, :2]) <= self.waypoint_radius:
-            self.index = (self.index + 1) % self.sample_count
-            if self.index == 0:
+            self.index = (self.index + self.direction) % self.sample_count
+            if self.index == starting_index:
                 break
+        forward_count = max(2, min(self.sample_count - 1, self.sample_count // 8))
+        candidate_indices = [
+            (self.index + self.direction * offset) % self.sample_count
+            for offset in range(1, forward_count + 1)
+        ]
+        current_distance = float(np.linalg.norm(position[:2] - self._points[self.index, :2]))
+        candidate_distances = [
+            float(np.linalg.norm(position[:2] - self._points[candidate, :2]))
+            for candidate in candidate_indices
+        ]
+        if candidate_distances:
+            nearest_offset = int(np.argmin(candidate_distances))
+            if candidate_distances[nearest_offset] + 0.05 < current_distance:
+                self.index = candidate_indices[nearest_offset]
         target = self.reference()
         delta = target[:2] - position[:2]
         distance = float(np.linalg.norm(delta))
@@ -89,7 +129,11 @@ class FigureEightTargetController:
         desired_heading = float(np.arctan2(delta[1], delta[0]))
         error = wrap_angle(desired_heading - float(yaw))
         speed = min(float(self.speed), distance)
-        speed *= max(0.25, np.cos(error))
+        # Keep a turning target moving. The physical CPHusky may start with a
+        # zero yaw even when simAddVehicle receives a nonzero route heading;
+        # the previous 0.25 floor reduced short route commands below the
+        # throttle deadband and left the target stationary.
+        speed *= max(float(self.minimum_alignment), np.cos(error))
         yaw_rate = np.clip(float(self.heading_gain) * error, -float(self.max_yaw_rate), float(self.max_yaw_rate))
         return np.array([speed, yaw_rate], dtype=float)
 
@@ -101,6 +145,7 @@ class FigureEightTargetController:
             "longitudinal_span": float(self.longitudinal_span),
             "lateral_span": float(self.lateral_span),
             "speed": float(self.speed),
+            "direction": int(self.direction),
             "sample_count": int(self.sample_count),
             "phase": float(self.phase),
             "index": int(self.index),
@@ -114,6 +159,11 @@ UAV_TARGET_SLOTS: Mapping[str, np.ndarray] = {
     "Drone4": np.array([-2.0, 2.0, 0.0]),
     "Drone5": np.array([2.0, 2.0, 0.0]),
 }
+
+# The rolling-window velocity estimate briefly changes direction while the
+# figure-eight target turns.  Do not rotate a ground formation on that weak
+# signal; once the estimate is clearly directional, slots follow it.
+TARGET_SLOT_HEADING_SPEED_THRESHOLD = 2.5
 
 
 def target_centered_slot(
@@ -131,7 +181,15 @@ def target_centered_slot(
     target_position = np.asarray(target_position, dtype=float).reshape(3)
     target_velocity = np.asarray(target_velocity, dtype=float).reshape(3)
     planar_speed = float(np.linalg.norm(target_velocity[:2]))
-    heading = float(np.arctan2(target_velocity[1], target_velocity[0])) if planar_speed > 0.2 else float(fallback_heading)
+    # Keep the formation orientation on the route heading while the target's
+    # velocity estimate is small or turning through the figure-eight crossing.
+    # This avoids an abrupt 180-degree slot swap caused by measurement noise;
+    # once motion is clearly directional, slots rotate with the estimate.
+    heading = (
+        float(np.arctan2(target_velocity[1], target_velocity[0]))
+        if planar_speed > TARGET_SLOT_HEADING_SPEED_THRESHOLD
+        else float(fallback_heading)
+    )
     forward, _ = route_basis(heading)
 
     if vehicle_type == "drone":
@@ -157,4 +215,3 @@ def target_centered_slot(
     velocity = target_velocity.copy()
     velocity[2] = 0.0
     return position, velocity, heading
-

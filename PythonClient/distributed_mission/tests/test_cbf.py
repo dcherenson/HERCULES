@@ -1,7 +1,7 @@
 import numpy as np
 
 from modules.cbf import AgentState, CBFConfig, CBFRequest, DistributedCBFModule, ObstacleProxy
-from orchestrator import target_obstacle_proxy_for_agent
+from orchestrator import cbf_sensor_valid_for_target, target_obstacle_proxy_for_agent
 
 
 def test_double_integrator_passes_nominal_when_far_from_neighbor():
@@ -103,8 +103,8 @@ def test_moving_obstacle_velocity_enters_existing_relative_motion_barrier():
         obstacles=[ObstacleProxy("target", np.array([3.0, 0.0, 0.0]), 0.5, velocity=np.array([-2.0, 0.0, 0.0]))],
     ))
     assert static.success
-    assert not closing.success
-    assert closing.fallback
+    assert closing.success
+    assert np.linalg.norm(closing.safe_control) < np.linalg.norm(static.safe_control)
 
 
 def test_target_proxy_is_only_added_to_ugv_cbf_requests():
@@ -127,3 +127,11 @@ def test_target_proxy_is_only_added_to_ugv_cbf_requests():
     assert np.allclose(proxy.center, [3.0, -2.0, -2.0])
     assert np.allclose(proxy.velocity, [0.5, 1.0, 0.0])
     assert proxy.source == "target_tracking"
+
+
+def test_active_ugv_target_proxy_keeps_cbf_enabled_when_static_sensor_is_stale():
+    proxy = ObstacleProxy("target_Target1", np.array([3.0, 0.0, 0.0]), 1.5)
+    assert cbf_sensor_valid_for_target("ugv", False, proxy)
+    assert not cbf_sensor_valid_for_target("drone", False, proxy)
+    assert not cbf_sensor_valid_for_target("ugv", False, None)
+    assert cbf_sensor_valid_for_target("ugv", True, None)

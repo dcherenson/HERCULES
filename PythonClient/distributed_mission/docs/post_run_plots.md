@@ -2,28 +2,30 @@
 
 After every orchestrator run, the completed JSONL diagnostic log is converted
 into two PNG files and two top-down animation files in the same `--debug-dir`
-directory:
+directory. Orchestrator-generated filenames use the shared stem
+`<method>_<map>_<timestamp>` so artifacts from different maps are easy to
+distinguish:
 
-- `<method>_<timestamp>_trajectories_3d.png` shows the logged 3D path of every
+- `<method>_<map>_<timestamp>_trajectories_3d.png` shows the logged 3D path of every
   UAV and UGV. Circles mark starting positions and `X` markers mark final
   positions. The display converts AirSim NED Z to physical altitude (`Z-up =
   -NED-Z`), so vehicles with more negative AirSim Z appear higher. Red `X`
   markers show the vehicle position when Unreal reported a collision.
-- `<method>_<timestamp>_collision_clearance.png` puts every vehicle on one
+- `<method>_<map>_<timestamp>_collision_clearance.png` puts every vehicle on one
   plot. Each line is that vehicle's minimum estimated clearance to another
   vehicle or a perceived obstacle. Clearance is distance minus the relevant
   vehicle and obstacle radii; zero is contact and negative values indicate
   overlap in the logged geometry. The dashed horizontal line marks zero
   clearance. Red `X` markers are authoritative AirSim collision reports.
-- `<method>_<timestamp>_topdown.mp4` and `.gif` are route-up square animations
+- `<method>_<map>_<timestamp>_topdown.mp4` and `.gif` are route-up square animations
   showing colored trajectories, UAV camera footprints, agent-local perceived
   obstacle circles, deterministic truth obstacles, actual same-type dashed
   communication links, and authoritative collision markers. UGV LiDAR FOV
   volumes remain omitted.
-- `<method>_<timestamp>_perception_points.npz` stores bounded, compressed
+- `<method>_<map>_<timestamp>_perception_points.npz` stores bounded, compressed
   sensor-frame and world-frame point samples for each fresh capture.
-- `<method>_<timestamp>_perception_report.{json,md}` and
-  `<method>_<timestamp>_perception_timeline.png` summarize sensor age, mount
+- `<method>_<map>_<timestamp>_perception_report.{json,md}` and
+  `<method>_<map>_<timestamp>_perception_timeline.png` summarize sensor age, mount
   offsets, proxy counts, gated proxy jumps, and coordinate-frame anomalies.
   Per-agent worst-capture overlays are also generated when the NPZ sidecar is
   available.
@@ -46,8 +48,8 @@ older run:
 
 ```bash
 PYTHONPATH=PythonClient/distributed_mission ./herculesvenv/bin/python -c \
-  "from modules.mission_plots import generate_mission_plots; \
-   print(generate_mission_plots('PythonClient/distributed_mission/debug_runs/mestres_<timestamp>.jsonl'))"
+   "from modules.mission_plots import generate_mission_plots; \
+   print(generate_mission_plots('PythonClient/distributed_mission/debug_runs/mestres_<map>_<timestamp>.jsonl'))"
 ```
 
 The plotting module uses a non-interactive Matplotlib backend and saves all
@@ -72,6 +74,6 @@ To analyze a log independently:
 
 ```bash
 PYTHONPATH=PythonClient/distributed_mission ./herculesvenv/bin/python -m \
-  modules.perception_diagnostics PythonClient/distributed_mission/debug_runs/mestres_<timestamp>.jsonl \
-  --sidecar PythonClient/distributed_mission/debug_runs/mestres_<timestamp>_perception_points.npz
+  modules.perception_diagnostics PythonClient/distributed_mission/debug_runs/mestres_<map>_<timestamp>.jsonl \
+  --sidecar PythonClient/distributed_mission/debug_runs/mestres_<map>_<timestamp>_perception_points.npz
 ```
