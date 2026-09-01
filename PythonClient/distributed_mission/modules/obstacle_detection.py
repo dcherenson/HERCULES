@@ -36,6 +36,11 @@ class PerceptionConfig:
     # Some sparse planar patches have a distant centroid but a close visible
     # surface. Rank those patches by their nearest return when requested.
     rank_by_surface_distance: bool = False
+    # A DBSCAN/grid component can be valid noise-free geometry but still be
+    # too small to represent a collision obstacle. Keep this separate from
+    # the clustering core threshold so production tuning can reject tiny
+    # foliage fragments without changing the clustering algorithm itself.
+    min_proxy_points: int = 1
     stale_after: float = 0.25
     depth_stride: int = 2
     max_points: int = 5000
@@ -270,6 +275,7 @@ class ObstacleDetector:
         diagnostics.proxy_labels = np.full(len(points), -1, dtype=int)
         diagnostics.stage_counts["clusters"] = len([label for label in set(labels) if label >= 0])
         diagnostics.stage_counts["noise"] = int(np.sum(labels < 0))
+        small_patch_count = 0
         clusters = [points[labels == label] for label in sorted(set(labels)) if label >= 0]
         cluster_indices = [np.flatnonzero(labels == label) for label in sorted(set(labels)) if label >= 0]
         proxy_entries = []
@@ -277,6 +283,9 @@ class ObstacleDetector:
             for patch_index, patch_indices in enumerate(self._split_cluster_indices(indices, points)):
                 patch = points[patch_indices]
                 if len(patch) == 0:
+                    continue
+                if len(patch) < max(1, int(self.config.min_proxy_points)):
+                    small_patch_count += 1
                     continue
                 center = np.mean(patch, axis=0)
                 # UGV constraints are planar. Vertical LiDAR returns from a
@@ -333,6 +342,7 @@ class ObstacleDetector:
         for proxy_index, (_, _, patch_indices) in enumerate(selected_entries):
             diagnostics.proxy_labels[patch_indices] = proxy_index
         diagnostics.stage_counts["proxies"] = len(proxies)
+        diagnostics.stage_counts["small_patches"] = small_patch_count
         return proxies, diagnostics
 
     def depth_to_world(

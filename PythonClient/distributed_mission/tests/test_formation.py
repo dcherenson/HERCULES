@@ -51,6 +51,18 @@ def test_leader_and_followers_get_distinct_nominal_references():
     assert follower[0] <= controller.config.max_speed
 
 
+def test_nominal_leader_speed_can_be_tuned_separately_from_followers():
+    config = FormationConfig(max_speed=5.0, leader_max_speed=3.0)
+    controller = FormationController(config)
+    leader = AgentState("Husky1", np.zeros(3), vehicle_type="ugv", yaw=0.0)
+    follower = AgentState("Husky2", np.zeros(3), vehicle_type="ugv", yaw=0.0)
+    states = {"Husky1": leader, "Husky2": follower}
+    leader_command = controller.nominal_unicycle_control(leader, states, np.array([100.0, 0.0, 0.0]))
+    follower_command = controller.nominal_unicycle_control(follower, states, np.array([100.0, 0.0, 0.0]))
+    assert leader_command[0] <= 3.0
+    assert follower_command[0] <= 5.0
+
+
 def test_heading_wraps_to_shortest_direction():
     assert np.isclose(wrap_angle(3.0 * np.pi), -np.pi)
 
@@ -70,3 +82,14 @@ def test_uavs_use_fixed_waypoint_center_before_leader_arrives():
     position, velocity, _ = controller.reference_for("SimpleFlight", states)
     assert np.allclose(position, waypoint + controller.config.slots["SimpleFlight"])
     assert np.allclose(velocity, np.zeros(3))
+
+
+def test_formation_metrics_report_xy_error_separately_from_altitude():
+    controller = FormationController()
+    states = {
+        "Husky1": AgentState("Husky1", np.zeros(3), vehicle_type="ugv"),
+        "Drone1": AgentState("Drone1", np.array([-2.0, -1.0, -20.0]), vehicle_type="drone"),
+    }
+    metrics = controller.metrics(states)
+    assert np.isclose(metrics["formation_xy_max_error"], 1.0)
+    assert metrics["formation_max_error"] > metrics["formation_xy_max_error"]

@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -30,12 +30,21 @@ from modules.obstacle_detection import (
 )
 from modules.obstacle_course import course_from_tuples, load_course
 from modules.perception_diagnostics import PerceptionTraceStore
+from modules.video_recording import (
+    AirSimFrameRecorder,
+    FollowCameraController,
+    analyze_camera_alignment,
+    render_recordings,
+)
+from modules.mission_plots import load_mission_records
 from simulation.airsim_runtime import AsyncJsonlWriter, AirSimFacade, AirSimLaunchConfig, AirSimLauncher
 
 
 CONTROL_DT = 0.1
 SIMULATION_STEPS = 100
 COMMUNICATION_RANGE_METERS = 30.0
+# The CPHusky adapter receives the normalized unicycle yaw-rate command.
+UGV_STEERING_SCALE = 1.0
 
 # A short staggered through-gap course: the first central opening is near
 # y=0 and the second is shifted to y=1, so the team must turn instead of
@@ -358,11 +367,11 @@ def camera_director_for_map(
 
 
 def effective_obstacle_margin(map_name: str, requested: Optional[float]) -> float:
-    """Select the existing CBF margin, with a calibrated Rural default."""
+    """Select the existing CBF margin, with no extra map-specific default."""
 
     if requested is not None:
         return float(requested)
-    return 1.0 if map_name == "rural_australia" else 0.0
+    return 0.0
 
 
 def map_ground_z_offset(map_name: str) -> float:
@@ -569,34 +578,16 @@ def _camera_pose(
     )
 
 
-def _vehicle_tilt(facade: AirSimFacade, name: str) -> float:
-    """Return the absolute roll/pitch tilt of a vehicle actor in radians."""
+def _camera_pose_quaternion(airsim: Any, position: np.ndarray, quaternion: Sequence[float]) -> Any:
+    """Build an AirSim pose from a world-NED position and [w,x,y,z]."""
 
-    try:
-        pose = facade.multirotor.simGetObjectPose(name, True)
-        orientation = getattr(pose, "orientation", None)
-        if orientation is None or not hasattr(facade.airsim, "quaternion_to_euler_angles"):
-            return 0.0
-        roll, pitch, _ = facade.airsim.quaternion_to_euler_angles(orientation)
-        return float(max(abs(roll), abs(pitch)))
-    except Exception:
-        return 0.0
+    values = np.asarray(quaternion, dtype=float).reshape(4)
+    return airsim.Pose(
+        airsim.Vector3r(*np.asarray(position, dtype=float).tolist()),
+        airsim.Quaternionr(float(values[1]), float(values[2]), float(values[3]), float(values[0])),
+    )
 
 
-def _vehicle_is_inverted(facade: AirSimFacade, name: str) -> bool:
-    """Detect an actually inverted vehicle, rather than a normal road slope."""
-
-    try:
-        pose = facade.multirotor.simGetObjectPose(name, True)
-        orientation = getattr(pose, "orientation", None)
-        if orientation is None:
-            return False
-        # For an upright vehicle, the local vertical axis still points in the
-        # positive NED-Z direction. A negative value means the body has rolled
-        # or pitched past 90 degrees and is genuinely upside down.
-        return bool(_quaternion_matrix(orientation)[2, 2] < 0.0)
-    except Exception:
-        return False
 def _plot_route_markers(facade: AirSimFacade, waypoints: List[np.ndarray]) -> None:
     """Draw fixed mission route markers in Unreal when AirSim supports it."""
 
@@ -737,6 +728,15 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     )
     parser.add_argument("--animation-fps", type=float, default=None, help="post-run MP4 frame rate; defaults to 1/dt")
     parser.add_argument("--no-animation", action="store_true")
+    parser.add_argument("--record-video", action="store_true", help="record chase and selected UAV/UGV camera videos")
+    parser.add_argument("--record-uav", default="Drone1", help="UAV name used for chase and FPV recording")
+    parser.add_argument("--record-ugv", default="Husky1", help="UGV name used for FPV recording")
+    parser.add_argument("--video-resolution", nargs=2, type=int, default=[1280, 720], metavar=("WIDTH", "HEIGHT"))
+    parser.add_argument("--video-fps", type=float, default=20.0)
+    parser.add_argument("--gif-height", type=int, default=540)
+    parser.add_argument("--gif-fps", type=float, default=10.0)
+    parser.add_argument("--playback-speed", type=float, default=2.0, help="post-run media playback speed relative to mission time")
+    parser.add_argument("--keep-recording-frames", action="store_true")
     parser.add_argument("--sensor-rate", type=float, default=2.5, help="per-agent obstacle perception rate")
     parser.add_argument("--sensor-stale-after", type=float, default=None, help="maximum cached sensor age; defaults to one sensor period plus 50 ms")
     parser.add_argument("--top-n-obstacles", type=int, default=5)
@@ -745,13 +745,22 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--ugv-radius", type=float, default=1.25)
     parser.add_argument(
         "--obstacle-margin", type=float, default=None,
-        help="additional CBF obstacle clearance margin; defaults to 1.0 m on RuralAustralia and 0 m elsewhere",
+        help="additional CBF obstacle clearance margin; defaults to 0 m",
     )
-    parser.add_argument("--uav-velocity-limit", type=float, default=2.0)
-    parser.add_argument("--ugv-speed-limit", type=float, default=2.0)
-    parser.add_argument("--uav-acceleration-limit", type=float, default=4.0)
-    parser.add_argument("--ugv-acceleration-limit", type=float, default=2.0)
-    parser.add_argument("--nominal-speed", type=float, default=2.0, help="existing formation nominal speed limit")
+    parser.add_argument("--uav-velocity-limit", type=float, default=3.0)
+    parser.add_argument("--ugv-speed-limit", type=float, default=3.0)
+    parser.add_argument("--uav-acceleration-limit", type=float, default=6.0)
+    parser.add_argument("--ugv-acceleration-limit", type=float, default=3.0)
+    parser.add_argument("--nominal-speed", type=float, default=3.0, help="existing formation nominal speed limit")
+    parser.add_argument(
+        "--leader-nominal-speed", type=float, default=3.0,
+        help="nominal leader speed limit; followers retain --nominal-speed for catch-up",
+    )
+    parser.add_argument("--nominal-position-gain", type=float, default=1.0)
+    parser.add_argument("--nominal-velocity-gain", type=float, default=3.0)
+    parser.add_argument("--ugv-heading-gain", type=float, default=2.0)
+    parser.add_argument("--ugv-max-yaw-rate", type=float, default=1.5)
+    parser.add_argument("--ugv-lookahead-distance", type=float, default=0.5)
     parser.add_argument("--k1", type=float, default=2.0)
     parser.add_argument("--k2", type=float, default=2.0)
     parser.add_argument("--alpha", type=float, default=2.0)
@@ -785,6 +794,30 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
 
 def main(argv: List[str] = None) -> int:
     args = parse_args(argv)
+    if args.record_video and args.launch_mode == "existing":
+        print("Error: --record-video requires --launch-mode visible or headless so recording cameras can be configured before launch.", file=sys.stderr)
+        return 2
+    names = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5", "Husky1", "Husky2", "Husky3"]
+    types = {name: "drone" for name in names[:5]}
+    types.update({name: "ugv" for name in names[5:]})
+    if args.record_video:
+        if args.record_uav not in names or types[args.record_uav] != "drone":
+            print("Error: --record-uav must name a configured UAV", file=sys.stderr)
+            return 2
+        if args.record_ugv not in names or types[args.record_ugv] != "ugv":
+            print("Error: --record-ugv must name a configured UGV", file=sys.stderr)
+            return 2
+        if args.video_resolution[0] <= 0 or args.video_resolution[1] <= 0 or args.video_fps <= 0 or args.gif_height <= 0 or args.gif_fps <= 0 or args.playback_speed <= 0:
+            print("Error: video dimensions and rates must be positive", file=sys.stderr)
+            return 2
+    if (
+        args.nominal_speed <= 0.0 or args.nominal_position_gain <= 0.0
+        or args.nominal_velocity_gain <= 0.0 or args.ugv_heading_gain < 0.0
+        or args.ugv_max_yaw_rate <= 0.0 or args.ugv_lookahead_distance <= 0.0
+        or args.leader_nominal_speed <= 0.0
+    ):
+        print("Error: nominal gains, yaw rate, speed, and formation scale must be positive", file=sys.stderr)
+        return 2
     top_down_camera = args.top_down_camera and not args.no_top_down_camera
     try:
         course = load_course(args.obstacle_course) if args.obstacle_course else course_from_tuples(BLOCK_COURSE)
@@ -804,13 +837,10 @@ def main(argv: List[str] = None) -> int:
     if args.map_name == "rural_australia":
         course = rotate_course_left(course)
     course = shift_course_z(course, ground_z_offset)
-    # RuralAustralia's foliage returns represent a visible surface, while
-    # the collision body can extend beyond that sparse surface. Use the
-    # existing CBF obstacle-margin parameter as a map calibration only; the
-    # explicit command-line value always wins, including --obstacle-margin 0.
+    # Keep the existing CBF obstacle-margin parameter explicit. The default
+    # remains zero until a map-specific collision calibration is available;
+    # the command line can still tune it without changing the CBF equations.
     obstacle_margin = effective_obstacle_margin(args.map_name, args.obstacle_margin)
-    if args.map_name == "rural_australia" and args.obstacle_margin is None:
-        print("RuralAustralia perception calibration: using 1.0 m obstacle margin", flush=True)
     camera_position = None
     camera_yaw = 0.0
     if top_down_camera:
@@ -818,6 +848,9 @@ def main(argv: List[str] = None) -> int:
             args.map_name, args.camera_x, args.camera_y, args.camera_height
         )
     os.makedirs(args.debug_dir, exist_ok=True)
+    run_stamp = int(time.time())
+    log_path = os.path.join(args.debug_dir, "{}_{}.jsonl".format(args.cbf_method, run_stamp))
+    recording_folder = os.path.join(args.debug_dir, "{}_recording_frames".format(os.path.splitext(os.path.basename(log_path))[0]))
     launch_config = AirSimLaunchConfig(
         launch_mode=args.launch_mode,
         map_name=args.map_name,
@@ -831,21 +864,29 @@ def main(argv: List[str] = None) -> int:
         camera_director_position=camera_position,
         camera_director_yaw=camera_yaw,
         rotate_camera_director=args.map_name == "rural_australia",
+        record_video=args.record_video,
+        record_uav=args.record_uav if args.record_video else None,
+        record_ugv=args.record_ugv if args.record_video else None,
+        video_resolution=tuple(args.video_resolution),
+        video_fps=args.video_fps,
+        recording_folder=recording_folder if args.record_video else None,
     )
     launcher = AirSimLauncher(launch_config)
     facade = AirSimFacade(launch_config)
     blocks: List[str] = []
     true_obstacles: List[Dict[str, Any]] = []
-    names = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5", "Husky1", "Husky2", "Husky3"]
-    types = {name: "drone" for name in names[:5]}
-    types.update({name: "ugv" for name in names[5:]})
-    # The through-gap experiment intentionally has no bypass waypoint. The
-    # nominal controller follows the leader and formation offsets; CBF
-    # constraints provide the small deformation needed at the central gap.
+    # The direct goal route remains the default. Course waypoints are retained
+    # for explicit future route experiments; they are not inserted as an
+    # online recovery heuristic here.
     intermediate_waypoint = None
     formation = FormationController(FormationConfig(
         uav_altitude=args.uav_altitude,
         max_speed=args.nominal_speed,
+        leader_max_speed=args.leader_nominal_speed,
+        position_gain=args.nominal_position_gain,
+        velocity_gain=args.nominal_velocity_gain,
+        ugv_heading_gain=args.ugv_heading_gain,
+        ugv_max_yaw_rate=args.ugv_max_yaw_rate,
         intermediate_waypoint=intermediate_waypoint,
         waypoint_radius=3.0,
     ))
@@ -875,7 +916,9 @@ def main(argv: List[str] = None) -> int:
     # The physical Husky cannot rotate in place. A shorter existing unicycle
     # lookahead keeps the safety control point from entering a surface-based
     # LiDAR proxy before the car has completed its turn.
-    ugv_cbf_config = replace(cbf_config, method="mestres", lookahead_distance=0.5)
+    ugv_cbf_config = replace(
+        cbf_config, method="mestres", lookahead_distance=args.ugv_lookahead_distance
+    )
     agents = {
         name: Agent(name, types[name], ugv_cbf_config if types[name] == "ugv" else cbf_config)
         for name in names
@@ -885,7 +928,13 @@ def main(argv: List[str] = None) -> int:
     # the surface. LiDAR already observes the planar footprint directly and
     # keeps the tighter fit used for UGVs.
     detectors = {
-        "drone": ObstacleDetector(PerceptionConfig(top_n=args.top_n_obstacles, fit_padding=0.75)),
+        "drone": ObstacleDetector(PerceptionConfig(
+            top_n=args.top_n_obstacles,
+            cluster_min_samples=20 if args.map_name == "rural_australia" else 8,
+            min_proxy_points=32 if args.map_name == "rural_australia" else 1,
+            fit_padding=0.25 if args.map_name == "rural_australia" else 0.75,
+            max_proxy_radius=1.0 if args.map_name == "rural_australia" else 2.0,
+        )),
         "ugv": ObstacleDetector(PerceptionConfig(
             top_n=args.top_n_obstacles,
             planar_surface_offset=0.0 if args.map_name == "rural_australia" else 0.75,
@@ -895,6 +944,8 @@ def main(argv: List[str] = None) -> int:
             # form local obstacle patches on the RuralAustralia map.
             cluster_eps=0.85 if args.map_name == "rural_australia" else 0.65,
             cluster_min_samples=3 if args.map_name == "rural_australia" else 8,
+            min_proxy_points=32 if args.map_name == "rural_australia" else 1,
+            max_proxy_radius=1.0 if args.map_name == "rural_australia" else 2.0,
             fit_padding=0.35 if args.map_name == "rural_australia" else 0.0,
             ground_band=0.15 if args.map_name == "rural_australia" else 0.25,
             planar_use_nearest_surface=args.map_name == "rural_australia",
@@ -905,7 +956,6 @@ def main(argv: List[str] = None) -> int:
     goal_actor_name: Optional[str] = None
     route_markers = [np.asarray(point, dtype=float) for point in course.get("waypoints", [])]
     route_markers.extend([goal])
-    log_path = os.path.join(args.debug_dir, "{}_{}.jsonl".format(args.cbf_method, int(time.time())))
     writer = AsyncJsonlWriter(log_path)
     perception_trace = PerceptionTraceStore()
     perception_sidecar_path = os.path.join(args.debug_dir, "{}_perception_points.npz".format(os.path.splitext(os.path.basename(log_path))[0]))
@@ -913,6 +963,10 @@ def main(argv: List[str] = None) -> int:
     camera_fovs: Dict[str, float] = {}
     active_collisions = set()
     setup_paused = False
+    recording_started = False
+    frame_recorder = None
+    follow_camera = None
+    recording_camera_base = None
 
     try:
         launcher.launch()
@@ -1057,45 +1111,10 @@ def main(argv: List[str] = None) -> int:
 
         _plot_route_markers(facade, route_markers)
 
-        # Let only the UGV physics settle, then validate their world position
-        # and tilt before the UAV takeoff sequence starts. A bad initial
-        # orientation is corrected while setup is still paused, so a flipped
-        # Husky cannot contaminate the mission or the formation check.
+        # Unreal may remain paused after vehicle/object setup. Release the
+        # world for the UAV takeoff sequence; UGV controls are already held by
+        # their startup handbrakes and will be posed again below.
         facade.pause(False)
-        setup_paused = False
-        time.sleep(0.35)
-        for attempt in range(3):
-            settled_states = {name: facade.state(name) for name in names[5:]}
-            ugv_xy_error = max(
-                float(np.linalg.norm(settled_states[name]["position"][:2] - initial_positions[name][:2]))
-                for name in names[5:]
-            )
-            ugv_tilt = max(_vehicle_tilt(facade, name) for name in names[5:])
-            ugv_inverted = any(_vehicle_is_inverted(facade, name) for name in names[5:])
-            # RuralAustralia's road is not perfectly level. Do not treat a
-            # steep but still upright road pose as a failure; only correct a
-            # clearly inverted Husky or a gross position error.
-            if ugv_xy_error <= 1.0 and not ugv_inverted:
-                break
-            print(
-                "Warning: UGV startup pose error {:.3f} m, tilt {:.1f} deg{}; "
-                "reapplying stable poses (attempt {})".format(
-                    ugv_xy_error, np.degrees(ugv_tilt), " (inverted)" if ugv_inverted else "", attempt + 1
-                ),
-                flush=True,
-            )
-            facade.pause(True)
-            setup_paused = True
-            for name in names:
-                facade.set_vehicle_pose(
-                    name,
-                    _pose(facade.airsim, startup_pose_position(name, initial_positions, newly_spawned, vehicle_origins), initial_yaw),
-                )
-                if types[name] == "ugv":
-                    facade.stop_ugv(name)
-            facade.pause(False)
-            setup_paused = False
-            time.sleep(0.35)
 
         takeoff_futures = [facade.multirotor.takeoffAsync(vehicle_name=name) for name in names[:5]]
         for future in takeoff_futures:
@@ -1123,6 +1142,24 @@ def main(argv: List[str] = None) -> int:
             future.join()
         for name in names[:5]:
             facade.multirotor.hoverAsync(vehicle_name=name).join()
+
+        # Apply the UGV poses only after UAV takeoff.  Letting a settings-
+        # created Husky fall on RuralAustralia before the UAV startup is
+        # complete is nondeterministic: a wheel can catch the terrain and
+        # rotate the body upside down.  The final pose is applied while the
+        # world is paused, with the handbrake engaged, immediately before the
+        # mission clock starts.
+        facade.pause(True)
+        setup_paused = True
+        for name in names[5:]:
+            facade.set_vehicle_pose(
+                name,
+                _pose(facade.airsim, startup_pose_position(name, initial_positions, newly_spawned, vehicle_origins), initial_yaw),
+            )
+            facade.stop_ugv(name)
+        facade.pause(False)
+        setup_paused = False
+        time.sleep(0.05)
 
         # A failed registration must not be allowed to become a multi-agent
         # CBF failure: all drones at one origin would make the initial pair
@@ -1216,12 +1253,13 @@ def main(argv: List[str] = None) -> int:
                 detector.config.stale_after = args.sensor_stale_after
             else:
                 # Each agent is captured by a team-wide round-robin scheduler;
-                # allow one delayed cycle while the age margin expands the
-                # cached proxy. This avoids dropping all local obstacles for a
-                # brief RPC/sensor delay, while a much older observation is
-                # still rejected by the existing stale-sensor fail-safe.
+                # allow two delayed cycles while the bounded age margin
+                # expands the cached proxy. This avoids dropping all local
+                # obstacles for a brief RPC/sensor delay, while a much older
+                # observation is still rejected by the existing stale-sensor
+                # fail-safe.
                 detector.config.stale_after = max(
-                    detector.config.stale_after, 2.0 * sensor_period + args.dt
+                    detector.config.stale_after, 3.0 * sensor_period + args.dt
                 )
         # Warm all sensors before starting the real-time deadline clock. The
         # first depth frame is intentionally expensive and must not become a
@@ -1244,7 +1282,94 @@ def main(argv: List[str] = None) -> int:
                     latest_sensor_views[name] = sensor_view
                     last_perception[name] = float(sensor_view.get("capture_timestamp", time.time()))
 
+        if args.record_video:
+            follow_camera = FollowCameraController(initial_yaw, aspect=float(args.video_resolution[0]) / float(args.video_resolution[1]))
+
+            def update_recording_camera(
+                position_map: Dict[str, np.ndarray],
+            ) -> Dict[str, Any]:
+                nonlocal recording_camera_base
+                chase_camera = follow_camera.update([position_map[name] for name in names], args.dt)
+                world_position = np.asarray(chase_camera["world_position"], dtype=float)
+                world_orientation = chase_camera["orientation_quaternion"]
+                measured = {}
+                if recording_camera_base is None:
+                    try:
+                        # simGetCameraInfo() routes through
+                        # PIPCamera::getCameraInfo(), which is unsafe for an
+                        # External camera in this AirSim fork. The image API
+                        # returns the pose without that crashing path.
+                        response = facade.multirotor.simGetImages([
+                            facade.airsim.ImageRequest(
+                                "mission_follow", facade.airsim.ImageType.Scene, False, True
+                            )
+                        ], vehicle_name=args.record_uav)
+                        response_position = getattr(response[0], "camera_position", None) if response else None
+                        if response_position is not None:
+                            recording_camera_base = _vector3(response_position)
+                    except Exception:
+                        recording_camera_base = np.zeros(3)
+                command_position = world_position - (
+                    recording_camera_base if recording_camera_base is not None else np.zeros(3)
+                )
+                try:
+                    # mission_follow is an External camera and is therefore
+                    # controlled in Unreal-world NED, not Drone1-local NED.
+                    facade.set_recording_camera_pose(
+                        "mission_follow",
+                        _camera_pose_quaternion(facade.airsim, command_position, world_orientation),
+                        args.record_uav,
+                    )
+                    # Keep the visible map camera synchronized with the
+                    # recorded chase stream when running with a viewport.
+                    facade.set_external_camera_pose(
+                        _camera_pose_quaternion(facade.airsim, world_position, world_orientation)
+                    )
+                except Exception as error:
+                    print("Warning: chase camera update failed: {}".format(error), flush=True)
+                return {
+                    "chase_camera": dict(
+                        chase_camera,
+                        control_frame="unreal_world_ned",
+                        command_world_position=command_position.tolist(),
+                        camera_base_offset=recording_camera_base.tolist()
+                        if recording_camera_base is not None else None,
+                        measured=measured,
+                        capture_camera="mission_follow",
+                        vehicle_name=args.record_uav,
+                    )
+                }
+
+            try:
+                # Position the additional camera before starting capture so
+                # its first frame is already a chase frame.  The dedicated
+                # worker uses AirSim SceneCapture requests because this fork's
+                # native recorder can report active without writing PNGs.
+                update_recording_camera(initial_positions)
+                frame_recorder = AirSimFrameRecorder(
+                    facade.airsim,
+                    args.multirotor_port,
+                    [
+                        (args.record_uav, "mission_follow"),
+                        (args.record_uav, "front_center"),
+                        (args.record_ugv, "front_center"),
+                    ],
+                    recording_folder,
+                    args.video_fps,
+                )
+                frame_recorder.start()
+                recording_started = True
+                print(
+                    "Mission recording started: chase {}, UAV FPV {}, UGV FPV {}".format(
+                        args.record_uav, args.record_uav, args.record_ugv
+                    ),
+                    flush=True,
+                )
+            except Exception as error:
+                print("Warning: unable to start AirSim frame capture: {}".format(error), flush=True)
+
         next_deadline = time.monotonic()
+        formation_convergence_time = None
         for step in range(args.steps):
                 cycle_start = time.monotonic()
                 phase_start = cycle_start
@@ -1258,6 +1383,13 @@ def main(argv: List[str] = None) -> int:
                 }
                 positions = {name: value.position for name, value in states.items()}
                 adjacency = build_adjacency_matrix(positions, args.communication_range)
+                communication_links = sorted(
+                    [sorted((name, neighbor)) for name in names for neighbor in adjacency[name]
+                     if types[neighbor] == types[name] and name < neighbor]
+                )
+                recording_data = {}
+                if args.record_video and follow_camera is not None and recording_started:
+                    recording_data = update_recording_camera(positions)
                 sensor_data = {
                     name: dict(raw_states[name], obstacle_points=None)
                     for name in names
@@ -1282,6 +1414,25 @@ def main(argv: List[str] = None) -> int:
                     )
                     for name in names
                 }
+                formation_metrics = formation.metrics(estimated_states)
+                leader_goal_xy_distance = float(np.linalg.norm(
+                    estimated_states[formation.config.leader_id].position[:2] - goal[:2]
+                ))
+                formation_converged_2m_xy = bool(
+                    leader_goal_xy_distance <= 2.0
+                    and formation_metrics.get("formation_xy_max_error", float("inf")) <= 2.0
+                )
+                if formation_converged_2m_xy and formation_convergence_time is None:
+                    formation_convergence_time = float(step * args.dt)
+                    print(
+                        "Formation converged in XY at mission t={:.2f} s "
+                        "(leader-goal {:.2f} m, max slot error {:.2f} m)".format(
+                            formation_convergence_time,
+                            leader_goal_xy_distance,
+                            formation_metrics["formation_xy_max_error"],
+                        ),
+                        flush=True,
+                    )
 
                 for name, agent in agents.items():
                     if types[name] == "ugv":
@@ -1324,7 +1475,17 @@ def main(argv: List[str] = None) -> int:
                     if sensor_valid:
                         speed_limit = cbf_config.uav_velocity_limit if types[name] == "drone" else cbf_config.ugv_speed_limit
                         acceleration_limit = cbf_config.uav_acceleration_limit if types[name] == "drone" else cbf_config.ugv_acceleration_limit
-                        age_margin = speed_limit * age + 0.5 * acceleration_limit * age * age
+                        # The detector already bounds each geometric proxy.
+                        # Do not let delayed RPC timing inflate that bounded
+                        # local surface into a map-sized wall. The raw age is
+                        # retained in JSONL for diagnosis; only the applied
+                        # CBF proxy radius is capped here.
+                        uncapped_age_margin = speed_limit * age + 0.5 * acceleration_limit * age * age
+                        age_margin = min(
+                            uncapped_age_margin,
+                            (0.25 if args.map_name == "rural_australia" else 0.5)
+                            * float(detectors[types[name]].config.max_proxy_radius),
+                        )
                     obstacles = [ObstacleProxy(
                         item.obstacle_id, item.center, item.radius + age_margin, item.source,
                         item.timestamp, item.point_count, item.is_planar
@@ -1347,13 +1508,28 @@ def main(argv: List[str] = None) -> int:
                         facade.command_uav(name, velocity, args.dt)
                     elif types[name] == "ugv":
                         turn_speed = float(command[0])
+                        turn_rate = float(command[1])
                         # A physical AirSim car cannot realize the ideal
                         # unicycle command [0, yaw_rate] by rotating in place.
                         # Preserve the CBF output while using a small crawl
                         # speed only when it requests a turn at zero speed.
-                        if turn_speed < 0.05 and abs(float(command[1])) > 0.05:
+                        ugv_brake = 0.0
+                        if turn_speed < 0.05 and abs(turn_rate) > 0.05:
                             turn_speed = min(0.3, cbf_config.ugv_speed_limit)
-                        facade.command_ugv(name, turn_speed, command[1] / cbf_config.ugv_yaw_rate_limit, args.dt)
+                        elif turn_speed < 0.05:
+                            # Zero throttle alone lets the physical Husky
+                            # coast through a settled goal/formation slot.
+                            # Braking here is only the simulator actuation
+                            # conversion; the nominal and CBF commands are
+                            # unchanged.
+                            ugv_brake = 1.0
+                        facade.command_ugv(
+                            name,
+                            turn_speed,
+                            UGV_STEERING_SCALE * turn_rate / cbf_config.ugv_yaw_rate_limit,
+                            args.dt,
+                            brake=ugv_brake,
+                        )
                     else:
                         desired_velocity = states[name].velocity[:2] + args.dt * command[:2]
                         speed = float(np.linalg.norm(desired_velocity))
@@ -1382,6 +1558,8 @@ def main(argv: List[str] = None) -> int:
                         throttle = command_magnitude / acceleration_limit if turn_dominated else max(0.0, longitudinal_acceleration / acceleration_limit)
                         needs_braking = longitudinal_acceleration < -0.05 and not turn_dominated
                         brake = min(1.0, max(0.0, -longitudinal_acceleration / acceleration_limit))
+                        if command_magnitude < 0.05:
+                            brake = 1.0
                         facade.command_ugv(
                             name,
                             command_speed,
@@ -1439,7 +1617,12 @@ def main(argv: List[str] = None) -> int:
                     "route_markers": [point.tolist() for point in route_markers],
                     "vehicle_types": types,
                     "vehicle_radii": vehicle_radii,
-                    "formation": formation.metrics(estimated_states),
+                    "formation": dict(
+                        formation_metrics,
+                        leader_goal_xy_distance=leader_goal_xy_distance,
+                        converged_2m_xy=formation_converged_2m_xy,
+                        convergence_time=formation_convergence_time,
+                    ),
                     "states": {
                         name: {
                             "position": states[name].position.tolist(),
@@ -1458,6 +1641,8 @@ def main(argv: List[str] = None) -> int:
                     "obstacles": obstacle_records,
                     "true_obstacles": true_obstacles,
                     "collisions": collision_records,
+                    "communication_links": communication_links,
+                    "recording": recording_data,
                     "cbf": {name: agents[name].last_cbf_result.__dict__ if agents[name].last_cbf_result else {} for name in names},
                     "timing": {"cycle_ms": cycle_ms, "deadline_miss": deadline_miss, "timing_mode": args.timing_mode, "phase_ms": phase_ms},
                 }
@@ -1474,6 +1659,18 @@ def main(argv: List[str] = None) -> int:
             if setup_paused:
                 facade.pause(False)
                 setup_paused = False
+            if recording_started:
+                try:
+                    recording_stats = frame_recorder.stop() if frame_recorder is not None else {}
+                    recording_started = False
+                    print(
+                        "Mission recording stopped ({} captures, {} capture errors)".format(
+                            recording_stats.get("captures", 0), recording_stats.get("errors", 0)
+                        ),
+                        flush=True,
+                    )
+                except Exception as error:
+                    print("Warning: unable to stop AirSim frame capture: {}".format(error), flush=True)
             facade.close([(name, types[name]) for name in names])
             for block in blocks:
                 try:
@@ -1503,7 +1700,30 @@ def main(argv: List[str] = None) -> int:
             vehicle_radii,
             animation_fps=args.animation_fps,
             include_animation=not args.no_animation,
+            playback_speed=args.playback_speed,
         )
+        if args.record_video:
+            plot_paths.extend(analyze_camera_alignment(
+                load_mission_records(log_path), recording_folder, args.debug_dir,
+                os.path.splitext(os.path.basename(log_path))[0], vehicle=args.record_uav,
+            ))
+            plot_paths.extend(render_recordings(
+                recording_folder,
+                args.debug_dir,
+                os.path.splitext(os.path.basename(log_path))[0],
+                load_mission_records(log_path),
+                args.record_uav,
+                args.record_ugv,
+                width=args.video_resolution[0],
+                height=args.video_resolution[1],
+                fps=args.video_fps,
+                gif_height=args.gif_height,
+                gif_fps=args.gif_fps,
+                keep_frames=args.keep_recording_frames,
+                capture_stats=(frame_recorder.capture_count, frame_recorder.error_count)
+                if frame_recorder is not None else None,
+                playback_speed=args.playback_speed,
+            ))
         from modules.perception_diagnostics import generate_perception_diagnostics
 
         plot_paths.extend(generate_perception_diagnostics(log_path, perception_sidecar_path, args.debug_dir))

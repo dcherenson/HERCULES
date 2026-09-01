@@ -58,11 +58,11 @@ class CBFConfig:
     uav_radius: float = 1.0
     ugv_radius: float = 1.25
     obstacle_margin: float = 0.0
-    uav_acceleration_limit: float = 4.0
-    ugv_acceleration_limit: float = 2.0
-    uav_velocity_limit: float = 2.0
-    ugv_speed_limit: float = 2.0
-    ugv_yaw_rate_limit: float = 1.0
+    uav_acceleration_limit: float = 6.0
+    ugv_acceleration_limit: float = 3.0
+    uav_velocity_limit: float = 3.0
+    ugv_speed_limit: float = 3.0
+    ugv_yaw_rate_limit: float = 1.5
     lookahead_distance: float = 1.0
     # Maximum permitted NED Z for UAVs. The mission supplies a map-specific
     # value corresponding to one metre above the calibrated ground reference.

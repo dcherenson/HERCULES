@@ -17,6 +17,24 @@ def test_detector_returns_nearest_five_clusters():
     assert clearances == sorted(clearances)
 
 
+def test_detector_rejects_under_supported_patches_without_changing_cluster_count():
+    points = np.vstack([
+        np.asarray([[2.0, 0.0, -5.0], [2.05, 0.0, -5.0], [2.0, 0.05, -5.0]]),
+        np.asarray([[5.0, 0.0, -5.0], [5.05, 0.0, -5.0], [5.0, 0.05, -5.0],
+                    [5.05, 0.05, -5.0], [5.02, 0.02, -5.0]]),
+    ])
+    detector = ObstacleDetector(PerceptionConfig(
+        top_n=5, cluster_eps=0.2, cluster_min_samples=1,
+        min_proxy_points=4, voxel_size=0.01, ground_band=0.01,
+    ))
+    proxies, diagnostics = detector.detect_with_diagnostics(
+        points, np.zeros(3), source="supported", ground_z=None,
+    )
+    assert len(proxies) == 1
+    assert proxies[0].point_count >= 4
+    assert diagnostics.stage_counts["small_patches"] == 1
+
+
 def test_proxy_radius_respects_the_configured_safety_bound():
     points = np.vstack([
         np.array([5.0, 0.0, -5.0]) + np.random.default_rng(2).normal(0.0, 2.0, (40, 3)),

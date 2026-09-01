@@ -17,13 +17,17 @@ def wrap_angle(angle: float) -> float:
 @dataclass
 class FormationConfig:
     leader_id: str = "Husky1"
-    position_gain: float = 0.6
-    velocity_gain: float = 2.0
-    max_speed: float = 2.0
-    uav_max_acceleration: float = 4.0
-    ugv_max_acceleration: float = 2.0
-    ugv_max_yaw_rate: float = 1.0
-    ugv_heading_gain: float = 1.5
+    position_gain: float = 1.0
+    velocity_gain: float = 3.0
+    max_speed: float = 3.0
+    # Keep the leader's route-following speed independently tunable from the
+    # follower catch-up speed.  This avoids making the leader more aggressive
+    # merely to recover formation after startup settling.
+    leader_max_speed: Optional[float] = None
+    uav_max_acceleration: float = 6.0
+    ugv_max_acceleration: float = 3.0
+    ugv_max_yaw_rate: float = 1.5
+    ugv_heading_gain: float = 2.0
     uav_altitude: float = -5.0
     # Optional course-level waypoint. This is deliberately a single static
     # waypoint; no online waypoint generation is performed by formation
@@ -112,8 +116,9 @@ class FormationController:
         position_error = target_position - agent.position
         desired_velocity = target_velocity + self.config.position_gain * position_error
         speed = float(np.linalg.norm(desired_velocity))
-        if speed > self.config.max_speed:
-            desired_velocity = desired_velocity * (self.config.max_speed / speed)
+        speed_limit = self._speed_limit(agent.agent_id)
+        if speed > speed_limit:
+            desired_velocity = desired_velocity * (speed_limit / speed)
 
         return self.config.velocity_gain * (desired_velocity - agent.velocity)
 
@@ -134,7 +139,7 @@ class FormationController:
             return np.zeros(2, dtype=float)
         desired_heading = float(np.arctan2(delta[1], delta[0])) if distance > 1e-9 else agent.yaw
         heading_error = wrap_angle(desired_heading - agent.yaw)
-        speed = min(self.config.max_speed, self.config.position_gain * distance)
+        speed = min(self._speed_limit(agent.agent_id), self.config.position_gain * distance)
         # Keep a small forward command while turning. AirSim's car cannot
         # rotate in place, so an exact zero here creates a deadlock after the
         # fixed course waypoint when the goal is behind the current heading.
@@ -145,6 +150,13 @@ class FormationController:
         speed *= alignment
         yaw_rate = np.clip(self.config.ugv_heading_gain * heading_error, -self.config.ugv_max_yaw_rate, self.config.ugv_max_yaw_rate)
         return np.array([speed, yaw_rate], dtype=float)
+
+    def _speed_limit(self, agent_id: str) -> float:
+        """Return the configured nominal speed limit for one agent."""
+
+        if agent_id == self.config.leader_id and self.config.leader_max_speed is not None:
+            return float(self.config.leader_max_speed)
+        return float(self.config.max_speed)
 
     def _leader_target(self, agent: AgentState, mission_goal: np.ndarray) -> np.ndarray:
         target = np.asarray(mission_goal, dtype=float)
@@ -157,14 +169,23 @@ class FormationController:
         if self.config.leader_id not in states:
             return {}
         errors = []
+        xy_errors = []
         for agent_id, state in states.items():
             if agent_id == self.config.leader_id or agent_id not in self.config.slots:
                 continue
             reference, _, _ = self.reference_for(agent_id, states)
             errors.append(float(np.linalg.norm(state.position - reference)))
+            xy_errors.append(float(np.linalg.norm(state.position[:2] - reference[:2])))
         if not errors:
-            return {"formation_rms_error": 0.0, "formation_max_error": 0.0}
+            return {
+                "formation_rms_error": 0.0,
+                "formation_max_error": 0.0,
+                "formation_xy_rms_error": 0.0,
+                "formation_xy_max_error": 0.0,
+            }
         return {
             "formation_rms_error": float(np.sqrt(np.mean(np.square(errors)))),
             "formation_max_error": float(max(errors)),
+            "formation_xy_rms_error": float(np.sqrt(np.mean(np.square(xy_errors)))),
+            "formation_xy_max_error": float(max(xy_errors)),
         }

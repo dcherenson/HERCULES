@@ -1,7 +1,8 @@
 # Post-run mission plots
 
 After every orchestrator run, the completed JSONL diagnostic log is converted
-into two PNG files and one MP4 in the same `--debug-dir` directory:
+into two PNG files and two top-down animation files in the same `--debug-dir`
+directory:
 
 - `<method>_<timestamp>_trajectories_3d.png` shows the logged 3D path of every
   UAV and UGV. Circles mark starting positions and `X` markers mark final
@@ -14,12 +15,11 @@ into two PNG files and one MP4 in the same `--debug-dir` directory:
   vehicle and obstacle radii; zero is contact and negative values indicate
   overlap in the logged geometry. The dashed horizontal line marks zero
   clearance. Red `X` markers are authoritative AirSim collision reports.
-- `<method>_<timestamp>_perception_3d.mp4` is a post-run 3D animation showing
-  colored trajectory trails and names, authoritative Unreal collision markers,
-  UAV camera frustums, agent-local perceived obstacle spheres, and deterministic
-  orchestrator-spawned box obstacles. UGV LiDAR FOV volumes are intentionally
-  omitted because their 360-degree volume obscures the trajectory view. It
-  uses `Z-up = -NED-Z` and the detector's effective 30 m range for FOVs.
+- `<method>_<timestamp>_topdown.mp4` and `.gif` are route-up square animations
+  showing colored trajectories, UAV camera footprints, agent-local perceived
+  obstacle circles, deterministic truth obstacles, actual same-type dashed
+  communication links, and authoritative collision markers. UGV LiDAR FOV
+  volumes remain omitted.
 - `<method>_<timestamp>_perception_points.npz` stores bounded, compressed
   sensor-frame and world-frame point samples for each fresh capture.
 - `<method>_<timestamp>_perception_report.{json,md}` and
@@ -52,8 +52,10 @@ PYTHONPATH=PythonClient/distributed_mission ./herculesvenv/bin/python -c \
 
 The plotting module uses a non-interactive Matplotlib backend and saves all
 artifacts after AirSim cleanup, so rendering cannot affect control-loop timing.
-Use `--animation-fps N` to override the default `1 / dt` playback rate, or
-`--no-animation` to generate only the two PNGs. Each obstacle record now stores
+Use `--animation-fps N` to override the source mission sampling rate. Outputs
+play at `--playback-speed` times that rate (default 2x); use
+`--playback-speed 1` for real time. Use `--no-animation` to generate only the
+two PNGs. Each obstacle record now stores
 a cached `sensor_view`: UAV depth-response pose, horizontal/vertical FOV,
 range, capture time, and age; or UGV LiDAR pose, 360-degree horizontal FOV,
 plus/minus 10-degree vertical FOV, range, capture time, and age. Successful
@@ -62,7 +64,9 @@ dimensions. RuralAustralia and `--no-spawn-obstacles` explicitly store an
 empty truth list.
 
 Older logs remain usable: trajectories and estimates are rendered, while
-missing FOV or true-obstacle layers are skipped and annotated in the animation.
+missing FOV or true-obstacle layers are skipped. Current logs additionally
+store `communication_links`, containing same-type neighbor pairs that exchange
+localization messages.
 
 To analyze a log independently:
 

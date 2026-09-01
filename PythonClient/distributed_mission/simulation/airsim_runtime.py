@@ -34,6 +34,12 @@ class AirSimLaunchConfig:
     camera_director_position: Optional[tuple] = None
     camera_director_yaw: float = 0.0
     rotate_camera_director: bool = False
+    record_video: bool = False
+    record_uav: Optional[str] = None
+    record_ugv: Optional[str] = None
+    video_resolution: tuple = (1280, 720)
+    video_fps: float = 20.0
+    recording_folder: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.launch_mode not in {"visible", "headless", "existing"}:
@@ -46,6 +52,10 @@ class AirSimLaunchConfig:
             self.camera_director_position = tuple(float(value) for value in self.camera_director_position)
             if len(self.camera_director_position) != 3:
                 raise ValueError("camera_director_position must contain three values")
+        if len(self.video_resolution) != 2 or any(int(value) <= 0 for value in self.video_resolution):
+            raise ValueError("video_resolution must contain two positive values")
+        if float(self.video_fps) <= 0.0:
+            raise ValueError("video_fps must be positive")
 
     @property
     def map_url(self) -> str:
@@ -86,7 +96,11 @@ class AirSimLauncher:
     def _prepare_settings_override(self) -> None:
         if self.config.launch_mode == "existing":
             return
-        if self.config.camera_director_position is None and not self.config.rotate_camera_director:
+        if (
+            self.config.camera_director_position is None
+            and not self.config.rotate_camera_director
+            and not self.config.record_video
+        ):
             return
         source_path = self.config.settings_path
         if source_path is None:
@@ -124,13 +138,88 @@ class AirSimLauncher:
             # horizon visibly tilted after the map-frame rotation.
             camera_director["Roll"] = 0.0
         settings["CameraDirector"] = camera_director
+        if self.config.record_video:
+            self._apply_recording_settings(settings)
         temporary = tempfile.NamedTemporaryFile(
-            mode="w", suffix="_airsim_top_down_settings.json", delete=False, encoding="utf-8"
+            mode="w", suffix="_airsim_mission_settings.json", delete=False, encoding="utf-8"
         )
         with temporary:
             json.dump(settings, temporary, indent=2)
         self._temporary_settings_path = temporary.name
         self.config._active_settings_path = temporary.name
+
+    def _apply_recording_settings(self, settings: Dict[str, Any]) -> None:
+        """Add recording-only cameras without replacing perception cameras."""
+
+        if not self.config.record_uav or not self.config.record_ugv:
+            raise ValueError("record_uav and record_ugv are required when record_video is enabled")
+
+        width, height = (int(self.config.video_resolution[0]), int(self.config.video_resolution[1]))
+        vehicles = settings.setdefault("Vehicles", {})
+        if self.config.record_uav not in vehicles:
+            raise ValueError("record_uav {!r} is absent from AirSim settings".format(self.config.record_uav))
+        if self.config.record_ugv not in vehicles:
+            raise ValueError("record_ugv {!r} is absent from AirSim settings".format(self.config.record_ugv))
+
+        # Scene resolution is a capture-default setting.  Updating only the
+        # scene entry leaves DepthPlanar/DepthPerspective and their existing
+        # obstacle-perception settings unchanged.
+        camera_defaults = settings.setdefault("CameraDefaults", {})
+        captures = camera_defaults.setdefault("CaptureSettings", [])
+        scene_setting = next((item for item in captures if int(item.get("ImageType", 0)) == 0), None)
+        if scene_setting is None:
+            scene_setting = {"ImageType": 0}
+            captures.append(scene_setting)
+        scene_setting["Width"] = width
+        scene_setting["Height"] = height
+        scene_setting.setdefault("MotionBlurAmount", 0)
+
+        uav_settings = vehicles[self.config.record_uav]
+        configured_cameras = uav_settings.get("Cameras")
+        # A settings-defined camera entry causes AirSim to create only the
+        # named additional camera when it is absent from the pawn.  Do not add
+        # front_center here: doing so would replace the mounted perception
+        # camera in this AirSim fork.
+        if configured_cameras is None:
+            configured_cameras = {}
+            uav_settings["Cameras"] = configured_cameras
+        elif not isinstance(configured_cameras, dict):
+            raise ValueError("vehicle Cameras setting must be an object")
+        configured_cameras["mission_follow"] = {
+            "External": True,
+            # mission_follow is detached from the vehicle. Keep its command
+            # and reported pose in Unreal-world NED, not vehicle-local NED.
+            "ExternalLocal": False,
+            "X": 0,
+            "Y": 0,
+            "Z": 0,
+            "Roll": 0,
+            "Pitch": 0,
+            "Yaw": 0,
+            "CaptureSettings": [{
+                "ImageType": 0,
+                "Width": width,
+                "Height": height,
+                "FOV_Degrees": 90,
+                "MotionBlurAmount": 0,
+                "LumenGIEnable": False,
+                "LumenReflectionEnable": False,
+            }],
+        }
+
+        recording = dict(settings.get("Recording") or {})
+        recording.update({
+            "Enabled": False,
+            "RecordOnMove": False,
+            "RecordInterval": 1.0 / float(self.config.video_fps),
+            "Folder": self.config.recording_folder or "",
+            "Cameras": [
+                {"CameraName": "mission_follow", "ImageType": 0, "Compress": True, "VehicleName": self.config.record_uav},
+                {"CameraName": "front_center", "ImageType": 0, "Compress": True, "VehicleName": self.config.record_uav},
+                {"CameraName": "front_center", "ImageType": 0, "Compress": True, "VehicleName": self.config.record_ugv},
+            ],
+        })
+        settings["Recording"] = recording
 
     def launch(self) -> None:
         if self.config.launch_mode != "existing":
@@ -367,6 +456,23 @@ class AirSimFacade:
             except Exception:
                 continue
         return None
+
+    def set_recording_camera_pose(self, camera_name: str, pose: Any, vehicle_name: str) -> None:
+        """Move an external recording camera without touching vehicle cameras."""
+
+        self.multirotor.simSetCameraPose(camera_name, pose, vehicle_name=vehicle_name)
+
+    def start_recording(self) -> None:
+        self.multirotor.startRecording()
+
+    def stop_recording(self) -> None:
+        self.multirotor.stopRecording()
+
+    def recording_active(self) -> bool:
+        try:
+            return bool(self.multirotor.isRecording())
+        except Exception:
+            return False
 
     def command_uav(self, name: str, velocity: np.ndarray, duration: float) -> None:
         vector = np.asarray(velocity, dtype=float)

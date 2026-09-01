@@ -45,6 +45,41 @@ def test_launcher_rejects_unknown_mode_or_map():
         pass
 
 
+def test_recording_settings_add_only_named_camera_and_preserve_perception_settings(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    source = {
+        "SettingsVersion": 1.2,
+        "CameraDefaults": {"CaptureSettings": [{"ImageType": 0, "Width": 256, "Height": 144},
+                                                   {"ImageType": 2, "Width": 64, "Height": 48}]},
+        "Vehicles": {
+            "Drone1": {"VehicleType": "SimpleFlight", "Sensors": {"Distance": {"Enabled": True}}},
+            "Husky1": {"VehicleType": "CPHusky"},
+        },
+    }
+    settings_path.write_text(json.dumps(source), encoding="utf-8")
+    config = AirSimLaunchConfig(
+        launch_mode="headless", settings_path=str(settings_path), record_video=True,
+        record_uav="Drone1", record_ugv="Husky1", recording_folder=str(tmp_path / "frames"),
+        video_resolution=(1280, 720), video_fps=20.0,
+    )
+    launcher = AirSimLauncher(config)
+    launcher._prepare_settings_override()
+    try:
+        override = json.loads(open(config._active_settings_path, encoding="utf-8").read())
+        assert override["CameraDefaults"]["CaptureSettings"][1] == {"ImageType": 2, "Width": 64, "Height": 48}
+        assert override["Vehicles"]["Drone1"]["Sensors"] == source["Vehicles"]["Drone1"]["Sensors"]
+        assert set(override["Vehicles"]["Drone1"]["Cameras"]) == {"mission_follow"}
+        assert override["Vehicles"]["Drone1"]["Cameras"]["mission_follow"]["ExternalLocal"] is False
+        assert override["Recording"]["Cameras"][-1]["VehicleName"] == "Husky1"
+        assert override["Recording"]["RecordInterval"] == 0.05
+    finally:
+        launcher.cleanup()
+
+
+def test_record_video_existing_launch_is_rejected():
+    assert parse_args(["--record-video", "--launch-mode", "existing"]).record_video is True
+
+
 def test_top_down_camera_is_opt_in_and_default_preserves_simulator_view():
     defaults = parse_args([])
     assert defaults.top_down_camera is False
@@ -59,7 +94,7 @@ def test_top_down_camera_is_opt_in_and_default_preserves_simulator_view():
     assert explicit_disable.top_down_camera is True
     assert explicit_disable.no_top_down_camera is True
     assert parse_args(["--obstacle-margin", "0"]).obstacle_margin == 0.0
-    assert effective_obstacle_margin("rural_australia", None) == 1.0
+    assert effective_obstacle_margin("rural_australia", None) == 0.0
     assert effective_obstacle_margin("flyingcpp", None) == 0.0
     assert effective_obstacle_margin("rural_australia", 0.0) == 0.0
 

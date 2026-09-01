@@ -57,116 +57,6 @@ def _quaternion_to_matrix(quaternion: Any) -> np.ndarray:
     ])
 
 
-def _transform_sensor_points(position: Any, orientation_quaternion: Any, points: Any) -> np.ndarray:
-    position = np.asarray(position, dtype=float)
-    local_points = np.asarray(points, dtype=float)
-    world_points = local_points @ _quaternion_to_matrix(orientation_quaternion).T + position
-    return ned_to_display(world_points)
-
-
-def uav_frustum_segments(
-    position: Any,
-    orientation_quaternion: Any,
-    horizontal_fov_deg: float,
-    vertical_fov_deg: float,
-    range_m: float,
-) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Return display-frame line segments for a camera frustum.
-
-    AirSim camera coordinates are treated as forward ``+X``, right ``+Y`` and
-    down ``+Z``.  The camera response orientation is a world-NED quaternion.
-    """
-
-    distance = float(range_m)
-    if distance <= 0.0:
-        return []
-    half_horizontal = np.tan(np.radians(float(horizontal_fov_deg)) / 2.0)
-    half_vertical = np.tan(np.radians(float(vertical_fov_deg)) / 2.0)
-    far_corners = np.asarray([
-        [distance, -distance * half_horizontal, -distance * half_vertical],
-        [distance, distance * half_horizontal, -distance * half_vertical],
-        [distance, distance * half_horizontal, distance * half_vertical],
-        [distance, -distance * half_horizontal, distance * half_vertical],
-    ])
-    points = _transform_sensor_points(position, orientation_quaternion, far_corners)
-    apex = ned_to_display(np.asarray(position, dtype=float))
-    segments = [(apex, corner) for corner in points]
-    segments.extend((points[index], points[(index + 1) % 4]) for index in range(4))
-    return segments
-
-
-def lidar_scan_segments(
-    position: Any,
-    orientation_quaternion: Any,
-    horizontal_fov_start_deg: float,
-    horizontal_fov_end_deg: float,
-    vertical_fov_lower_deg: float,
-    vertical_fov_upper_deg: float,
-    range_m: float,
-    azimuth_samples: int = 16,
-) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Return display-frame wireframe segments for a LiDAR scan volume."""
-
-    distance = float(range_m)
-    if distance <= 0.0 or azimuth_samples < 3:
-        return []
-    start = float(horizontal_fov_start_deg)
-    end = float(horizontal_fov_end_deg)
-    span = end - start
-    closed = abs(span) >= 359.999
-    count = max(3, int(azimuth_samples))
-    angles = np.linspace(start, end, count + (1 if closed else 0), endpoint=not closed)
-    if closed:
-        angles = angles[:-1]
-    points = []
-    for elevation in (float(vertical_fov_lower_deg), float(vertical_fov_upper_deg)):
-        elevation_rad = np.radians(elevation)
-        points.append(np.asarray([
-            [distance * np.cos(elevation_rad) * np.cos(np.radians(angle)),
-             distance * np.cos(elevation_rad) * np.sin(np.radians(angle)),
-             distance * np.sin(elevation_rad)]
-            for angle in angles
-        ]))
-    rings = [_transform_sensor_points(position, orientation_quaternion, ring) for ring in points]
-    segments: List[Tuple[np.ndarray, np.ndarray]] = []
-    for ring in rings:
-        for index in range(len(ring) - 1 + int(closed)):
-            segments.append((ring[index % len(ring)], ring[(index + 1) % len(ring)]))
-    for lower, upper in zip(rings[0], rings[1]):
-        segments.append((lower, upper))
-    return segments
-
-
-def sphere_wireframe_segments(center: Any, radius: float, latitude_samples: int = 5, longitude_samples: int = 8) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Return display-frame line segments for a compact wireframe sphere."""
-
-    radius = float(radius)
-    if radius <= 0.0:
-        return []
-    center = ned_to_display(np.asarray(center, dtype=float))
-    latitudes = np.linspace(-np.pi / 2.0, np.pi / 2.0, max(3, int(latitude_samples)))
-    longitudes = np.linspace(0.0, 2.0 * np.pi, max(4, int(longitude_samples)), endpoint=False)
-    rings = []
-    for latitude in latitudes:
-        ring = np.asarray([
-            center + radius * np.asarray([np.cos(latitude) * np.cos(longitude),
-                                           np.cos(latitude) * np.sin(longitude),
-                                           np.sin(latitude)])
-            for longitude in longitudes
-        ])
-        rings.append(ring)
-    segments: List[Tuple[np.ndarray, np.ndarray]] = []
-    for ring in rings:
-        for index in range(len(ring)):
-            segments.append((ring[index], ring[(index + 1) % len(ring)]))
-    for lower, upper in zip(rings[0], rings[-1]):
-        segments.append((lower, upper))
-    for ring_index in range(len(rings) - 1):
-        for longitude_index in range(len(longitudes)):
-            segments.append((rings[ring_index][longitude_index], rings[ring_index + 1][longitude_index]))
-    return segments
-
-
 def sensor_view_for_record(record: Mapping, vehicle_name: str) -> Dict[str, Any]:
     """Return the cached sensor view and its propagated age from a log record."""
 
@@ -296,76 +186,91 @@ def _collision_is_relevant(collision: Mapping) -> bool:
     return bool(collision.get("relevant", collision.get("has_collided", False)))
 
 
-def _box_faces(vertices: np.ndarray) -> List[List[np.ndarray]]:
-    indices = ((0, 1, 3, 2), (4, 5, 7, 6), (0, 1, 5, 4),
-               (2, 3, 7, 6), (0, 2, 6, 4), (1, 3, 7, 5))
-    return [[vertices[index] for index in face] for face in indices]
+def route_up_xy(points: Any, heading: float, origin: Any = (0.0, 0.0)) -> np.ndarray:
+    """Rotate NED XY coordinates so the route heading points up the plot."""
+
+    values = np.asarray(points, dtype=float)
+    if values.shape[-1] < 2:
+        raise ValueError("points must contain at least two coordinates")
+    origin = np.asarray(origin, dtype=float).reshape(2)
+    delta = values[..., :2] - origin
+    cosine, sine = np.cos(float(heading)), np.sin(float(heading))
+    return np.stack((-sine * delta[..., 0] + cosine * delta[..., 1],
+                     cosine * delta[..., 0] + sine * delta[..., 1]), axis=-1)
 
 
-def _animation_axis_limits(records: Sequence[Mapping], names: Sequence[str]) -> Tuple[np.ndarray, np.ndarray]:
+def _uav_fov_footprint(sensor_view: Mapping[str, Any]) -> Optional[np.ndarray]:
+    try:
+        position = np.asarray(sensor_view["position"], dtype=float).reshape(3)
+        rotation = _quaternion_to_matrix(sensor_view.get("orientation_quaternion"))
+        distance = float(sensor_view["range_m"])
+        horizontal = np.tan(np.radians(float(sensor_view["horizontal_fov_deg"])) / 2.0)
+        vertical = np.tan(np.radians(float(sensor_view.get("vertical_fov_deg", 60.0))) / 2.0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if distance <= 0.0:
+        return None
+    corners = np.asarray([
+        [distance, -distance * horizontal, -distance * vertical],
+        [distance, distance * horizontal, -distance * vertical],
+        [distance, distance * horizontal, distance * vertical],
+        [distance, -distance * horizontal, distance * vertical],
+    ])
+    return corners @ rotation.T + position
+
+
+def _truth_xy_extent(obstacles: Sequence[Mapping[str, Any]]) -> List[np.ndarray]:
+    extent: List[np.ndarray] = []
+    for obstacle in obstacles:
+        try:
+            center = np.asarray(obstacle["center"], dtype=float).reshape(3)
+            if obstacle.get("shape", "box") == "sphere":
+                radius = float(obstacle["radius"])
+                extent.extend(center[:2] + offset for offset in (
+                    [-radius, 0.0], [radius, 0.0], [0.0, -radius], [0.0, radius]
+                ))
+            else:
+                half = np.asarray(obstacle["dimensions"], dtype=float).reshape(3)[:2] / 2.0
+                extent.extend(center[:2] + offset for offset in (
+                    [-half[0], -half[1]], [-half[0], half[1]],
+                    [half[0], -half[1]], [half[0], half[1]],
+                ))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return extent
+
+
+def _topdown_limits(records: Sequence[Mapping], names: Sequence[str], heading: float, origin: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     points: List[np.ndarray] = []
     for record in records:
         for name in names:
             state = (record.get("states") or {}).get(name, {})
             position = state.get("position") if isinstance(state, Mapping) else None
-            if position is not None and len(position) == 3:
-                points.append(ned_to_display(position))
-        for obstacle in record.get("true_obstacles") or []:
-            try:
-                if obstacle.get("shape", "box") == "sphere":
-                    center = np.asarray(obstacle["center"], dtype=float)
-                    radius = float(obstacle["radius"])
-                    points.extend(ned_to_display(center + offset) for offset in (
-                        [-radius, 0, 0], [radius, 0, 0], [0, -radius, 0],
-                        [0, radius, 0], [0, 0, -radius], [0, 0, radius],
-                    ))
-                else:
-                    points.extend(ned_to_display(box_vertices(obstacle["center"], obstacle["dimensions"])))
-            except (KeyError, TypeError, ValueError):
-                continue
-        for obstacle_data in (record.get("obstacles") or {}).values():
-            proxies = obstacle_data.get("proxies", []) if isinstance(obstacle_data, Mapping) else []
-            for proxy in proxies:
-                try:
-                    center = np.asarray(proxy["center"], dtype=float)
-                    radius = float(proxy.get("radius", 0.0))
-                    points.extend((ned_to_display(center + offset) for offset in (
-                        [-radius, 0, 0], [radius, 0, 0], [0, -radius, 0],
-                        [0, radius, 0], [0, 0, -radius], [0, 0, radius])))
-                except (KeyError, TypeError, ValueError):
-                    continue
+            if position is not None:
+                points.append(route_up_xy(np.asarray(position, dtype=float), heading, origin))
+    goal = next((record.get("goal") for record in records if record.get("goal") is not None), None)
+    if goal is not None:
+        try:
+            points.append(route_up_xy(np.asarray(goal, dtype=float), heading, origin))
+        except (TypeError, ValueError):
+            pass
+    truth = next((record.get("true_obstacles") for record in records if record.get("true_obstacles") is not None), [])
+    if truth:
+        points.extend(route_up_xy(point, heading, origin) for point in _truth_xy_extent(truth))
     if not points:
-        return np.asarray([-10.0, -10.0, -10.0]), np.asarray([10.0, 10.0, 10.0])
-    all_points = np.vstack(points)
-    lower = np.nanmin(all_points, axis=0)
-    upper = np.nanmax(all_points, axis=0)
+        return np.asarray([-10.0, -10.0]), np.asarray([10.0, 10.0])
+    values = np.vstack(points)
+    lower, upper = np.nanmin(values, axis=0), np.nanmax(values, axis=0)
     span = np.maximum(upper - lower, 1.0)
-    padding = np.maximum(0.1 * span, 1.0)
-    return lower - padding, upper + padding
+    half = max(float(np.max(span)) / 2.0, 5.0)
+    center = (lower + upper) / 2.0
+    padding = max(1.0, 0.08 * half)
+    return center - half - padding, center + half + padding
 
 
-def _plot_segments(
-    axis,
-    segments: Sequence[Tuple[np.ndarray, np.ndarray]],
-    color: Any,
-    alpha: float = 0.5,
-    linewidth: float = 0.8,
-    linestyle: str = "-",
-) -> None:
-    for start, end in segments:
-        points = np.vstack((start, end))
-        axis.plot(
-            points[:, 0], points[:, 1], points[:, 2],
-            color=color, alpha=alpha, linewidth=linewidth, linestyle=linestyle,
-        )
-
-
-def plot_perception_animation_3d(
-    records: Sequence[Mapping],
-    output_path: str,
-    fps: float | None = None,
-) -> str:
-    """Render a post-run MP4 of trajectories, FOVs, beliefs, and true boxes."""
+def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: str,
+                           fps: float | None = None, playback_speed: float = 2.0) -> Tuple[str, str]:
+    """Render the compact route-up top-down presentation animation."""
 
     import matplotlib
 
@@ -373,150 +278,152 @@ def plot_perception_animation_3d(
     import matplotlib.animation as animation
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    from matplotlib.patches import Circle, Polygon
 
     if not records:
         raise ValueError("cannot animate an empty mission log")
     if not animation.writers.is_available("ffmpeg"):
-        raise RuntimeError("ffmpeg is required to render the perception animation")
-    try:
-        dt = float(records[0].get("dt", 0.1))
-    except (TypeError, ValueError):
-        dt = 0.1
-    effective_fps = float(fps) if fps is not None else (1.0 / max(dt, 1e-6))
-    if effective_fps <= 0.0:
-        raise ValueError("animation fps must be positive")
-
+        raise RuntimeError("ffmpeg is required to render the top-down animation")
     names = sorted({str(name) for record in records for name in (record.get("states") or {})})
-    lower, upper = _animation_axis_limits(records, names)
+    types = records[0].get("vehicle_types") or {}
+    initial_positions = [
+        np.asarray((records[0].get("states") or {})[name].get("position"), dtype=float)
+        for name in names if (records[0].get("states") or {}).get(name, {}).get("position") is not None
+    ]
+    origin = np.mean(np.asarray(initial_positions), axis=0)[:2] if initial_positions else np.zeros(2)
+    first_position = np.mean(np.asarray(initial_positions), axis=0) if initial_positions else np.zeros(3)
+    goal = np.asarray(records[0].get("goal", first_position + [0.0, 1.0, 0.0]), dtype=float)
+    heading = float(np.arctan2(goal[1] - first_position[1], goal[0] - first_position[0]))
+    lower, upper = _topdown_limits(records, names, heading, origin)
+    source_fps = max(float(fps if fps is not None else 1.0 / max(float(records[0].get("dt", 0.1)), 1e-6)), 1.0)
+    if playback_speed <= 0.0:
+        raise ValueError("playback_speed must be positive")
+    output_fps = source_fps * float(playback_speed)
+    first_step = float(records[0].get("step", 0))
+    last_step = float(records[-1].get("step", len(records) - 1))
+    duration = max((last_step - first_step + 1.0) * float(records[0].get("dt", 0.1)), 1.0 / source_fps)
+
+    def frame_indices() -> List[int]:
+        # Render one frame for each source mission-time sample, then write at
+        # the faster output rate. This shortens playback instead of merely
+        # resampling the same mission interval at a denser frame rate.
+        count = max(len(records), int(np.ceil(duration * source_fps - 1e-9)))
+        times = np.arange(count, dtype=float) / source_fps
+        record_times = _record_times(records)
+        return [min(len(records) - 1, int(np.searchsorted(record_times, value, side="right") - 1)) for value in times]
+
     colors = {name: plt.get_cmap("tab10")(index % 10) for index, name in enumerate(names)}
-    figure = plt.figure(figsize=(12, 8))
-    axis = figure.add_subplot(111, projection="3d")
-    times = _record_times(records, dt)
-    has_any_sensor_view = any(sensor_view_for_record(record, name) for record in records for name in names)
-    has_any_truth = any(record.get("true_obstacles") is not None for record in records)
-    true_obstacles = next((record.get("true_obstacles") for record in records if record.get("true_obstacles") is not None), [])
 
-    def draw_frame(frame_index: int) -> None:
-        axis.cla()
-        for obstacle in true_obstacles or []:
-            try:
-                if obstacle.get("shape", "box") == "sphere":
-                    _plot_segments(
-                        axis,
-                        sphere_wireframe_segments(obstacle["center"], obstacle["radius"]),
-                        "gray", 0.45, 1.0,
-                    )
+    def render(output_path: str, output_fps: float, dpi: int, writer: Any) -> None:
+        figure, axis = plt.subplots(figsize=(7.2, 7.2), dpi=dpi)
+        indices = frame_indices()
+
+        def draw(frame_index: int) -> None:
+            axis.clear()
+            record = records[frame_index]
+            truth = next((item.get("true_obstacles") for item in records if item.get("true_obstacles") is not None), [])
+            for obstacle in truth or []:
+                try:
+                    center = route_up_xy(np.asarray(obstacle["center"], dtype=float), heading, origin)
+                    if obstacle.get("shape", "box") == "sphere":
+                        radius = float(obstacle["radius"])
+                        axis.add_patch(Circle(center, radius, color="gray", alpha=0.28, linewidth=1.0))
+                    else:
+                        dimensions = np.asarray(obstacle["dimensions"], dtype=float)
+                        corners = route_up_xy(np.asarray([
+                            np.asarray(obstacle["center"], dtype=float) + [sx * dimensions[0] / 2.0, sy * dimensions[1] / 2.0, 0.0]
+                            for sx, sy in ((-1, -1), (-1, 1), (1, 1), (1, -1))
+                        ]), heading, origin)
+                        axis.add_patch(Polygon(corners, closed=True, color="gray", alpha=0.28, linewidth=1.0))
+                except (KeyError, TypeError, ValueError):
                     continue
-                vertices = ned_to_display(box_vertices(obstacle["center"], obstacle["dimensions"]))
-            except (KeyError, TypeError, ValueError):
-                continue
-            axis.add_collection3d(Poly3DCollection(
-                _box_faces(vertices), facecolors="gray", edgecolors="dimgray", alpha=0.32, linewidths=0.8
-            ))
-
-        for name in names:
-            history = []
-            current_position = None
-            for record in records[:frame_index + 1]:
+            goal_point = route_up_xy(goal, heading, origin)
+            axis.scatter(
+                [goal_point[0]], [goal_point[1]], marker="*", s=190,
+                facecolor="gold", edgecolor="black", linewidth=1.0,
+                zorder=10,
+            )
+            axis.annotate(
+                "GOAL", (goal_point[0], goal_point[1]), xytext=(6, 6),
+                textcoords="offset points", color="black", fontsize="small",
+                fontweight="bold", zorder=11,
+            )
+            for name in names:
                 state = (record.get("states") or {}).get(name, {})
                 position = state.get("position") if isinstance(state, Mapping) else None
-                if position is not None and len(position) == 3:
-                    current_position = np.asarray(position, dtype=float)
-                    history.append(current_position)
-            if not history:
-                continue
-            trajectory = ned_to_display(np.vstack(history))
-            color = colors[name]
-            axis.plot(trajectory[:, 0], trajectory[:, 1], trajectory[:, 2], color=color, linewidth=1.8)
-            axis.scatter(*trajectory[-1], color=color, s=35, depthshade=False)
-            axis.text(*trajectory[-1], " " + name, color=color, fontsize=8)
-            collision = (records[frame_index].get("collisions") or {}).get(name, {})
-            if isinstance(collision, Mapping) and _collision_is_relevant(collision):
-                axis.scatter(*trajectory[-1], color="red", marker="x", s=75, linewidths=2.0, depthshade=False)
-
-            obstacle_data = (records[frame_index].get("obstacles") or {}).get(name, {})
-            proxies = obstacle_data.get("proxies", []) if isinstance(obstacle_data, Mapping) else []
-            for proxy in proxies:
-                try:
-                    _plot_segments(
-                        axis,
-                        sphere_wireframe_segments(proxy["center"], proxy.get("radius", 0.0)),
-                        color,
-                        0.38,
-                        0.65,
-                        ":",
-                    )
-                except (KeyError, TypeError, ValueError):
+                if position is None:
                     continue
+                trajectory = []
+                for previous in records[:frame_index + 1]:
+                    previous_state = (previous.get("states") or {}).get(name, {})
+                    if previous_state.get("position") is not None:
+                        trajectory.append(route_up_xy(np.asarray(previous_state["position"], dtype=float), heading, origin))
+                if trajectory:
+                    trail = np.asarray(trajectory)
+                    axis.plot(trail[:, 0], trail[:, 1], color=colors[name], linewidth=2.0)
+                    current = trail[-1]
+                    axis.scatter([current[0]], [current[1]], color=colors[name], s=36, zorder=6)
+                obstacle_data = (record.get("obstacles") or {}).get(name, {})
+                for proxy in obstacle_data.get("proxies", []) if isinstance(obstacle_data, Mapping) else []:
+                    try:
+                        proxy_center = route_up_xy(np.asarray(proxy["center"], dtype=float), heading, origin)
+                        axis.add_patch(Circle(proxy_center, float(proxy.get("radius", 0.0)), fill=False,
+                                              edgecolor=colors[name], alpha=0.35, linestyle=":", linewidth=1.0))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                if types.get(name) == "drone":
+                    view = sensor_view_for_record(record, name)
+                    footprint = _uav_fov_footprint(view) if view.get("sensor_type") == "uav_camera" else None
+                    if footprint is not None:
+                        footprint_xy = route_up_xy(footprint, heading, origin)
+                        axis.add_patch(Polygon(footprint_xy[:, :2], closed=True, facecolor="deepskyblue",
+                                              edgecolor="deepskyblue", alpha=0.10, linewidth=1.0))
+            for link in record.get("communication_links") or []:
+                if len(link) != 2 or link[0] not in names or link[1] not in names:
+                    continue
+                first = (record.get("states") or {}).get(link[0], {}).get("position")
+                second = (record.get("states") or {}).get(link[1], {}).get("position")
+                if first is not None and second is not None:
+                    segment = route_up_xy(np.asarray([first, second], dtype=float), heading, origin)
+                    axis.plot(segment[:, 0], segment[:, 1], color="black", alpha=0.35, linestyle="--", linewidth=0.8)
+            for name in names:
+                collision = (record.get("collisions") or {}).get(name, {})
+                state = (record.get("states") or {}).get(name, {})
+                if collision.get("relevant", collision.get("has_collided", False)) and state.get("position") is not None:
+                    point = route_up_xy(np.asarray(state["position"], dtype=float), heading, origin)
+                    axis.scatter([point[0]], [point[1]], color="red", marker="x", s=75, linewidths=2.0, zorder=8)
+            axis.set_xlim(lower[0], upper[0])
+            axis.set_ylim(lower[1], upper[1])
+            axis.set_aspect("equal", adjustable="box")
+            axis.set_xlabel("Route-left (m)")
+            axis.set_ylabel("Progress to goal (m)")
+            mission_time = float(record.get("step", frame_index)) * float(record.get("dt", 0.1))
+            axis.set_title("Distributed mission — top down (t = {:.1f} s)".format(mission_time))
+            axis.legend(handles=[
+                Line2D([0], [0], color="deepskyblue", lw=6, alpha=0.25, label="UAV camera FOV"),
+                Line2D([0], [0], marker="*", color="gold", markeredgecolor="black", linestyle="None", markersize=11, label="goal"),
+                Line2D([0], [0], color="gray", lw=6, alpha=0.35, label="true obstacle"),
+                Line2D([0], [0], color="black", lw=1, linestyle="--", alpha=0.5, label="communication"),
+                Line2D([0], [0], color="black", lw=1, linestyle=":", alpha=0.5, label="obstacle estimate"),
+                Line2D([0], [0], color="red", marker="x", linestyle="None", markersize=7, label="collision"),
+            ], loc="upper left", fontsize="x-small")
 
-            sensor_view = sensor_view_for_record(records[frame_index], name)
-            if sensor_view:
-                try:
-                    sensor_type = sensor_view.get("sensor_type")
-                    if sensor_type == "uav_camera":
-                        segments = uav_frustum_segments(
-                            sensor_view["position"], sensor_view.get("orientation_quaternion"),
-                            sensor_view["horizontal_fov_deg"], sensor_view["vertical_fov_deg"], sensor_view["range_m"],
-                        )
-                        _plot_segments(axis, segments, "deepskyblue", 0.65, 0.9)
-                except (KeyError, TypeError, ValueError):
-                    pass
+        movie = animation.FuncAnimation(figure, draw, frames=indices, interval=1000.0 / output_fps, blit=False)
+        movie.save(output_path, writer=writer, dpi=dpi)
+        plt.close(figure)
 
-        axis.set_xlim(lower[0], upper[0])
-        axis.set_ylim(lower[1], upper[1])
-        axis.set_zlim(lower[2], upper[2])
-        try:
-            axis.set_box_aspect(upper - lower)
-        except (AttributeError, TypeError):
-            pass
-        axis.view_init(elev=45.0, azim=-60.0)
-        mission_time = times[frame_index] if frame_index < len(times) else frame_index * dt
-        axis.set_title("Distributed mission perception (step {}; t = {:.2f} s)".format(
-            records[frame_index].get("step", frame_index), mission_time
-        ))
-        axis.set_xlabel("X (m)")
-        axis.set_ylabel("Y (m)")
-        axis.set_zlabel("Altitude Z-up (m; -AirSim NED Z)")
-        missing = []
-        if not has_any_sensor_view:
-            missing.append("sensor FOV unavailable in this log")
-        if not has_any_truth:
-            missing.append("true obstacle geometry unavailable in this log")
-        if missing:
-            axis.text2D(0.02, 0.96, " | ".join(missing), transform=axis.transAxes, color="darkred", fontsize=9)
-        legend_handles = [Line2D([0], [0], color=colors[name], lw=2, label=name) for name in names]
-        legend_handles.extend([
-            Line2D([0], [0], color="gray", lw=5, alpha=0.45, label="true obstacle"),
-            Line2D([0], [0], color="black", lw=1, linestyle=":", alpha=0.65, label="agent obstacle estimate"),
-            Line2D([0], [0], color="deepskyblue", lw=1.5, alpha=0.8, label="UAV camera FOV"),
-            Line2D([0], [0], color="red", marker="x", linestyle="None", markersize=8, label="AirSim collision"),
-        ])
-        if legend_handles:
-            axis.legend(handles=legend_handles, loc="upper left", fontsize="x-small")
-        ages = []
-        for name in names:
-            sensor_view = sensor_view_for_record(records[frame_index], name)
-            if "age" in sensor_view:
-                try:
-                    ages.append("{}: {:.2f}s".format(name, float(sensor_view["age"])))
-                except (TypeError, ValueError):
-                    pass
-        if ages:
-            axis.text2D(0.02, 0.02, "Sensor age — " + ", ".join(ages), transform=axis.transAxes, fontsize=8)
+    os.makedirs(os.path.dirname(os.path.abspath(mp4_path)), exist_ok=True)
+    render(mp4_path, output_fps, 100, animation.FFMpegWriter(fps=output_fps, codec="libx264", bitrate=1600, extra_args=["-pix_fmt", "yuv420p"]))
+    from modules.video_recording import verify_mp4
 
-    draw_frame(0)
-    movie = animation.FuncAnimation(figure, draw_frame, frames=len(records), interval=1000.0 / effective_fps, blit=False)
-    writer = animation.FFMpegWriter(
-        fps=effective_fps,
-        codec="libx264",
-        bitrate=1800,
-        extra_args=["-pix_fmt", "yuv420p"],
-    )
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    movie.save(output_path, writer=writer, dpi=110)
-    plt.close(figure)
-    return output_path
+    verify_mp4(mp4_path)
+    # Encode the GIF from the verified MP4 path through ffmpeg.  This keeps
+    # the Matplotlib renderer independent of PillowWriter and guarantees the
+    # same palette conversion used by the simulator video artifacts.
+    from modules.video_recording import encode_gif
+
+    encode_gif(mp4_path, gif_path, output_fps, 540)
+    return mp4_path, gif_path
 
 
 def plot_trajectories_3d(records: Sequence[Mapping], output_path: str) -> str:
@@ -630,8 +537,9 @@ def generate_mission_plots(
     vehicle_radii: Mapping[str, float] | None = None,
     animation_fps: float | None = None,
     include_animation: bool = True,
+    playback_speed: float = 2.0,
 ) -> List[str]:
-    """Generate standard plots and, unless disabled, the perception MP4."""
+    """Generate standard plots and, unless disabled, the top-down animations."""
 
     records = load_mission_records(log_path)
     if not records:
@@ -645,7 +553,8 @@ def generate_mission_plots(
     plot_collision_clearances(records, clearance_path, vehicle_radii)
     paths = [trajectory_path, clearance_path]
     if include_animation:
-        animation_path = os.path.join(target_dir, stem + "_perception_3d.mp4")
-        plot_perception_animation_3d(records, animation_path, animation_fps)
-        paths.append(animation_path)
+        topdown_mp4 = os.path.join(target_dir, stem + "_topdown.mp4")
+        topdown_gif = os.path.join(target_dir, stem + "_topdown.gif")
+        plot_topdown_animation(records, topdown_mp4, topdown_gif, animation_fps, playback_speed)
+        paths.extend([topdown_mp4, topdown_gif])
     return paths
