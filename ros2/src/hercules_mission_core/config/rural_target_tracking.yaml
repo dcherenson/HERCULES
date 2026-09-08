@@ -1,0 +1,82 @@
+schema_version: 1
+mission_id: rural_australia_target_tracking_nominal
+python_reference_commit: 2ef27d8ddc7f019f4b1af0196f7fbb4d91ce595f
+map: rural_australia
+mission_objective: track-target
+
+agents:
+  - {id: Drone1, type: drone}
+  - {id: Drone2, type: drone}
+  - {id: SimpleFlight, type: drone}
+  - {id: Drone4, type: drone}
+  - {id: Drone5, type: drone}
+  - {id: Husky1, type: ugv}
+  - {id: Husky2, type: ugv}
+  - {id: Husky3, type: ugv}
+target: {id: Target1, type: target_ugv}
+
+timing:
+  control_dt: 0.1
+  tracking_rate: 4.0
+communication_range: 10.0
+initial_heading_offset_deg: 90.0
+
+target_motion:
+  pattern: gerono_figure_eight
+  target_pattern_length: 10.0
+  target_pattern_width: 8.0
+  target_speed: 0.10
+  sample_count: 64
+  target_start_sample_index: 5
+  direction: 1
+  waypoint_radius: 1.0
+  lookahead_samples: 2
+  heading_gain: 2.0
+  max_yaw_rate: 1.5
+  minimum_alignment: 0.75
+
+target_anchor:
+  route_fraction: 0.25
+  camera_right_offset_m: 5.0
+  toward_robot_launch_offset_m: 5.0
+  target_body_ground_z: -1.0
+
+formation:
+  uav_altitude: -5.0
+  target_ugv_circumradius: 5.0
+  target_slot_heading_speed_threshold: 2.5
+  nominal_speed: 1.0
+  leader_nominal_speed: 1.0
+  nominal_position_gain: 0.5
+  nominal_velocity_gain: 3.0
+  ugv_heading_gain: 1.0
+  ugv_max_yaw_rate: 1.0
+  ugv_hold_radius: 0.5
+  ugv_minimum_alignment: 0.25
+
+tracking:
+  tracking_window: 5.0
+  tracking_admm_rho: 1.0
+  tracking_admm_max_iterations: 20
+  tracking_admm_tolerance: 0.001
+  tracking_process_noise: 0.20
+  tracking_measurement_std: 0.25
+
+# Adapter-only values are recorded separately and are not used by the C++
+# geometry/control library. Future live integration owns frame conversion and
+# model-level [speed,yaw_rate] to simulator actuation conversion.
+simulator_adapter:
+  coordinate_convention: AirSim_NED_at_boundary_only
+  target_vehicle_model: CPHusky
+  target_model_command: [speed, yaw_rate]
+  controlled_ugv_model_command: [speed, yaw_rate]
+  ugv_steering_scale: 1.0
+
+# These reproduce the surrounding tested command but are not nominal-core
+# inputs. They remain future perception/CBF/media integration responsibilities.
+future_live_integration_reference:
+  target_observation_source: truth
+  use_truth_obstacles: true
+  spawn_obstacles: false
+  ugv_cbf_lookahead_distance: 0.10
+  render_animation: false
