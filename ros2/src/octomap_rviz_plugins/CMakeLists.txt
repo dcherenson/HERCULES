@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5z)
+cmake_minimum_required(VERSION 3.5)
 project(octomap_rviz_plugins)
 
 if(NOT CMAKE_CXX_STANDARD)

@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.5)
 project(airsim_ros_pkgs)
 
-set(CMAKE_BUILD_TYPE Debug)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build configuration" FORCE)
+endif()
 
 find_package(rclcpp REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -27,6 +29,10 @@ find_package(airsim_interfaces REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED)
+find_package(yaml-cpp REQUIRED)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(AIRSIM_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../)
 
@@ -34,13 +40,8 @@ add_subdirectory("${AIRSIM_ROOT}/cmake/rpclib_wrapper" rpclib_wrapper)
 add_subdirectory("${AIRSIM_ROOT}/cmake/AirLib" AirLib)
 add_subdirectory("${AIRSIM_ROOT}/cmake/MavLinkCom" MavLinkCom)
 
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_FLAGS "-O3 -Wall -Wextra -Wnoexcept -Wstrict-null-sentinel")
-set(CXX_EXP_LIB "-nostdinc++ -I/usr/include/c++/8 -I/usr/include/x86_64-linux-gnu/c++/8 -nodefaultlibs 
--l/usr/lib/x86_64-linux-gnu/libc++.so -l/usr/lib/x86_64-linux-gnu/libc++abi.so
--lm -lc -lgcc_s -lgcc
--fmax-errors=10")
-set(RPC_LIB_INCLUDES " ${AIRSIM_ROOT}/external/rpclib/rpclib-2.3.0/include")
+add_compile_options(-Wall -Wextra)
+set(RPC_LIB_INCLUDES "${AIRSIM_ROOT}/external/rpclib/rpclib-2.3.0/include")
 set(RPC_LIB rpc)
 message(STATUS "found RPC_LIB_INCLUDES=${RPC_LIB_INCLUDES}")
 
@@ -210,5 +211,13 @@ ament_export_dependencies(PCL)
 ament_export_include_directories(${INCLUDE_DIRS})
 ament_export_libraries(airsim_settings_parser hercules_settings_parser pd_position_controller_simple
   airsim_ros hercules_ros)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_command_watchdog test/test_command_watchdog.cpp)
+  target_include_directories(test_command_watchdog PRIVATE include)
+  ament_add_gtest(test_watchdog_transport test/test_watchdog_transport.cpp)
+  ament_target_dependencies(test_watchdog_transport rclcpp airsim_interfaces)
+endif()
 
 ament_package()

@@ -1,0 +1,21 @@
+services:
+  dev:
+    image: hercules-ros2:humble
+    build:
+      context: ../..
+      dockerfile: docker/ros2/Dockerfile
+      args:
+        DEV_UID: ${LOCAL_UID:-1000}
+        DEV_GID: ${LOCAL_GID:-1000}
+    network_mode: host
+    init: true
+    stdin_open: true
+    tty: true
+    working_dir: /workspaces/hercules
+    volumes:
+      - ../..:/workspaces/hercules
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      ROS_LOCALHOST_ONLY: "1"
+      BUILD_TYPE: ${BUILD_TYPE:-RelWithDebInfo}
+      BUILD_JOBS: ${BUILD_JOBS:-2}
