@@ -1,0 +1,32 @@
+{
+  "vehicle": "Drone1",
+  "tolerances": {
+    "max_stationary_position_error_m": 0.05,
+    "post_motion_position_error_m": 0.05,
+    "displacement_error_m": 0.05,
+    "stationary_velocity_error_mps": 0.05,
+    "yaw_error_rad": 0.02,
+    "spawn_origin_error_m": 0.05,
+    "minimum_direction_cosine": 0.95
+  },
+  "metrics": {
+    "sample_count": 348,
+    "pre_stationary_samples": 41,
+    "motion_samples": 267,
+    "post_stationary_samples": 40,
+    "direct_rpc_errors": 0,
+    "max_stationary_position_error_m": 5.992801940451105e-08,
+    "post_motion_position_error_m": 5.992801940451105e-08,
+    "max_motion_position_error_m": 0.0033432321512306684,
+    "displacement_error_m": 5.992801940451105e-08,
+    "stationary_velocity_error_mps": 0.0,
+    "yaw_error_rad": 4.1567149722254726e-10,
+    "spawn_origin_error_m": 0.0014839887619018666,
+    "xy_displacement_direction_cosine": 0.9999999999999994,
+    "moving_velocity_direction_agreement_fraction": 1.0,
+    "canonical_displacement_m": 0.20124192017218334,
+    "direct_displacement_m": 0.20124191834549576
+  },
+  "passed": true,
+  "failures": []
+}

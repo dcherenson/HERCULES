@@ -1,0 +1,32 @@
+{
+  "vehicle": "Husky1",
+  "tolerances": {
+    "max_stationary_position_error_m": 0.05,
+    "post_motion_position_error_m": 0.05,
+    "displacement_error_m": 0.05,
+    "stationary_velocity_error_mps": 0.05,
+    "yaw_error_rad": 0.02,
+    "spawn_origin_error_m": 0.05,
+    "minimum_direction_cosine": 0.95
+  },
+  "metrics": {
+    "sample_count": 115,
+    "pre_stationary_samples": 41,
+    "motion_samples": 33,
+    "post_stationary_samples": 41,
+    "direct_rpc_errors": 0,
+    "max_stationary_position_error_m": 0.0010938252164977554,
+    "post_motion_position_error_m": 0.001093822867053973,
+    "max_motion_position_error_m": 0.0026666082187093757,
+    "displacement_error_m": 1.5599653124809265e-08,
+    "stationary_velocity_error_mps": 0.0,
+    "yaw_error_rad": 0.002561007998291398,
+    "spawn_origin_error_m": 0.000980742792958158,
+    "xy_displacement_direction_cosine": 0.9999999999999973,
+    "moving_velocity_direction_agreement_fraction": 1.0,
+    "canonical_displacement_m": 0.2174861171336707,
+    "direct_displacement_m": 0.21748611715140395
+  },
+  "passed": true,
+  "failures": []
+}
