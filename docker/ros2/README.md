@@ -16,6 +16,18 @@ Run these commands from the repository root:
 ./docker/ros2/shell.sh
 ```
 
+For a clean build plus the complete maintained ROS test gate, use the single
+reproduction entry point:
+
+```bash
+./docker/ros2/reproduce.sh
+```
+
+Its logs and any optional rendered media are written only below ignored
+`ros2/validation/**/artifacts/` directories. See
+[ROS2_HANDOFF.md](../../ROS2_HANDOFF.md) for installation, Unreal Engine 5.2.1,
+Rural Australia asset transfer, and optional live-video instructions.
+
 The scripts match the container developer's UID/GID to the caller. Only Docker is
 needed on the host; no host ROS installation is used. `shell.sh` opens the persistent
 `dev` service and sources Humble plus the last successfully built overlay.

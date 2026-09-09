@@ -346,8 +346,11 @@ cmake_build/
 !/Unreal/Plugins/AirSim/Content/VehicleAdv/SUV/CPHuskyMountedBar.uasset
 /suv_download_tmp
 car_assets.zip
+/UnrealAssets.zip
+/UnrealAssets.zip.sha256
 __pycache__/
 /PythonClient/**/metrics/
+/PythonClient/distributed_mission/debug_runs/
 /PythonClient/**/airsim.egg-info/
 /PythonClient/**/dist/
 

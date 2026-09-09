@@ -6,9 +6,12 @@ ARG DEV_GID=1000
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake ninja-build pkg-config git curl unzip sudo \
-    python3-colcon-common-extensions python3-rosdep python3-pytest \
+    python3-colcon-common-extensions python3-rosdep python3-pytest python3-pip \
+    python3-numpy python3-matplotlib python3-pil ffmpeg \
     libeigen3-dev gdb gdbserver clangd procps sysstat iproute2 netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --no-cache-dir \
+    osqp==1.0.4 jinja2==3.1.6 joblib==1.5.1 MarkupSafe==3.0.2
 # Dockerfile.dockerignore makes this a manifest-only tree, not a source copy.
 COPY ros2/src/ /tmp/ros-dependencies/src/
 RUN source /opt/ros/humble/setup.bash && \

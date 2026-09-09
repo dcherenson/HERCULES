@@ -60,6 +60,11 @@ A novel autonomous waypoint-tracking UGV controller mirrors the UAV interface, e
 
 HERCULES is developed and tested on **Ubuntu 22.04** with **Unreal Engine 5.2.1** and **ROS 2 Humble**. It is distributed as an Unreal plugin that drops into an Unreal environment, plus lightweight Python and ROS 2 clients.
 
+> Continuing the ROS 2 RuralAustralia target-following work on another Linux
+> machine? Use the complete [ROS 2 handoff, installation, test, and video
+> reproduction guide](ROS2_HANDOFF.md). It is pinned to Unreal Engine 5.2.1 and
+> the `codex/ros2` branch.
+
 ### Requirements
 
 | Component | Version / Notes |
