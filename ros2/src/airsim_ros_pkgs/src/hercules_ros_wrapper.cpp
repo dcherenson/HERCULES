@@ -207,17 +207,19 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
         auto &vehicle_setting = curr_vehicle_elem.second;
         auto curr_vehicle_name = curr_vehicle_elem.first;
 
-        // If block to check whether the host port is drone or car, then skip if it is not starting with Drone or Husky
+        // HERO uses separate RPC ports for multirotors and cars.  Keep the
+        // established naming convention while admitting the two canonical
+        // RuralAustralia mission names that intentionally do not use it.
         if (host_port_ == 41451) // drone
         {
-            if (curr_vehicle_name.rfind("Drone", 0) != 0)
+            if (curr_vehicle_name.rfind("Drone", 0) != 0 && curr_vehicle_name != "SimpleFlight")
             {
                 continue;
             }
         }
         else if (host_port_ == 41452) // ugv
         {
-            if (curr_vehicle_name.rfind("Husky", 0) != 0)
+            if (curr_vehicle_name.rfind("Husky", 0) != 0 && curr_vehicle_name != "Target1")
             {
                 continue;
             }

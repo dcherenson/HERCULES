@@ -420,6 +420,9 @@ ros2/src/VINS-MONO-ROS2
 # HERCULES README demo media — keep tracked despite the global *.png ignore above
 !docs/media/**
 
+# Generated validation logs, metrics, plots, screenshots, and videos.
+ros2/validation/**/artifacts/
+
 *.csv
 PythonClient/segmentation/*.csv
 

@@ -1,9 +1,9 @@
-# HERCULES read-only mission-state adapter
+# HERCULES mission ROS adapter
 
 `hercules_mission_ros` converts the existing wrapper's vehicle-local odometry
-into the common frame used by the working Python mission. It observes state
-only: the package has no command publishers, AirSim RPC client, takeoff/land
-client, spawning code, controller, tracker transport, CBF, or perception.
+into the common frame used by the working Python mission. The package also has
+a separate, bounded RuralAustralia nominal-mission runner. It intentionally
+contains no distributed tracker, CBF, conformal prediction, or perception.
 
 ## Canonical frame
 
@@ -71,10 +71,9 @@ Husky1 [0.004974978,  3.001892567, 0.716242492]
 
 `config/hero_smoke_state.yaml` records those explicit mapping origins and also
 documents the requested settings poses. The adapter code contains no
-vehicle-origin constants. A future Rural mission manager must establish and
-pass authoritative wrapper-odometry origins after runtime spawn/settling for
-every vehicle, including Target1; requested spawn coordinates alone are not
-sufficient and that case is not yet validated.
+vehicle-origin constants. The Rural mission launch instead calibrates all nine
+origins after runtime spawn/settling from synchronized wrapper-local and direct
+world-NED poses. Requested spawn coordinates alone remain insufficient.
 
 The simulator odometry stamp remains the canonical sample stamp. A separate
 steady-clock receipt time is used only by `StateCache` for freshness. Empty or
@@ -85,7 +84,7 @@ advanced simulator stamp.
 
 ## Running
 
-With the native simulator and existing wrapper running:
+The original two-vehicle read-only adapter remains available with:
 
 ```bash
 ./docker/ros2/exec.sh ros2 launch hercules_mission_ros state.launch.py
@@ -101,14 +100,41 @@ The configured outputs are:
 See `ros2/validation/mission_state/README.md` for direct-AirSim comparison,
 CSV capture, plots, metrics, and the optional screenshot command.
 
+For the full mission, first start Unreal on the host:
+
+```bash
+./docker/ros2/launch_rural_mission_sim.sh
+```
+
+Then run the nine-vehicle wrapper, runtime calibration, and controller with a
+single ROS launch. Start with the mandatory no-actuation preflight:
+
+```bash
+./docker/ros2/exec.sh ros2 launch hercules_mission_ros rural_nominal.launch.py dry_run:=true duration_sec:=5
+```
+
+Set `dry_run:=false` only after that succeeds. The live path derives every
+origin from synchronized wrapper-local and direct `simGetObjectPose(name,
+True)` samples; it does not reuse the measured smoke origins below.
+
+The staged live gates are launch arguments. Target-only validation uses
+`dry_run:=false enable_target:=true enable_formation:=false`; the complete run
+uses both enable arguments set to `true`. Logs are rendered with:
+
+```bash
+herculesvenv/bin/python ros2/validation/rural_nominal/render_validation.py \
+  ros2/validation/rural_nominal/artifacts/mission.jsonl
+```
+
 ## Validation boundary
 
 Deterministic conversion, origin separation, orientation/yaw, invalid values,
-and timestamp freshness are validated in unit and synthetic ROS tests. The
-live report below is specifically for settings-defined Drone1 and Husky1 in
-`docker/ros2/settings.hero-smoke.json`. Runtime-spawned eight-agent
-RuralAustralia origins, nonzero spawn yaw, and the eventual live mission remain
-unvalidated and must not be inferred from this two-vehicle smoke setup.
+timestamp freshness, mission gating, truth-target injection, and actuator
+conversion are covered by unit and synthetic ROS tests. The historical report
+below covers the two-vehicle smoke configuration. The separate nine-vehicle
+headless live report is under `ros2/validation/rural_nominal/`; its generated
+outputs are in the Git-ignored `artifacts/` subdirectory. Neither experiment
+is safety or stability evidence.
 
 ### Live results (2026-09-08)
 
@@ -145,6 +171,6 @@ physics/RPC/ROS validation and plot generation, but a visible Unreal screenshot
 could not be produced in this environment. Screenshots remain supplementary,
 not a replacement for the successful numerical and trajectory comparison.
 
-These results validate only the current two settings-defined vehicles and the
-observed origins above. Runtime-spawned eight-agent RuralAustralia origins,
-nonzero spawn yaw, and the eventual live mission remain unvalidated.
+These results validate only the two settings-defined smoke vehicles and the
+observed origins above. See the Rural nominal validation report for the later
+nine-vehicle runtime-calibrated experiment.

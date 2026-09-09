@@ -17,7 +17,7 @@ import numpy as np
 # This remains deliberately separate from the conformal robustness placeholder.
 # Edit this constant while tuning the target obstacle footprint. Camera ROI
 # errors in the current AirSim maps are larger than the covariance floor, so
-# four reported sigmas are used until that measurement calibration improves.
+# two reported sigmas are used until that measurement calibration improves.
 TARGET_CBF_SIGMA_MULTIPLIER = 2.0
 
 STATE_DIM = 4

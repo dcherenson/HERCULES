@@ -20,23 +20,15 @@ and the already-ported tracking parameters. Its explicitly separated
 `simulator_adapter` section is descriptive and is not consumed by this
 library. CBF and perception parameters are deliberately absent.
 
-## Source and documentation discrepancies
+## Executable-source values
 
-- Executable `orchestrator.py` sets
-  `RURAL_TARGET_TOWARD_ROBOTS_METERS = 5.0`; `docs/target_tracking.md` says the
-  route is shifted 10 m, and `test_runtime.py` currently expects 10 m. The port
-  and fixture preserve the executable 5 m translation. The two conflicting
-  Python runtime tests fail on the reference commit and were not modified.
-- The parser's `--target-speed` default is 0.5 m/s, while its Python runtime
-  test expects 0.10 m/s and the documented RuralAustralia command explicitly
-  supplies `--target-speed 0.10`. The frozen RuralAustralia fixture uses the
-  explicit tested command value, 0.10 m/s; the generic parser is unchanged.
-- Python source sets `TARGET_CBF_SIGMA_MULTIPLIER = 2.0`, while the target
-  tracking documentation says 4.0. CBF is outside this package, so neither
-  value is implemented here.
-- `nominal_formation_control.md` describes a 0.75 m Mestres deadband for the
-  fixed-goal controller. The executable target-centered UGV method uses 0.5 m;
-  this port preserves 0.5 m.
+Documentation and the Python runtime test follow the executable source:
+RuralAustralia translates the target route 5 m back toward the robot launch
+point; `TARGET_CBF_SIGMA_MULTIPLIER` is 2.0; the fixed-goal UGV hold radius is
+2.0 m; and the target-centered UGV hold radius is 0.5 m. The generic parser's
+target-speed default remains 0.5 m/s, while the tested RuralAustralia command
+explicitly selects 0.10 m/s. The frozen fixture therefore retains 0.10 m/s as
+the reproduction value rather than presenting it as the generic default.
 
 ## Deliberately preserved behavior
 

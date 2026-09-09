@@ -17,7 +17,7 @@ export UNREAL_EDITOR=/home/dasc-lab/Desktop/Unreal/Engine/Binaries/Linux/UnrealE
 ./docker/ros2/launch_wrapper.sh enable_api_control:=true
 
 ./docker/ros2/exec.sh ros2 run hercules_mission_ros state_node --ros-args \
-  --params-file /workspaces/hercules/ros2/validation/mission_state/hero_smoke_observed_origins.yaml
+  --params-file /workspaces/hercules/ros2/validation/mission_state/artifacts/hero_smoke_observed_origins.yaml
 ```
 
 Run each validation separately from the repository root. The extra Python path
@@ -41,8 +41,9 @@ local virtual environment; neither is a package dependency:
     --spawn-origin 0 3 -0.2'
 ```
 
-Each run writes a small timestamped CSV, metrics JSON, and top-down PNG. Once
-both CSVs exist, the second run also creates `combined_state_comparison.png`.
+Each run writes a small timestamped CSV, metrics JSON, and top-down PNG under
+the Git-ignored `artifacts/` directory. Once both CSVs exist, the second run
+also creates `combined_state_comparison.png` there.
 The plots show equal-scaled X/Y axes, both trajectories, configured origins,
 and start/end points. They are a visual sanity check only; the metrics JSON and
 deterministic tests are the acceptance evidence.
@@ -58,7 +59,8 @@ After each smoke run, a visible desktop screenshot can be captured on the host:
 
 ```bash
 herculesvenv/bin/python ros2/validation/mission_state/capture_unreal_screenshot.py \
-  ros2/validation/mission_state/drone1_unreal_after_smoke.png
+  ros2/validation/mission_state/artifacts/drone1_unreal_after_smoke.png
 ```
 
-Use the analogous `husky1_unreal_after_smoke.png` path after the Husky run.
+Use the analogous `artifacts/husky1_unreal_after_smoke.png` path after the
+Husky run.

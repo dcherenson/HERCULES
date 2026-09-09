@@ -338,7 +338,9 @@ def parse_args():
     parser.add_argument("--pre-seconds", type=float, default=2.0)
     parser.add_argument("--post-seconds", type=float, default=2.0)
     parser.add_argument("--smoke-timeout", type=float, default=90.0)
-    parser.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path(__file__).parent)
+    parser.add_argument(
+        "--output-dir", type=pathlib.Path,
+        default=pathlib.Path(__file__).parent / "artifacts")
     return parser.parse_args()
 
 

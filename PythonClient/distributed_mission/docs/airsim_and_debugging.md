@@ -92,15 +92,18 @@ poses. The older `--no-top-down-camera` flag remains accepted as an explicit dis
 `--launch-mode existing`, configure the CameraDirector before starting Unreal
 because a running world cannot safely receive this override.
 
-Target tracking uses a 0.10 m/s figure-eight by default and the existing UGV
-CBF control-point lookahead defaults to 0.1 m; both remain command-line tuning
-parameters. It is active only for `--mission-objective track-target`. With
+The generic target-speed parser default is 0.5 m/s. The tested RuralAustralia
+baseline explicitly passes `--target-speed 0.10`; this is not the parser
+default. The existing UGV CBF control-point lookahead defaults to 0.1 m, and
+both settings remain command-line tuning parameters. Target tracking is active
+only for `--mission-objective track-target`. With
 `--mission-objective fixed-goal`, the target actor is not spawned and the
 tracking cameras, worker, estimator, target CBF proxy, target commands, and
 target collision polling are all disabled; the original goal-directed
 formation controller is used. As a first target-centered CBF baseline, use
-truth observations with `--tracking-measurement-std 0.25` and the default
-target speed; this is a tuning command, not a new controller structure. Each run writes JSONL records containing configuration, states, formation
+truth observations with `--tracking-measurement-std 0.25` and an explicit
+`--target-speed 0.10`; this is a tuning command, not a new controller
+structure. Each run writes JSONL records containing configuration, states, formation
 errors, nominal/safe commands, barrier values, solver status, robust terms,
 sensor/proxy counts, and fallback events. The AirSim-specific tests are marked
 for explicit execution because they require a running Unreal instance.

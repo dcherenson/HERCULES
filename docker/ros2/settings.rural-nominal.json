@@ -1,0 +1,18 @@
+{
+  "SettingsVersion": 2.0,
+  "SimMode": "Hero",
+  "ClockSpeed": 1.0,
+  "LocalHostIp": "127.0.0.1",
+  "RpcEnabled": true,
+  "Vehicles": {
+    "Drone1": {"VehicleType":"SimpleFlight","X":-1.871349,"Y":-2.120862,"Z":-5.0,"Yaw":3.576334,"AutoCreate":true},
+    "Drone2": {"VehicleType":"SimpleFlight","X":2.120862,"Y":-1.871349,"Z":-5.0,"Yaw":3.576334,"AutoCreate":true},
+    "SimpleFlight": {"VehicleType":"SimpleFlight","X":0.0,"Y":0.0,"Z":-5.0,"Yaw":3.576334,"AutoCreate":true},
+    "Drone4": {"VehicleType":"SimpleFlight","X":-2.120862,"Y":1.871349,"Z":-5.0,"Yaw":3.576334,"AutoCreate":true},
+    "Drone5": {"VehicleType":"SimpleFlight","X":1.871349,"Y":2.120862,"Z":-5.0,"Yaw":3.576334,"AutoCreate":true},
+    "Husky1": {"VehicleType":"CPHusky","X":0.0,"Y":0.0,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true},
+    "Husky2": {"VehicleType":"CPHusky","X":-3.332599,"Y":-2.212190,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true},
+    "Husky3": {"VehicleType":"CPHusky","X":-3.582112,"Y":1.780020,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true},
+    "Target1": {"VehicleType":"CPHusky","X":4.928371,"Y":1.302154,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true}
+  }
+}

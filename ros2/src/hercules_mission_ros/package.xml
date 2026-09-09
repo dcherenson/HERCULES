@@ -7,10 +7,13 @@
   <license>MIT</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>eigen</depend>
+  <depend>airsim_interfaces</depend>
   <depend>hercules_interfaces</depend>
   <depend>hercules_mission_core</depend>
+  <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rclcpp</depend>
+  <exec_depend>rclpy</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
