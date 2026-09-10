@@ -2,9 +2,12 @@
 
 Date: 2026-09-09
 
-This report covers the staged, nine-vehicle, truth-target nominal mission. It
-does not enable distributed tracking, CBF safety filtering, perception, or
-conformal prediction, and it makes no claim about closed-loop stability.
+This is a historical report for the staged, nine-vehicle, truth-target nominal
+mission run before ROS distributed tracking was integrated. It does not report
+results for the current default distributed-camera launch, does not enable CBF
+safety filtering or conformal prediction, and makes no claim about closed-loop
+stability. Current distributed results must be generated afresh with
+`docker/ros2/reproduce.sh --with-live-video`.
 
 ## Staged runs
 
@@ -82,8 +85,8 @@ Start the RuralAustralia simulator, run each launch gate, then render:
 
 ```bash
 ./docker/ros2/launch_rural_mission_sim.sh -nullrhi -unattended -NoSound -stdout
-./docker/ros2/exec.sh ros2 launch hercules_mission_ros rural_nominal.launch.py dry_run:=true duration_sec:=5 log_path:=/workspaces/hercules/ros2/validation/rural_nominal/artifacts/dry_run.jsonl
-./docker/ros2/exec.sh ros2 launch hercules_mission_ros rural_nominal.launch.py dry_run:=false enable_target:=true enable_formation:=false duration_sec:=10 log_path:=/workspaces/hercules/ros2/validation/rural_nominal/artifacts/target_only.jsonl
-./docker/ros2/exec.sh ros2 launch hercules_mission_ros rural_nominal.launch.py dry_run:=false enable_target:=true enable_formation:=true duration_sec:=30 log_path:=/workspaces/hercules/ros2/validation/rural_nominal/artifacts/mission.jsonl
+./docker/ros2/exec.sh ros2 launch hercules_mission_ros rural_nominal.launch.py target_source:=truth dry_run:=true duration_sec:=5 log_path:=/workspaces/hercules/ros2/validation/rural_nominal/artifacts/dry_run.jsonl
+./docker/ros2/exec.sh ros2 launch hercules_mission_ros rural_nominal.launch.py target_source:=truth dry_run:=false enable_target:=true enable_formation:=false duration_sec:=10 log_path:=/workspaces/hercules/ros2/validation/rural_nominal/artifacts/target_only.jsonl
+./docker/ros2/exec.sh ros2 launch hercules_mission_ros rural_nominal.launch.py target_source:=truth dry_run:=false enable_target:=true enable_formation:=true duration_sec:=30 log_path:=/workspaces/hercules/ros2/validation/rural_nominal/artifacts/mission.jsonl
 herculesvenv/bin/python ros2/validation/rural_nominal/render_validation.py ros2/validation/rural_nominal/artifacts/mission.jsonl
 ```

@@ -9,8 +9,13 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GroundTruthState.msg"
   "msg/TargetMeasurement.msg"
+  "msg/TargetObservationDiagnostics.msg"
   "msg/TargetEstimate.msg"
   "msg/TrackingConsensus.msg"
+  "msg/TrackingDiagnostics.msg"
+  "msg/TrackingEpoch.msg"
+  "msg/TrackingHandoff.msg"
+  "msg/TrackingRoundStatus.msg"
   DEPENDENCIES builtin_interfaces std_msgs
 )
 

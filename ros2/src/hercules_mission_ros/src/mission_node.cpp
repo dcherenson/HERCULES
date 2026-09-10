@@ -18,6 +18,11 @@
 #include <airsim_interfaces/srv/land.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <hercules_interfaces/msg/ground_truth_state.hpp>
+#include <hercules_interfaces/msg/target_estimate.hpp>
+#include <hercules_interfaces/msg/target_measurement.hpp>
+#include <hercules_interfaces/msg/target_observation_diagnostics.hpp>
+#include <hercules_interfaces/msg/tracking_diagnostics.hpp>
+#include <hercules_interfaces/msg/tracking_epoch.hpp>
 #include <hercules_mission_core/formation_controller.hpp>
 #include <hercules_mission_core/mission_config.hpp>
 #include <hercules_mission_core/target_formation.hpp>
@@ -27,6 +32,8 @@
 #include "hercules_mission_ros/mission_actuation.hpp"
 #include "hercules_mission_ros/mission_gate.hpp"
 #include "hercules_mission_ros/target_source.hpp"
+#include "hercules_tracking_ros/neighbor_graph.hpp"
+#include "hercules_tracking_ros/tracking_adapter.hpp"
 
 namespace hercules_mission_ros {
 namespace {
@@ -34,6 +41,8 @@ using Clock = std::chrono::steady_clock;
 constexpr const char* kDrones[] = {
     "Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5"};
 constexpr const char* kUgvs[] = {"Husky1", "Husky2", "Husky3"};
+constexpr const char* kControlled[] = {"Drone1", "Drone2", "SimpleFlight", "Drone4",
+                                       "Drone5", "Husky1", "Husky2", "Husky3"};
 constexpr const char* kAll[] = {"Drone1", "Drone2", "SimpleFlight", "Drone4",
                                 "Drone5", "Husky1", "Husky2", "Husky3",
                                 "Target1"};
@@ -79,10 +88,12 @@ class RuralNominalMissionNode : public rclcpp::Node {
     dry_run_ = declare_parameter<bool>("dry_run", true);
     enable_target_ = declare_parameter<bool>("enable_target", true);
     enable_formation_ = declare_parameter<bool>("enable_formation", true);
-    const auto target_source = declare_parameter<std::string>("target_source", "truth");
-    if (target_source != "truth") {
-      throw std::invalid_argument("this mission stage supports only target_source=truth");
+    target_source_name_ = declare_parameter<std::string>("target_source", "truth");
+    if (target_source_name_ != "truth" && target_source_name_ != "distributed_tracking") {
+      throw std::invalid_argument("target_source must be truth or distributed_tracking");
     }
+    target_observation_source_ =
+        declare_parameter<std::string>("target_observation_source", "truth");
     duration_ = declare_parameter<double>("duration_sec", 30.0);
     startup_timeout_ = declare_parameter<double>("startup_timeout_sec", 30.0);
     freshness_timeout_ = declare_parameter<double>("freshness_timeout_sec", 0.5);
@@ -90,6 +101,7 @@ class RuralNominalMissionNode : public rclcpp::Node {
     uav_velocity_limit_ = declare_parameter<double>("uav_velocity_limit", 3.0);
     log_path_ = declare_parameter<std::string>(
         "log_path", "ros2/validation/rural_nominal/artifacts/mission.jsonl");
+    distributed_target_source_ = std::make_unique<DistributedTargetSource>(config_.tracking.window_seconds);
 
     for (const char* id : kAll) {
       state_subscriptions_.push_back(
@@ -108,6 +120,37 @@ class RuralNominalMissionNode : public rclcpp::Node {
               [this, id](geometry_msgs::msg::PointStamped::ConstSharedPtr msg) {
                 origins_[id] = {msg->point.x, msg->point.y, msg->point.z};
               }));
+    }
+    if (target_source_name_ == "distributed_tracking") {
+      epoch_publisher_ = create_publisher<hercules_interfaces::msg::TrackingEpoch>(
+          "/hercules_tracking/epoch", rclcpp::QoS(20).reliable());
+      for (const char* id : kControlled) {
+        estimate_subscriptions_.push_back(
+            create_subscription<hercules_interfaces::msg::TargetEstimate>(
+                std::string("/hercules_tracking/") + id + "/Target1/estimate", 20,
+                [this, id](hercules_interfaces::msg::TargetEstimate::ConstSharedPtr message) {
+                  local_estimates_[id] = *message;
+                  estimate_receipts_[id] = Clock::now();
+                }));
+        tracking_diagnostic_subscriptions_.push_back(
+            create_subscription<hercules_interfaces::msg::TrackingDiagnostics>(
+                std::string("/hercules_tracking/") + id + "/Target1/diagnostics", 20,
+                [this, id](hercules_interfaces::msg::TrackingDiagnostics::ConstSharedPtr message) {
+                  tracking_diagnostics_[id] = *message;
+                }));
+        measurement_subscriptions_.push_back(
+            create_subscription<hercules_interfaces::msg::TargetMeasurement>(
+                std::string("/hercules_tracking/") + id + "/Target1/measurement", 20,
+                [this, id](hercules_interfaces::msg::TargetMeasurement::ConstSharedPtr message) {
+                  tracking_measurements_[id] = *message;
+                }));
+      }
+      observation_diagnostics_subscription_ =
+          create_subscription<hercules_interfaces::msg::TargetObservationDiagnostics>(
+              "/hercules_tracking/observation_diagnostics", 10,
+              [this](hercules_interfaces::msg::TargetObservationDiagnostics::ConstSharedPtr message) {
+                observation_diagnostics_ = *message;
+              });
     }
     for (const char* id : kDrones) {
       uav_publishers_[id] = create_publisher<airsim_interfaces::msg::VelCmd>(
@@ -194,6 +237,42 @@ class RuralNominalMissionNode : public rclcpp::Node {
     RCLCPP_INFO(get_logger(), "preflight passed; mission started");
   }
 
+  void publishTrackingEpoch(double mission_time) {
+    hercules_tracking_ros::PositionMap positions;
+    std::vector<std::string> ids;
+    for (const char* id : kControlled) {
+      ids.emplace_back(id);
+      positions[id] = agentState(states_.at(id)).position;
+    }
+    current_adjacency_ = hercules_tracking_ros::buildNeighborGraph(
+        positions, config_.communication_range);
+    hercules_interfaces::msg::TrackingEpoch message;
+    message.epoch_id = ++tracking_epoch_;
+    message.stamp = hercules_tracking_ros::timeMessage(mission_time);
+    message.target_id = "Target1";
+    message.agent_ids = ids;
+    message.adjacency = hercules_tracking_ros::flattenAdjacency(ids, current_adjacency_);
+    epoch_publisher_->publish(message);
+  }
+
+  hercules_mission_core::TargetEstimate controlEstimate(
+      const std::string& id, const hercules_mission_core::AgentState& target,
+      double mission_time) const {
+    if (target_source_name_ == "truth") return target_source_.estimate(target);
+    const auto found = local_estimates_.find(id);
+    const auto receipt = estimate_receipts_.find(id);
+    if (found == local_estimates_.end() || receipt == estimate_receipts_.end()) {
+      return distributed_target_source_->estimate(std::nullopt, mission_time);
+    }
+    TimestampedTargetEstimate input;
+    input.estimate.position = {found->second.position[0], found->second.position[1]};
+    input.estimate.velocity = {found->second.velocity[0], found->second.velocity[1]};
+    input.estimate.active = found->second.active;
+    input.estimator_timestamp = hercules_tracking_ros::timeSeconds(found->second.stamp);
+    input.receipt_age = seconds(receipt->second);
+    return distributed_target_source_->estimate(input, mission_time);
+  }
+
   void step() {
     const auto tick_time = Clock::now();
     if (last_step_time_) {
@@ -201,6 +280,12 @@ class RuralNominalMissionNode : public rclcpp::Node {
     }
     last_step_time_ = tick_time;
     const auto target = agentState(states_.at("Target1"));
+    const double mission_time = static_cast<double>(step_) * config_.control_dt;
+    if (target_source_name_ == "distributed_tracking" &&
+        mission_time + 1e-9 >= next_tracking_time_) {
+      publishTrackingEpoch(mission_time);
+      next_tracking_time_ += 1.0 / config_.tracking_rate;
+    }
     const Eigen::Vector2d target_command =
         target_controller_->update(target.position, target.yaw, config_.control_dt);
     const double measured_target_speed = target.velocity.head<2>().norm();
@@ -208,10 +293,10 @@ class RuralNominalMissionNode : public rclcpp::Node {
         target_command.x(), target_command.y(), measured_target_speed,
         config_.target_motion.max_yaw_rate, true);
 
-    const auto truth = target_source_.estimate(target);
     std::map<std::string, Eigen::Vector3d> commands;
     std::map<std::string, Eigen::Vector3d> desired_slots;
     std::map<std::string, double> slot_errors;
+    std::map<std::string, hercules_mission_core::TargetEstimate> control_estimates;
     double step_max_uav = 0.0;
     double step_max_ugv = 0.0;
     double step_min_radius = 1e9;
@@ -219,16 +304,25 @@ class RuralNominalMissionNode : public rclcpp::Node {
 
     for (const char* id : kDrones) {
       const auto agent = agentState(states_.at(id));
+      const auto target_estimate = controlEstimate(id, target, mission_time);
+      control_estimates[id] = target_estimate;
       const auto acceleration = controller_.targetNominalControl(
-          agent, truth, route_heading_, target.position.z(),
+          agent, target_estimate, route_heading_, config_.target_ground_z,
           config_.target_ugv_circumradius);
-      const auto velocity = uavVelocityCommand(
-          agent.velocity, acceleration, config_.control_dt, uav_velocity_limit_);
+      const auto velocity = target_estimate.active
+          ? uavVelocityCommand(agent.velocity, acceleration, config_.control_dt,
+                               uav_velocity_limit_)
+          : Eigen::Vector3d::Zero();
       commands[id] = velocity;
+      const Eigen::Vector3d estimate_position(target_estimate.position.x(),
+                                              target_estimate.position.y(),
+                                              config_.target_ground_z);
+      const Eigen::Vector3d estimate_velocity(target_estimate.velocity.x(),
+                                              target_estimate.velocity.y(), 0.0);
       const auto slot = hercules_mission_core::targetCenteredSlot(
-          id, hercules_mission_core::VehicleType::kDrone, target.position,
-          target.velocity, route_heading_, config_.uav_altitude,
-          target.position.z(), config_.target_ugv_circumradius);
+          id, hercules_mission_core::VehicleType::kDrone, estimate_position,
+          estimate_velocity, route_heading_, config_.uav_altitude,
+          config_.target_ground_z, config_.target_ugv_circumradius);
       desired_slots[id] = slot.position;
       slot_errors[id] = (agent.position - slot.position).norm();
       step_max_uav = std::max(step_max_uav, slot_errors[id]);
@@ -236,14 +330,21 @@ class RuralNominalMissionNode : public rclcpp::Node {
     }
     for (const char* id : kUgvs) {
       const auto agent = agentState(states_.at(id));
+      const auto target_estimate = controlEstimate(id, target, mission_time);
+      control_estimates[id] = target_estimate;
       const auto command = controller_.targetNominalUnicycleControl(
-          agent, truth, route_heading_, target.position.z(),
+          agent, target_estimate, route_heading_, config_.target_ground_z,
           config_.target_ugv_circumradius);
       commands[id] = {command.x(), command.y(), 0.0};
+      const Eigen::Vector3d estimate_position(target_estimate.position.x(),
+                                              target_estimate.position.y(),
+                                              config_.target_ground_z);
+      const Eigen::Vector3d estimate_velocity(target_estimate.velocity.x(),
+                                              target_estimate.velocity.y(), 0.0);
       const auto slot = hercules_mission_core::targetCenteredSlot(
-          id, hercules_mission_core::VehicleType::kUgv, target.position,
-          target.velocity, route_heading_, config_.uav_altitude,
-          target.position.z(), config_.target_ugv_circumradius);
+          id, hercules_mission_core::VehicleType::kUgv, estimate_position,
+          estimate_velocity, route_heading_, config_.uav_altitude,
+          config_.target_ground_z, config_.target_ugv_circumradius);
       desired_slots[id] = slot.position;
       slot_errors[id] =
           (agent.position.head<2>() - slot.position.head<2>()).norm();
@@ -251,10 +352,12 @@ class RuralNominalMissionNode : public rclcpp::Node {
       const double radius = (agent.position.head<2>() - target.position.head<2>()).norm();
       step_min_radius = std::min(step_min_radius, radius);
       step_max_radius = std::max(step_max_radius, radius);
-      if (!dry_run_ && enable_formation_) {
+      if (!dry_run_ && enable_formation_ && target_estimate.active) {
         publishCar(id, ugvCarCommand(command.x(), command.y(),
                                      agent.velocity.head<2>().norm(),
                                      config_.formation.ugv_max_yaw_rate));
+      } else if (!dry_run_ && enable_formation_) {
+        publishCar(id, stoppedCarCommand());
       }
     }
     commands["Target1"] = {target_command.x(), target_command.y(), 0.0};
@@ -265,7 +368,7 @@ class RuralNominalMissionNode : public rclcpp::Node {
     min_ugv_radius_ = std::min(min_ugv_radius_, step_min_radius);
     max_ugv_radius_ = std::max(max_ugv_radius_, step_max_radius);
     writeRecord(target, target_command, commands, desired_slots, slot_errors,
-                step_max_uav, step_max_ugv);
+                control_estimates, step_max_uav, step_max_ugv);
     ++step_;
   }
 
@@ -336,11 +439,16 @@ class RuralNominalMissionNode : public rclcpp::Node {
     out << '[' << value.x() << ',' << value.y() << ',' << value.z() << ']';
   }
 
+  void writeFinite(std::ostream& out, double value) {
+    out << (std::isfinite(value) ? value : 0.0);
+  }
+
   void writeRecord(const hercules_mission_core::AgentState& target,
                    const Eigen::Vector2d& target_command,
                    const std::map<std::string, Eigen::Vector3d>& commands,
                    const std::map<std::string, Eigen::Vector3d>& desired_slots,
                    const std::map<std::string, double>& slot_errors,
+                   const std::map<std::string, hercules_mission_core::TargetEstimate>& control_estimates,
                    double uav_error, double ugv_error) {
     log_ << std::setprecision(15) << "{\"step\":" << step_
          << ",\"dt\":" << config_.control_dt
@@ -409,10 +517,113 @@ class RuralNominalMissionNode : public rclcpp::Node {
       if (slot_index++) log_ << ',';
       log_ << '\"' << id << "\":" << error;
     }
+    log_ << "},\"target_tracking\":{\"enabled\":"
+         << (target_source_name_ == "distributed_tracking" ? "true" : "false")
+         << ",\"observation_source\":\"" << target_observation_source_
+         << "\",\"target_id\":\"Target1\",\"epoch_id\":" << tracking_epoch_
+         << ",\"agents\":{";
+    std::size_t tracking_index = 0;
+    for (const char* id : kControlled) {
+      if (tracking_index++) log_ << ',';
+      log_ << '\"' << id << "\":{";
+      const auto measurement = tracking_measurements_.find(id);
+      log_ << "\"measurement\":{";
+      if (measurement != tracking_measurements_.end()) {
+        const auto& value = measurement->second;
+        log_ << "\"target_id\":\"" << value.target_id << "\",\"valid\":"
+             << (value.valid ? "true" : "false") << ",\"visible\":"
+             << (value.visible ? "true" : "false") << ",\"source\":\""
+             << target_observation_source_ << "\",\"source_id\":\"" << value.source_id
+             << "\",\"capture_id\":\"" << value.capture_id << "\",\"sensor\":\""
+             << value.sensor_id << "\",\"timestamp\":";
+        writeFinite(log_, hercules_tracking_ros::timeSeconds(value.stamp));
+        log_ << ",\"capture_wall_timestamp\":";
+        writeFinite(log_, hercules_tracking_ros::timeSeconds(value.capture_stamp));
+        log_ << ",\"ros_receipt_timestamp\":";
+        writeFinite(log_, hercules_tracking_ros::timeSeconds(value.receipt_stamp));
+        log_ << ",\"position\":[" << value.position[0] << ',' << value.position[1]
+             << "],\"covariance\":[[" << value.covariance[0] << ',' << value.covariance[1]
+             << "],[" << value.covariance[2] << ',' << value.covariance[3] << "]]";
+      }
+      log_ << "},\"estimate\":{";
+      const auto raw_estimate = local_estimates_.find(id);
+      if (raw_estimate != local_estimates_.end()) {
+        const auto& value = raw_estimate->second;
+        log_ << "\"target_id\":\"" << value.target_id << "\",\"position\":["
+             << value.position[0] << ',' << value.position[1] << "],\"velocity\":["
+             << value.velocity[0] << ',' << value.velocity[1] << "],\"active\":"
+             << (value.active ? "true" : "false") << ",\"iterations\":"
+             << value.consensus_iterations << ",\"consensus_residual\":";
+        writeFinite(log_, value.consensus_residual);
+        log_ << ",\"timestamp\":";
+        writeFinite(log_, hercules_tracking_ros::timeSeconds(value.stamp));
+        log_ << ",\"covariance\":[[" << value.state_covariance[0] << ','
+             << value.state_covariance[1] << "],[" << value.state_covariance[4]
+             << ',' << value.state_covariance[5] << "]]";
+        log_ << ",\"state_covariance\":[";
+        for (std::size_t covariance_index = 0; covariance_index < 16; ++covariance_index) {
+          if (covariance_index) log_ << ',';
+          log_ << value.state_covariance[covariance_index];
+        }
+        log_ << ']';
+      }
+      const auto control = control_estimates.find(id);
+      log_ << "},\"active\":"
+           << (control != control_estimates.end() && control->second.active ? "true" : "false");
+      const auto diagnostic = tracking_diagnostics_.find(id);
+      if (diagnostic != tracking_diagnostics_.end()) {
+        log_ << ",\"direct_observation\":"
+             << (diagnostic->second.direct_observation ? "true" : "false")
+             << ",\"epoch_timed_out\":"
+             << (diagnostic->second.epoch_timed_out ? "true" : "false");
+      }
+      log_ << '}';
+    }
+    uint64_t messages = 0, rejected = 0, handoffs_sent = 0, handoffs_accepted = 0;
+    std::size_t active_tracks = 0, direct_observations = 0, timed_out_epochs = 0;
+    for (const auto& [id, value] : tracking_diagnostics_) {
+      (void)id;
+      messages += value.consensus_messages_published;
+      rejected += value.rejected_messages;
+      handoffs_sent += value.handoffs_sent;
+      handoffs_accepted += value.handoffs_accepted;
+      active_tracks += value.active;
+      direct_observations += value.direct_observation;
+      timed_out_epochs += value.epoch_timed_out;
+    }
+    log_ << "},\"active_track_count\":" << active_tracks
+         << ",\"direct_observation_count\":" << direct_observations
+         << ",\"epochs_timed_out\":" << timed_out_epochs
+         << ",\"consensus_messages_published\":" << messages
+         << ",\"consensus_messages_rejected\":" << rejected
+         << ",\"handoffs_sent\":" << handoffs_sent
+         << ",\"handoffs_accepted\":" << handoffs_accepted << "},";
+    log_ << "\"target_observation_diagnostics\":{";
+    if (observation_diagnostics_) {
+      const auto& value = *observation_diagnostics_;
+      log_ << "\"camera_captures\":" << value.camera_captures
+           << ",\"camera_visible_detections\":" << value.visible_detections
+           << ",\"camera_invalid_detections\":" << value.invalid_detections
+           << ",\"camera_rpc_errors\":" << value.rpc_errors
+           << ",\"mean_capture_rate_hz\":" << value.mean_capture_rate_hz
+           << ",\"capture_interval_p95_sec\":" << value.capture_interval_p95_sec
+           << ",\"capture_interval_max_sec\":" << value.capture_interval_max_sec
+           << ",\"mean_image_rpc_duration_sec\":" << value.mean_image_rpc_duration_sec
+           << ",\"max_image_rpc_duration_sec\":" << value.max_image_rpc_duration_sec;
+    }
     log_ << "},\"formation\":{\"formation_max_error\":"
          << std::max(uav_error, ugv_error)
          << ",\"formation_xy_max_error\":" << std::max(uav_error, ugv_error)
-         << "},\"tracking_communication_links\":[],"
+         << "},\"tracking_communication_links\":[";
+    std::size_t link_index = 0;
+    for (const auto& [first, neighbors] : current_adjacency_) {
+      for (const auto& second : neighbors) {
+        if (first >= second) continue;
+        if (link_index++) log_ << ',';
+        log_ << "[\"" << first << "\",\"" << second << "\"]";
+      }
+    }
+    log_ << "],"
             "\"safety_communication_links\":[],\"collisions\":{}}\n";
     log_.flush();
   }
@@ -420,6 +631,7 @@ class RuralNominalMissionNode : public rclcpp::Node {
   hercules_mission_core::RuralTargetTrackingConfig config_;
   hercules_mission_core::FormationController controller_;
   TruthTargetSource target_source_;
+  std::unique_ptr<DistributedTargetSource> distributed_target_source_;
   std::unique_ptr<hercules_mission_core::FigureEightTargetController>
       target_controller_;
   bool dry_run_{true};
@@ -427,6 +639,8 @@ class RuralNominalMissionNode : public rclcpp::Node {
   bool enable_formation_{true};
   bool running_{false};
   bool finished_{false};
+  std::string target_source_name_{"truth"};
+  std::string target_observation_source_{"truth"};
   double duration_{30.0};
   double startup_timeout_{30.0};
   double freshness_timeout_{0.5};
@@ -435,6 +649,8 @@ class RuralNominalMissionNode : public rclcpp::Node {
   std::string log_path_;
   std::ofstream log_;
   std::size_t step_{0};
+  uint64_t tracking_epoch_{0};
+  double next_tracking_time_{0.0};
   double max_uav_error_{0.0};
   double max_ugv_error_{0.0};
   double min_ugv_radius_{1e9};
@@ -446,10 +662,25 @@ class RuralNominalMissionNode : public rclcpp::Node {
   std::map<std::string, hercules_interfaces::msg::GroundTruthState> states_;
   std::map<std::string, Clock::time_point> receipts_;
   std::map<std::string, Eigen::Vector3d> origins_;
+  hercules_tracking_ros::Adjacency current_adjacency_;
+  std::map<std::string, hercules_interfaces::msg::TargetEstimate> local_estimates_;
+  std::map<std::string, Clock::time_point> estimate_receipts_;
+  std::map<std::string, hercules_interfaces::msg::TargetMeasurement> tracking_measurements_;
+  std::map<std::string, hercules_interfaces::msg::TrackingDiagnostics> tracking_diagnostics_;
+  std::optional<hercules_interfaces::msg::TargetObservationDiagnostics> observation_diagnostics_;
   std::vector<rclcpp::Subscription<hercules_interfaces::msg::GroundTruthState>::SharedPtr>
       state_subscriptions_;
   std::vector<rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr>
       origin_subscriptions_;
+  std::vector<rclcpp::Subscription<hercules_interfaces::msg::TargetEstimate>::SharedPtr>
+      estimate_subscriptions_;
+  std::vector<rclcpp::Subscription<hercules_interfaces::msg::TargetMeasurement>::SharedPtr>
+      measurement_subscriptions_;
+  std::vector<rclcpp::Subscription<hercules_interfaces::msg::TrackingDiagnostics>::SharedPtr>
+      tracking_diagnostic_subscriptions_;
+  rclcpp::Subscription<hercules_interfaces::msg::TargetObservationDiagnostics>::SharedPtr
+      observation_diagnostics_subscription_;
+  rclcpp::Publisher<hercules_interfaces::msg::TrackingEpoch>::SharedPtr epoch_publisher_;
   std::map<std::string, rclcpp::Publisher<airsim_interfaces::msg::VelCmd>::SharedPtr>
       uav_publishers_;
   std::map<std::string,

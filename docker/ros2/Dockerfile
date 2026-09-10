@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libeigen3-dev gdb gdbserver clangd procps sysstat iproute2 netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m pip install --no-cache-dir \
-    osqp==1.0.4 jinja2==3.1.6 joblib==1.5.1 MarkupSafe==3.0.2
+    osqp==1.0.4 jinja2==3.1.6 joblib==1.5.1 MarkupSafe==3.0.2 \
+    rpc-msgpack==0.6
 # Dockerfile.dockerignore makes this a manifest-only tree, not a source copy.
 COPY ros2/src/ /tmp/ros-dependencies/src/
 RUN source /opt/ros/humble/setup.bash && \

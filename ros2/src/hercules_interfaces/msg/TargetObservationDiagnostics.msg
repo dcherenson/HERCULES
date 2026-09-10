@@ -1,0 +1,11 @@
+string observation_source
+builtin_interfaces/Time stamp
+uint64 camera_captures
+uint64 visible_detections
+uint64 invalid_detections
+uint64 rpc_errors
+float64 mean_capture_rate_hz
+float64 capture_interval_p95_sec
+float64 capture_interval_max_sec
+float64 mean_image_rpc_duration_sec
+float64 max_image_rpc_duration_sec

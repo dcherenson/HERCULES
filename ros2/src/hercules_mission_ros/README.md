@@ -2,8 +2,10 @@
 
 `hercules_mission_ros` converts the existing wrapper's vehicle-local odometry
 into the common frame used by the working Python mission. The package also has
-a separate, bounded RuralAustralia nominal-mission runner. It intentionally
-contains no distributed tracker, CBF, conformal prediction, or perception.
+a separate, bounded RuralAustralia nominal-mission runner. Distributed
+tracking and perception live in `hercules_tracking_ros`; this package consumes
+each agent's local estimate but intentionally contains no tracker instance,
+CBF, conformal prediction, or perception implementation.
 
 ## Canonical frame
 
@@ -116,6 +118,30 @@ single ROS launch. Start with the mandatory no-actuation preflight:
 Set `dry_run:=false` only after that succeeds. The live path derives every
 origin from synchronized wrapper-local and direct `simGetObjectPose(name,
 True)` samples; it does not reuse the measured smoke origins below.
+
+The default target path is the production distributed-camera path:
+
+```bash
+./docker/ros2/exec.sh ros2 launch hercules_mission_ros rural_nominal.launch.py \
+  dry_run:=false target_source:=distributed_tracking \
+  target_observation_source:=camera duration_sec:=30
+```
+
+This launch starts eight independent C++ tracker processes and the
+asynchronous Python camera observer from `hercules_tracking_ros`. Drone1,
+Drone2, SimpleFlight, Drone4, and Drone5 use `target_bottom`; Husky1, Husky2,
+and Husky3 use `front_center`. Each formation controller consumes only its own
+`/hercules_tracking/<agent>/Target1/estimate`. A fresh active estimate is
+predicted to the control time; a missing, inactive, future-dated, or stale
+estimate produces zero UAV acceleration or a hard-stop UGV command. There is
+no truth fallback.
+
+For the deterministic observation gate, change only
+`target_observation_source:=truth`. To reproduce the historical direct-truth
+control path, set `target_source:=truth`; tracker/observer nodes are then not
+started. Camera mode requires a rendered Unreal RHI. Do not use `-nullrhi`;
+use the ordinary visible launch or `-RenderOffscreen` when a noninteractive
+rendered session is needed.
 
 The staged live gates are launch arguments. Target-only validation uses
 `dry_run:=false enable_target:=true enable_formation:=false`; the complete run

@@ -4,10 +4,13 @@ This is the setup and reproduction guide for continuing the work on a second
 Linux workstation. Use the `codex/ros2` branch. Do not substitute `main`, and do
 not upgrade Unreal Engine: this project is pinned to **Unreal Engine 5.2.1**.
 
-The implemented stage runs Target1 on the ported Gerono figure eight and uses
-Target1 truth to drive the nominal target-centered formation for Drone1,
-Drone2, SimpleFlight, Drone4, Drone5, Husky1, Husky2, and Husky3. Distributed
-tracking, CBF, perception, and conformal prediction remain intentionally off.
+The implemented stage runs Target1 on the ported Gerono figure eight and can
+drive the nominal target-centered formation for Drone1, Drone2, SimpleFlight,
+Drone4, Drone5, Husky1, Husky2, and Husky3 from either direct truth or each
+agent's own distributed target estimate. The default live launch uses the
+existing Python camera/depth observer and eight independent C++ tracker
+processes. CBF, conformal prediction, and live safety filtering remain
+intentionally out of scope.
 
 ## 1. Reference Linux host
 
@@ -248,8 +251,10 @@ It performs `docker compose up -d --build`, creates a new clean build root,
 builds the entire ROS 2 workspace, and runs the full package test gate used by
 this work. The gate includes the existing wrapper/control smoke tests,
 `hercules_tracking`, Python/C++ tracking parity, `hercules_mission_core`,
-Python/C++ mission parity, the deterministic eight-agent regression, and
-`hercules_mission_ros` adapter/contract tests.
+Python/C++ mission parity, the deterministic eight-agent regression,
+`hercules_tracking_ros` protocol/transport/truth-observer tests, and
+`hercules_mission_ros` adapter/contract tests. The test script prints the
+authoritative total after every run.
 
 Console output is also retained under the ignored directory:
 
@@ -257,10 +262,16 @@ Console output is also retained under the ignored directory:
 ros2/validation/reproduction/artifacts/reproduction-<timestamp>.log
 ```
 
-The most recently validated workspace result before handoff was **95 tests,
-0 failures, 0 errors, 0 skipped**. The complete Python distributed-mission suite
-separately reported **133 passed**. Treat the new machine's reproduction output
-as authoritative.
+The earlier nominal-only handoff reported **95 tests, 0 failures, 0 errors,
+0 skipped** and **133 passed** in the complete Python distributed-mission suite.
+Those are historical figures rather than acceptance results for the new ROS
+tracking transport. Treat the new machine's reproduction output as
+authoritative.
+
+The distributed-tracking handoff was last verified with a clean 17-package
+workspace build, **115 ROS tests, 0 failures, 0 errors, 0 skipped**, and
+**134 Python distributed-mission tests passed**. Re-run the script rather than
+assuming these counts remain valid after future edits.
 
 ## 8. Reproduce the live mission, plots, and video
 
@@ -282,18 +293,50 @@ cd "$HOME/HERCULES"
 ```
 
 The script reruns the clean deterministic gate, performs the required no-motion
-dry-run calibration, executes the truth-target nominal mission, and invokes the
-existing Python media renderer. Outputs are written only beneath:
+dry-run calibration, resets the simulator between modes, and executes three
+live runs: the direct-truth nominal baseline, distributed tracking with seeded
+truth observations, and distributed tracking with the production camera/depth
+observer. It invokes the existing Python media renderer for every mode and
+builds a truth-versus-camera comparison. Outputs are written only beneath:
 
 ```text
 ros2/validation/reproduction/artifacts/
 ```
 
-Expected files include `mission.jsonl`, `dry_run.jsonl`, `metrics.json`,
-`full_mission_trajectories.png`, `slot_errors.png`, `topdown.mp4`,
-`topdown.gif`, and the timestamped reproduction log. This directory is ignored
-by Git. The MP4/GIF are top-down diagnostic animations; the Unreal window is
-the visible physics/rendering view.
+Expected mode directories are `truth_nominal/`, `distributed_truth/`, and
+`distributed_camera/`. Each contains `mission.jsonl`, `metrics.json`, trajectory
+and error PNGs, plus `topdown.mp4` and `topdown.gif`. The common directory also
+contains `dry_run.jsonl`, `mode_comparison.json`, `mode_comparison.png`, and the
+timestamped reproduction log. This entire output tree is ignored by Git. The
+MP4/GIF are top-down diagnostic animations; the Unreal window is the visible
+physics/rendering view.
+
+Camera mode requires a rendered RHI because it calls AirSim
+`DepthPerspective`. Do not add `-nullrhi`: in this environment that mode could
+run physics-only truth validation but crashed when the first depth frame was
+requested. If a noninteractive rendered session is needed, use:
+
+```bash
+./docker/ros2/launch_rural_mission_sim.sh \
+  -RenderOffscreen -unattended -NoSound -stdout
+```
+
+The checked-in Rural settings include the exact executable-source
+`target_bottom` camera definition for all five UAVs. The three CPHusky trackers
+use their existing `front_center` cameras. See
+`ros2/validation/reproduction/README.md` for the latest bounded live metrics.
+
+For a short manual distributed gate without rerunning the clean build, use:
+
+```bash
+./docker/ros2/exec.sh ros2 launch hercules_mission_ros rural_nominal.launch.py \
+  target_source:=distributed_tracking \
+  target_observation_source:=truth duration_sec:=10
+```
+
+Change only `target_observation_source:=camera` for the real camera/depth path.
+Distributed camera mode intentionally commands zero/stop for missing, inactive,
+future, or stale local estimates; there is no Target1 truth fallback.
 
 Stop Unreal with Ctrl-C in terminal 1. Stop the development container when
 finished:
@@ -302,9 +345,10 @@ finished:
 docker compose -f docker/ros2/compose.yaml down
 ```
 
-For a headless RPC/physics check, append `-nullrhi -unattended -NoSound` to the
-simulator launch. Headless mode cannot produce a visible Unreal screenshot but
-can still produce the logged top-down animation.
+For a truth-only headless RPC/physics check, append
+`-nullrhi -unattended -NoSound` to the simulator launch. It cannot produce a
+visible Unreal screenshot and must not be used for camera observation. The
+logged top-down animation can still be generated from a truth-only run.
 
 ## 9. Useful manual commands
 
@@ -319,6 +363,8 @@ Mission-specific implementation and validation details are in:
 
 - [`ros2/src/hercules_mission_core/README.md`](ros2/src/hercules_mission_core/README.md)
 - [`ros2/src/hercules_mission_ros/README.md`](ros2/src/hercules_mission_ros/README.md)
+- [`ros2/src/hercules_tracking_ros/README.md`](ros2/src/hercules_tracking_ros/README.md)
+- [`ros2/validation/reproduction/README.md`](ros2/validation/reproduction/README.md)
 - [`ros2/validation/rural_nominal/REPORT.md`](ros2/validation/rural_nominal/REPORT.md)
 - [`ros2/docs/mission_artifact_compatibility.md`](ros2/docs/mission_artifact_compatibility.md)
 
@@ -335,8 +381,9 @@ target speed is explicitly 0.10 m/s even though the generic parser default is
 ## 10. Continuation boundary
 
 Do not infer that the current stage implements the eventual complete tracking
-experiment. The next integration work may replace `target_source: truth` with
-distributed tracking, then add CBF/perception in separate steps. Preserve the
-pure C++ numerical behavior and its parity tests while doing so. Do not move
+experiment. Distributed estimation and the existing camera/depth observation
+path are integrated, but CBF, conformal prediction, obstacle perception,
+cooperative localization, and the final safety-filtered mission are not.
+Preserve the pure C++ numerical behavior and its parity tests. Do not move
 plotting/video code into production ROS packages; preserve the documented JSONL
 compatibility boundary.

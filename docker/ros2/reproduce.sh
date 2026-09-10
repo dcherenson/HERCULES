@@ -15,8 +15,13 @@ Usage: ./docker/ros2/reproduce.sh [--with-live-video] [--duration SECONDS]
 Builds the Docker image, performs a clean ROS 2 workspace build, and runs the
 complete ROS test gate. With --with-live-video, a UE 5.2.1 RuralAustralia
 simulator must already be running; the script then performs a dry-run preflight,
-runs the nominal mission, and renders PNG, MP4, GIF, JSON, JSONL, and text output
-under the Git-ignored ros2/validation/reproduction/artifacts directory.
+runs the truth-target baseline, distributed truth-observation gate, and final
+distributed camera-observation mission. It renders PNG, MP4, GIF, JSON, JSONL,
+and text output under the Git-ignored
+ros2/validation/reproduction/artifacts directory.
+
+Camera mode requires a rendered Unreal session. Do not launch with -nullrhi;
+use the ordinary visible launch or -RenderOffscreen.
 EOF
 }
 
@@ -62,11 +67,22 @@ run_live_stage() {
   local status=0
   timeout --foreground --signal=INT --kill-after=15 "${timeout_seconds}s" \
     "$SCRIPT_DIR/exec.sh" ros2 launch hercules_mission_ros rural_nominal.launch.py "$@" || status=$?
+  # Signals delivered through `docker exec` do not reliably reap every child
+  # launched by ROS 2. Recreate the disposable development service after each
+  # live stage so wrappers, observers, and trackers cannot leak into the next
+  # stage and contend for the AirSim RPC server.
+  docker compose -f "$COMPOSE_FILE" restart dev >/dev/null
   # The mission node completes and safely stops, but the included wrapper nodes
   # remain alive until timeout interrupts the enclosing launch.
   if [[ $status -ne 0 && $status -ne 124 && $status -ne 130 ]]; then
     return "$status"
   fi
+}
+
+reset_simulator() {
+  "$SCRIPT_DIR/exec.sh" env PYTHONPATH=/workspaces/hercules/PythonClient \
+    python3 -c 'import hercules_cosysairsim as airsim; client = airsim.MultirotorClient(port=41451); client.confirmConnection(); client.reset()'
+  sleep 2
 }
 
 main() {
@@ -94,20 +110,57 @@ main() {
   done
 
   local container_artifacts=/workspaces/hercules/ros2/validation/reproduction/artifacts
+  mkdir -p "$ARTIFACT_DIR/truth_nominal" \
+    "$ARTIFACT_DIR/distributed_truth" "$ARTIFACT_DIR/distributed_camera"
   run_live_stage 50 dry_run:=true duration_sec:=5 \
+    target_source:=truth \
     "log_path:=$container_artifacts/dry_run.jsonl"
-  run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
-    enable_target:=true enable_formation:=true \
-    "duration_sec:=$MISSION_DURATION" \
-    "log_path:=$container_artifacts/mission.jsonl"
-
-  [[ -s "$ARTIFACT_DIR/mission.jsonl" ]] || {
-    echo "live mission did not produce a non-empty mission.jsonl" >&2
+  [[ "$(wc -l < "$ARTIFACT_DIR/dry_run.jsonl")" -ge 40 ]] || {
+    echo "dry-run preflight ended before 40 records" >&2
     return 1
   }
+  reset_simulator
+  run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
+    enable_target:=true enable_formation:=true \
+    target_source:=truth \
+    "duration_sec:=$MISSION_DURATION" \
+    "log_path:=$container_artifacts/truth_nominal/mission.jsonl"
+  reset_simulator
+  run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
+    enable_target:=true enable_formation:=true \
+    target_source:=distributed_tracking target_observation_source:=truth \
+    "duration_sec:=$MISSION_DURATION" \
+    "log_path:=$container_artifacts/distributed_truth/mission.jsonl"
+  reset_simulator
+  run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
+    enable_target:=true enable_formation:=true \
+    target_source:=distributed_tracking target_observation_source:=camera \
+    "duration_sec:=$MISSION_DURATION" \
+    "log_path:=$container_artifacts/distributed_camera/mission.jsonl"
+
+  local mode
+  local minimum_records=$((MISSION_DURATION * 8))
+  for mode in truth_nominal distributed_truth distributed_camera; do
+    [[ -s "$ARTIFACT_DIR/$mode/mission.jsonl" ]] || {
+      echo "$mode did not produce a non-empty mission.jsonl" >&2
+      return 1
+    }
+    local records
+    records="$(wc -l < "$ARTIFACT_DIR/$mode/mission.jsonl")"
+    [[ "$records" -ge "$minimum_records" ]] || {
+      echo "$mode ended early: $records records, expected at least $minimum_records" >&2
+      return 1
+    }
+    "$SCRIPT_DIR/exec.sh" python3 \
+      /workspaces/hercules/ros2/validation/rural_nominal/render_validation.py \
+      "$container_artifacts/$mode/mission.jsonl" \
+      --output-dir "$container_artifacts/$mode"
+  done
   "$SCRIPT_DIR/exec.sh" python3 \
-    /workspaces/hercules/ros2/validation/rural_nominal/render_validation.py \
-    "$container_artifacts/mission.jsonl" --output-dir "$container_artifacts"
+    /workspaces/hercules/ros2/validation/rural_nominal/compare_tracking_modes.py \
+    "$container_artifacts/truth_nominal/mission.jsonl" \
+    "$container_artifacts/distributed_camera/mission.jsonl" \
+    --output-dir "$container_artifacts"
   echo "Live media written to $ARTIFACT_DIR"
 }
 

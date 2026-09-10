@@ -130,3 +130,23 @@ def test_worker_rejects_non_target_names_and_keeps_capture_id():
     assert valid.visible
     assert valid.capture_id != invalid.capture_id
     assert valid.metadata["position_frame"] == "world_ned"
+
+
+def test_worker_reports_capture_and_rpc_timing_diagnostics():
+    worker = TargetObservationWorker(_AirSim, 41451, {"Drone1": "target_bottom"})
+    with worker._lock:
+        worker.capture_count = 3
+        worker.visible_count = 2
+        worker.invalid_count = 1
+        worker.error_count = 4
+        worker.capture_timestamps = [1.0, 1.25, 1.75]
+        worker.rpc_durations = [0.1, 0.2]
+    diagnostics = worker.diagnostics()
+    assert diagnostics["captures"] == 3
+    assert diagnostics["visible"] == 2
+    assert diagnostics["invalid"] == 1
+    assert diagnostics["errors"] == 4
+    assert np.isclose(diagnostics["mean_capture_rate_hz"], 1.0 / 0.375)
+    assert np.isclose(diagnostics["capture_interval_max_sec"], 0.5)
+    assert np.isclose(diagnostics["mean_rpc_duration_sec"], 0.15)
+    assert np.isclose(diagnostics["max_rpc_duration_sec"], 0.2)

@@ -62,6 +62,29 @@ tracking:
   tracking_process_noise: 0.20
   tracking_measurement_std: 0.25
 
+target_observation:
+  # Executable target_observation.py/orchestrator behavior is authoritative.
+  mission_reproduction_source: camera
+  validation_source: truth
+  target_sensing_range: 100.0
+  camera_rate_hz: 4.0
+  target_actor_pattern: "Target1*"
+  target_radius_correction_m: 0.0
+  cameras:
+    Drone1: target_bottom
+    Drone2: target_bottom
+    SimpleFlight: target_bottom
+    Drone4: target_bottom
+    Drone5: target_bottom
+    Husky1: front_center
+    Husky2: front_center
+    Husky3: front_center
+
+tracking_transport:
+  measurement_wait_sec: 0.010
+  seed_timeout_sec: 0.020
+  round_timeout_sec: 0.008
+
 # Adapter-only values are recorded separately and are not used by the C++
 # geometry/control library. Future live integration owns frame conversion and
 # model-level [speed,yaw_rate] to simulator actuation conversion.

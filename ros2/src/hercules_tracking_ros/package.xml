@@ -1,24 +1,20 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>hercules_mission_ros</name>
+  <name>hercules_tracking_ros</name>
   <version>0.1.0</version>
-  <description>Read-only ROS adapter for canonical AirSim world-NED mission state.</description>
+  <description>Distributed ROS 2 transport for the pure C++ HERCULES target tracker.</description>
   <maintainer email="maintainers@example.com">HERCULES developers</maintainer>
   <license>MIT</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <depend>eigen</depend>
-  <depend>airsim_interfaces</depend>
+  <depend>builtin_interfaces</depend>
   <depend>hercules_interfaces</depend>
-  <depend>hercules_mission_core</depend>
-  <depend>hercules_tracking_ros</depend>
-  <depend>geometry_msgs</depend>
-  <depend>nav_msgs</depend>
+  <depend>hercules_tracking</depend>
   <depend>rclcpp</depend>
-  <exec_depend>rclpy</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>rclpy</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>
-  <test_depend>rclpy</test_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

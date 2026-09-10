@@ -473,6 +473,15 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
                         axis.scatter([estimate_xy[0]], [estimate_xy[1]], marker="+", color=colors[name], s=60, linewidths=1.4, zorder=7)
                     except (KeyError, TypeError, ValueError, np.linalg.LinAlgError):
                         pass
+                tracking_agents = ((record.get("target_tracking") or {}).get("agents") or {})
+                tracking_agent = tracking_agents.get(name, {}) if isinstance(tracking_agents, Mapping) else {}
+                if isinstance(tracking_agent, Mapping) and tracking_agent.get("direct_observation"):
+                    state_position = state.get("position") if isinstance(state, Mapping) else None
+                    if state_position is not None:
+                        direct_xy = route_up_xy(np.asarray(state_position, dtype=float), heading, origin)
+                        axis.scatter([direct_xy[0]], [direct_xy[1]], marker="o", s=105,
+                                     facecolors="none", edgecolors="limegreen",
+                                     linewidths=2.0, zorder=8)
             target = _target_truth(record)
             if isinstance(target, Mapping) and target.get("position") is not None:
                 try:
@@ -529,6 +538,8 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
                 Line2D([0], [0], color="black", lw=1, linestyle="--", alpha=0.5, label="tracking communication"),
                 Line2D([0], [0], color="dimgray", lw=1, linestyle=":", alpha=0.5, label="safety communication"),
                 Line2D([0], [0], color="black", marker="+", linestyle="None", markersize=8, label="target estimate"),
+                Line2D([0], [0], color="limegreen", marker="o", markerfacecolor="none",
+                       linestyle="None", markersize=8, label="direct target observation"),
                 Line2D([0], [0], color="black", lw=1, linestyle=":", alpha=0.5, label="obstacle estimate"),
                 Line2D([0], [0], color="red", marker="x", linestyle="None", markersize=7, label="collision"),
             ]
