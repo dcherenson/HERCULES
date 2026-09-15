@@ -1,0 +1,33 @@
+mission_state_adapter:
+  ros__parameters:
+    agent_ids: [Drone1, Drone2, SimpleFlight, Drone4, Drone5, Husky1, Husky2, Husky3, Target1]
+    vehicle_types: [drone, drone, drone, drone, drone, ugv, ugv, ugv, target_ugv]
+    odom_topics:
+      - /hercules_drone/Drone1/ground_truth/odom_local
+      - /hercules_drone/Drone2/ground_truth/odom_local
+      - /hercules_drone/SimpleFlight/ground_truth/odom_local
+      - /hercules_drone/Drone4/ground_truth/odom_local
+      - /hercules_drone/Drone5/ground_truth/odom_local
+      - /hercules_ugv/Husky1/ground_truth/odom_local
+      - /hercules_ugv/Husky2/ground_truth/odom_local
+      - /hercules_ugv/Husky3/ground_truth/odom_local
+      - /hercules_ugv/Target1/ground_truth/odom_local
+    direct_pose_topics:
+      - /hercules_mission/direct_pose/Drone1
+      - /hercules_mission/direct_pose/Drone2
+      - /hercules_mission/direct_pose/SimpleFlight
+      - /hercules_mission/direct_pose/Drone4
+      - /hercules_mission/direct_pose/Drone5
+      - /hercules_mission/direct_pose/Husky1
+      - /hercules_mission/direct_pose/Husky2
+      - /hercules_mission/direct_pose/Husky3
+      - /hercules_mission/direct_pose/Target1
+    vehicle_origins_ned: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    calibrate_origins: true
+    calibration_samples: 10
+    calibration_stability_tolerance_m: 0.05
+    direct_pose_validation_tolerance_m: 0.25
+    state_topic_prefix: /hercules_mission/ground_truth
+    freshness_timeout_sec: 0.5

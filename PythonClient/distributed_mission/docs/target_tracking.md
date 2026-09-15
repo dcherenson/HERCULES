@@ -12,7 +12,7 @@ Target-centered tracking is the default. The controlled vehicles initially
 use the common launch center with the established compact, non-overlapping
 startup offsets (UAV and UGV body heights remain independent). `Target1` starts
 one quarter of the way along the launch-to-goal route in RuralAustralia, offset
-5 m to the chase-camera-right side, then shifted 10 m back toward the robot
+5 m to the chase-camera-right side, then shifted 5 m back toward the robot
 launch point along the route, and at the resolved mission goal in FlyingCPP.
 Literal physics-body
 collocation would make the initial AirSim safety constraints infeasible and
@@ -74,7 +74,7 @@ RuralAustralia experiments, use
 `--initial-heading-offset-deg 90`; the unoffset route is not the tested route
 for this map. The existing UGV CBF control-point lookahead defaults to 0.1 m
 and remains a tuning parameter. UGV target obstacle inflation is controlled
-by `TARGET_CBF_SIGMA_MULTIPLIER = 4.0` near the top of
+by `TARGET_CBF_SIGMA_MULTIPLIER = 2.0` near the top of
 `modules/target_tracking.py`; it is the requested number of XY covariance
 standard deviations. The default nominal tuning is 1.0 m/s speed, 0.5
 position gain, and 1.0 rad/s UGV yaw-rate limit.

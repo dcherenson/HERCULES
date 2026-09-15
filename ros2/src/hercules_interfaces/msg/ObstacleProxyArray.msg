@@ -1,0 +1,9 @@
+std_msgs/Header header
+string agent_id
+string capture_id
+bool acquisition_success
+bool valid
+builtin_interfaces/Time capture_stamp
+string clock_domain
+string source
+ObstacleProxy[] proxies

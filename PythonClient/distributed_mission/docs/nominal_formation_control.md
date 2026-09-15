@@ -33,6 +33,8 @@ passage also tests UAV altitude avoidance. No online waypoint generation is
 used.
 
 Mestres' unicycle nominal control retains a small crawl speed while making a
-large heading correction, because an AirSim car cannot rotate in place. It
-stops inside a 0.75 m target deadband. Wang-mode Husky acceleration is mapped
-to AirSim throttle, brake, and steering in the orchestrator adapter.
+large heading correction, because an AirSim car cannot rotate in place. The
+fixed-goal controller stops within 2.0 m of its current target. The separate
+target-centered controller stops within 0.5 m of its assigned moving slot.
+Wang-mode Husky acceleration is mapped to AirSim throttle, brake, and steering
+in the orchestrator adapter.

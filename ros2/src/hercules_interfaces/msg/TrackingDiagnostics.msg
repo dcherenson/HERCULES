@@ -1,0 +1,16 @@
+string sender_id
+string target_id
+uint64 epoch_id
+builtin_interfaces/Time stamp
+bool epoch_complete
+bool epoch_timed_out
+bool active
+bool direct_observation
+uint32 consensus_iterations
+float64 consensus_residual
+uint32 expected_neighbor_count
+uint32 missing_neighbor_messages
+uint64 consensus_messages_published
+uint64 rejected_messages
+uint64 handoffs_sent
+uint64 handoffs_accepted

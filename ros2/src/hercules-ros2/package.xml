@@ -8,7 +8,7 @@
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <!-- <buildtool_depend>ament_cmake_python</buildtool_depend> -->
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
@@ -29,15 +29,16 @@
   <depend>octomap_msgs</depend>
   <depend>octomap</depend>
   <depend>airsim_interfaces</depend>
-  <!-- <depend>cv_bridge</depend> -->
+  <depend>cv_bridge</depend>
+  <depend>eigen</depend>
+  <depend>libopencv-dev</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 
   <exec_depend>launch</exec_depend>
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>cv_bridge</exec_depend>
-  <exec_depend>opencv-python</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
 
 
   <export>

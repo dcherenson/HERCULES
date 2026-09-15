@@ -90,6 +90,30 @@ subfolders to the Linux machine with `scp`/`rsync` (or a USB drive). Copy
 while the editor is closed. Asset files (`.uasset`, `.umap`) are
 platform-independent — no conversion is needed.
 
+For this ROS 2 handoff, the maintainer supplied a public
+[UnrealAssets.zip Google Drive bundle](https://drive.google.com/file/d/1WseWuqjppBw3qaVExCpbEHDIf7ZTkruZ/view?usp=sharing).
+It contains `RuralAustralia/`, `FlyingCPP/`, `Flying/`, and `Geometry/` at the
+archive root. Download it in a browser, verify the layout, and extract it into
+the HERCULES Blocks `Content` directory:
+
+```bash
+cd "$HOME/Downloads"
+for directory in RuralAustralia FlyingCPP Flying Geometry; do
+  unzip -Z1 UnrealAssets.zip | grep -q "^${directory}/" || exit 1
+done
+sha256sum UnrealAssets.zip
+cd /path/to/HERCULES/Unreal/Environments/Blocks/Content
+unzip -q "$HOME/Downloads/UnrealAssets.zip"
+for directory in RuralAustralia FlyingCPP Flying Geometry; do
+  test -d "$directory" || exit 1
+done
+test -f RuralAustralia/Maps/RuralAustralia_Example_01.umap || exit 1
+```
+
+Record the printed SHA-256 for comparison on later transfers. Do not commit the
+ZIP or extracted content; anyone redistributing the bundle remains responsible
+for the licenses of its included third-party assets.
+
 ## Reference machine
 
 For hardware planning: all HERCULES development, dataset collection, and the

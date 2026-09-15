@@ -245,6 +245,10 @@ class TargetObservationWorker:
         self._capture_sequence = 0
         self.capture_count = 0
         self.error_count = 0
+        self.visible_count = 0
+        self.invalid_count = 0
+        self.capture_timestamps = []
+        self.rpc_durations = []
         self._fov_by_camera: Dict[Tuple[str, str], float] = {}
 
     def start(self) -> None:
@@ -262,6 +266,25 @@ class TargetObservationWorker:
     def snapshot(self) -> Dict[str, TargetMeasurement]:
         with self._lock:
             return dict(self._latest)
+
+    def diagnostics(self) -> Dict[str, Any]:
+        """Return thread-safe observer timing/counter diagnostics."""
+
+        with self._lock:
+            timestamps = np.asarray(self.capture_timestamps, dtype=float)
+            intervals = np.diff(timestamps) if len(timestamps) > 1 else np.asarray([], dtype=float)
+            durations = np.asarray(self.rpc_durations, dtype=float)
+            return {
+                "captures": int(self.capture_count),
+                "visible": int(self.visible_count),
+                "invalid": int(self.invalid_count),
+                "errors": int(self.error_count),
+                "mean_capture_rate_hz": float(1.0 / np.mean(intervals)) if len(intervals) else 0.0,
+                "capture_interval_p95_sec": float(np.percentile(intervals, 95.0)) if len(intervals) else 0.0,
+                "capture_interval_max_sec": float(np.max(intervals)) if len(intervals) else 0.0,
+                "mean_rpc_duration_sec": float(np.mean(durations)) if len(durations) else 0.0,
+                "max_rpc_duration_sec": float(np.max(durations)) if len(durations) else 0.0,
+            }
 
     def _configure(self, client: Any, agent: str, camera: str) -> None:
         image_type = self.airsim_module.ImageType.DepthPerspective
@@ -404,12 +427,19 @@ class TargetObservationWorker:
             for agent, camera in self.agent_cameras.items():
                 if self._stop.is_set():
                     break
+                started = time.monotonic()
                 try:
                     measurement = self._capture(client, str(agent), str(camera))
                     with self._lock:
                         self._latest[str(agent)] = measurement
-                    self.capture_count += 1
+                        self.capture_count += 1
+                        self.visible_count += int(measurement.valid and measurement.visible)
+                        self.invalid_count += int(not measurement.valid)
+                        self.capture_timestamps.append(time.time())
+                        self.rpc_durations.append(time.monotonic() - started)
                 except Exception:
-                    self.error_count += 1
+                    with self._lock:
+                        self.error_count += 1
+                        self.rpc_durations.append(time.monotonic() - started)
             deadline += period
             self._stop.wait(max(0.0, deadline - time.monotonic()))

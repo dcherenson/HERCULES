@@ -346,8 +346,11 @@ cmake_build/
 !/Unreal/Plugins/AirSim/Content/VehicleAdv/SUV/CPHuskyMountedBar.uasset
 /suv_download_tmp
 car_assets.zip
+/UnrealAssets.zip
+/UnrealAssets.zip.sha256
 __pycache__/
 /PythonClient/**/metrics/
+/PythonClient/distributed_mission/debug_runs/
 /PythonClient/**/airsim.egg-info/
 /PythonClient/**/dist/
 
@@ -386,6 +389,8 @@ ros/src/CMakeLists.txt
 
 # ROS2
 ros2/install/
+ros2/.docker/
+/log/
 ros2/log/
 ros2/src/log
 
@@ -417,6 +422,9 @@ ros2/src/VINS-MONO-ROS2
 
 # HERCULES README demo media — keep tracked despite the global *.png ignore above
 !docs/media/**
+
+# Generated validation logs, metrics, plots, screenshots, and videos.
+ros2/validation/**/artifacts/
 
 *.csv
 PythonClient/segmentation/*.csv

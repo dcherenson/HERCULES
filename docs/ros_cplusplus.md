@@ -1,5 +1,10 @@
 # airsim_ros_pkgs
 
+For native Linux Unreal with a bind-mounted **ROS 2 Humble Docker development
+environment**, see the [tested setup and smoke-test guide](../docker/ros2/README.md).
+The historical Iron instructions below are retained for reference; Iron is not
+required by that environment.
+
 A ROS2 wrapper over the HERCULES C++ client library. All coordinates and data are in the right-handed coordinate frame of the ROS standard and not in NED except for geo points.
 The following was tested on Ubuntu 22.04 with ROS2 Iron.
 

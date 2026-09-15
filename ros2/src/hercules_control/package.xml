@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>hercules_control</name>
+  <version>0.1.0</version>
+  <description>Transport adapters and bounded interface smoke tests; no controller algorithms.</description>
+  <maintainer email="maintainers@example.com">HERCULES developers</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>eigen</depend>
+  <depend>rclcpp</depend>
+  <depend>nav_msgs</depend>
+  <depend>airsim_interfaces</depend>
+  <exec_depend>launch_ros</exec_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>rclpy</test_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

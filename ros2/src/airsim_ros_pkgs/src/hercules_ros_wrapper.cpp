@@ -140,6 +140,13 @@ void AirsimROSWrapper::initialize_ros()
     nh_->get_parameter("publish_clock", publish_clock_);
     nh_->get_parameter_or("world_frame_id", world_frame_id_, world_frame_id_);
     nh_->get_parameter_or("odom_frame_id", odom_frame_id_, odom_frame_id_);
+    nh_->get_parameter_or("ugv_command_timeout_sec", ugv_command_timeout_sec_, 0.0);
+    nh_->get_parameter_or("benchmark_logging", benchmark_logging_, false);
+    if (!std::isfinite(ugv_command_timeout_sec_) || ugv_command_timeout_sec_ < 0.0)
+        throw std::invalid_argument("ugv_command_timeout_sec must be finite and nonnegative");
+    if (!std::isfinite(update_airsim_control_every_n_sec) || update_airsim_control_every_n_sec <= 0.0)
+        throw std::invalid_argument("Control update period must be positive");
+    control_cb_ = nh_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     vel_cmd_duration_ = 0.05; // todo rosparam
     // todo enforce dynamics constraints in this node as well?
     // nh_->get_parameter("max_vert_vel_", max_vert_vel_);
@@ -147,7 +154,7 @@ void AirsimROSWrapper::initialize_ros()
 
     nh_->declare_parameter("vehicle_name", rclcpp::ParameterValue(""));
     create_ros_pubs_from_settings_json();
-    airsim_control_update_timer_ = nh_->create_wall_timer(std::chrono::duration<double>(update_airsim_control_every_n_sec), std::bind(&AirsimROSWrapper::drone_state_timer_cb, this), cb_);
+    airsim_control_update_timer_ = nh_->create_wall_timer(std::chrono::duration<double>(update_airsim_control_every_n_sec), std::bind(&AirsimROSWrapper::drone_state_timer_cb, this), control_cb_);
 }
 
 void AirsimROSWrapper::create_ros_pubs_from_settings_json()
@@ -200,17 +207,19 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
         auto &vehicle_setting = curr_vehicle_elem.second;
         auto curr_vehicle_name = curr_vehicle_elem.first;
 
-        // If block to check whether the host port is drone or car, then skip if it is not starting with Drone or Husky
+        // HERO uses separate RPC ports for multirotors and cars.  Keep the
+        // established naming convention while admitting the two canonical
+        // RuralAustralia mission names that intentionally do not use it.
         if (host_port_ == 41451) // drone
         {
-            if (curr_vehicle_name.rfind("Drone", 0) != 0)
+            if (curr_vehicle_name.rfind("Drone", 0) != 0 && curr_vehicle_name != "SimpleFlight")
             {
                 continue;
             }
         }
         else if (host_port_ == 41452) // ugv
         {
-            if (curr_vehicle_name.rfind("Husky", 0) != 0)
+            if (curr_vehicle_name.rfind("Husky", 0) != 0 && curr_vehicle_name != "Target1")
             {
                 continue;
             }
@@ -259,8 +268,11 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
             // std::function<void(const airsim_interfaces::msg::VelCmd::SharedPtr)> fcn_vel_cmd_body_frame_sub = std::bind(&AirsimROSWrapper::vel_cmd_body_frame_cb, this, _1, vehicle_ros->vehicle_name_);
             // drone->vel_cmd_body_frame_sub_ = nh_->create_subscription<airsim_interfaces::msg::VelCmd>(topic_prefix + "/vel_cmd_body_frame", 1, fcn_vel_cmd_body_frame_sub); // todo ros::TransportHints().tcpNoDelay();
 
-            // std::function<void(const airsim_interfaces::msg::VelCmd::SharedPtr)> fcn_vel_cmd_world_frame_sub = std::bind(&AirsimROSWrapper::vel_cmd_world_frame_cb, this, _1, vehicle_ros->vehicle_name_);
-            // drone->vel_cmd_world_frame_sub_ = nh_->create_subscription<airsim_interfaces::msg::VelCmd>(topic_prefix + "/vel_cmd_world_frame", 1, fcn_vel_cmd_world_frame_sub);
+            if (enable_api_control_)
+            {
+                std::function<void(const airsim_interfaces::msg::VelCmd::SharedPtr)> callback = std::bind(&AirsimROSWrapper::vel_cmd_world_frame_cb, this, _1, vehicle_ros->vehicle_name_);
+                drone->vel_cmd_world_frame_sub_ = nh_->create_subscription<airsim_interfaces::msg::VelCmd>(topic_prefix + "/vel_cmd_world_frame", 1, callback);
+            }
 
             std::function<bool(std::shared_ptr<airsim_interfaces::srv::Takeoff::Request>, std::shared_ptr<airsim_interfaces::srv::Takeoff::Response>)> fcn_takeoff_srvr = std::bind(&AirsimROSWrapper::takeoff_srv_cb, this, _1, _2, vehicle_ros->vehicle_name_);
             drone->takeoff_srvr_ = nh_->create_service<airsim_interfaces::srv::Takeoff>(topic_prefix + "/takeoff", fcn_takeoff_srvr);
@@ -487,6 +499,9 @@ void AirsimROSWrapper::create_ros_pubs_from_settings_json()
         vehicle_name_ptr_map_.emplace(curr_vehicle_name, std::move(vehicle_ros)); // allows fast lookup in command callbacks in case of a lot of drones
     }
 
+    if (vehicle_name_ptr_map_.empty())
+        throw std::runtime_error("No eligible vehicles: HERCULES expects Drone* on port 41451 or Husky* on port 41452");
+
     // add takeoff and land all services if more than 2 drones. NOTE by SSG: skipping this in Hero mode
     if (vehicle_name_ptr_map_.size() > 1 && airsim_mode_ == AIRSIM_MODE::DRONE)
     {
@@ -605,16 +620,36 @@ void AirsimROSWrapper::imu_timer_cb()
 // todo: error check. if state is not landed, return error.
 bool AirsimROSWrapper::takeoff_srv_cb(std::shared_ptr<airsim_interfaces::srv::Takeoff::Request> request, std::shared_ptr<airsim_interfaces::srv::Takeoff::Response> response, const std::string &vehicle_name)
 {
-    unused(response);
-    std::lock_guard<std::mutex> guard(control_mutex_);
-
-    if (request->wait_on_last_task)
-        static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->takeoffAsync(20, vehicle_name)->waitOnLastTask(); // todo value for timeout_sec?
-    // response->success =
-    else
-        static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->takeoffAsync(20, vehicle_name);
-    // response->success =
-
+    response->success = false;
+    if (!enable_api_control_) return true;
+    // A blocking flight task must not hold the polling/command mutex or replace
+    // its RPC client's last_future. This persistent client also supports async calls.
+    std::lock_guard<std::mutex> flight_guard(flight_mutex_);
+    auto &drone = static_cast<MultiRotorROS &>(*vehicle_name_ptr_map_.at(vehicle_name));
+    {
+        std::lock_guard<std::mutex> guard(control_mutex_);
+        drone.action_in_progress_ = true;
+        drone.has_vel_cmd_ = false;
+    }
+    try
+    {
+        if (!flight_client_)
+            flight_client_.reset(new msr::airlib::MultirotorRpcLibClient(host_ip_, host_port_));
+        auto client = flight_client_.get();
+        client->takeoffAsync(20, vehicle_name);
+        if (request->wait_on_last_task)
+            client->waitOnLastTask(&response->success, 20);
+        else
+            response->success = true; // Submission only; not proof of completed motion.
+    }
+    catch (const std::exception &e)
+    {
+        RCLCPP_ERROR(nh_->get_logger(), "takeoff failed: %s", e.what());
+    }
+    {
+        std::lock_guard<std::mutex> guard(control_mutex_);
+        drone.action_in_progress_ = false;
+    }
     return true;
 }
 
@@ -692,15 +727,37 @@ bool AirsimROSWrapper::object_transforms_refresh_cb(const std::shared_ptr<airsim
 
 bool AirsimROSWrapper::land_srv_cb(std::shared_ptr<airsim_interfaces::srv::Land::Request> request, std::shared_ptr<airsim_interfaces::srv::Land::Response> response, const std::string &vehicle_name)
 {
-    unused(response);
-    std::lock_guard<std::mutex> guard(control_mutex_);
-
-    if (request->wait_on_last_task)
-        static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->landAsync(60, vehicle_name)->waitOnLastTask();
-    else
-        static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->landAsync(60, vehicle_name);
-
-    return true; // todo
+    response->success = false;
+    if (!enable_api_control_) return true;
+    // A blocking flight task must not hold the polling/command mutex or replace
+    // its RPC client's last_future. This persistent client also supports async calls.
+    std::lock_guard<std::mutex> flight_guard(flight_mutex_);
+    auto &drone = static_cast<MultiRotorROS &>(*vehicle_name_ptr_map_.at(vehicle_name));
+    {
+        std::lock_guard<std::mutex> guard(control_mutex_);
+        drone.action_in_progress_ = true;
+        drone.has_vel_cmd_ = false;
+    }
+    try
+    {
+        if (!flight_client_)
+            flight_client_.reset(new msr::airlib::MultirotorRpcLibClient(host_ip_, host_port_));
+        auto client = flight_client_.get();
+        client->landAsync(60, vehicle_name);
+        if (request->wait_on_last_task)
+            client->waitOnLastTask(&response->success, 60);
+        else
+            response->success = true; // Submission only; not proof of completed motion.
+    }
+    catch (const std::exception &e)
+    {
+        RCLCPP_ERROR(nh_->get_logger(), "land failed: %s", e.what());
+    }
+    {
+        std::lock_guard<std::mutex> guard(control_mutex_);
+        drone.action_in_progress_ = false;
+    }
+    return true;
 }
 
 bool AirsimROSWrapper::land_group_srv_cb(std::shared_ptr<airsim_interfaces::srv::LandGroup::Request> request, std::shared_ptr<airsim_interfaces::srv::LandGroup::Response> response)
@@ -774,6 +831,8 @@ void AirsimROSWrapper::car_cmd_cb(const airsim_interfaces::msg::CarControls::Sha
     car->car_cmd_.gear_immediate = msg->gear_immediate;
 
     car->has_car_cmd_ = true;
+    car->command_watchdog_.received(steady_seconds());
+    ++car->commands_received_;
 }
 
 msr::airlib::Pose AirsimROSWrapper::get_airlib_pose(const float &x, const float &y, const float &z, const msr::airlib::Quaternionr &airlib_quat) const
@@ -822,6 +881,7 @@ void AirsimROSWrapper::vel_cmd_world_frame_cb(const airsim_interfaces::msg::VelC
     auto drone = static_cast<MultiRotorROS *>(vehicle_name_ptr_map_[vehicle_name].get());
     drone->vel_cmd_ = get_airlib_world_vel_cmd(*msg);
     drone->has_vel_cmd_ = true;
+    ++drone->commands_received_;
 }
 
 // this is kinda unnecessary but maybe it makes life easier for the end user.
@@ -1520,6 +1580,7 @@ void AirsimROSWrapper::drone_state_timer_cb()
 
         // send any commands out to the vehicles
         update_commands();
+        log_benchmark();
     }
     catch (rpc::rpc_error &e)
     {
@@ -1632,6 +1693,10 @@ rclcpp::Time AirsimROSWrapper::update_state()
         // env_msg.header.stamp = vehicle_time;
         // vehicle_ros->env_msg_ = env_msg;
 
+        ++vehicle_ros->state_reads_;
+        const auto stamp_ns = vehicle_time.nanoseconds();
+        if (stamp_ns != vehicle_ros->last_state_stamp_) ++vehicle_ros->unique_stamps_;
+        vehicle_ros->last_state_stamp_ = stamp_ns;
         // convert airsim drone state to ROS msgs
         vehicle_ros->curr_odom_.header.frame_id = vehicle_ros->vehicle_name_;
         vehicle_ros->curr_odom_.child_frame_id = vehicle_ros->odom_frame_id_;
@@ -1716,6 +1781,7 @@ void AirsimROSWrapper::publish_vehicle_state()
 
         // odom and transforms
         vehicle_ros->odom_local_pub_->publish(vehicle_ros->curr_odom_);
+        ++vehicle_ros->odom_publications_;
         publish_odom_tf(vehicle_ros->curr_odom_);
 
         // ground truth GPS position from sim/HITL
@@ -1763,47 +1829,67 @@ void AirsimROSWrapper::publish_vehicle_state()
     }
 }
 
+double AirsimROSWrapper::steady_seconds()
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void AirsimROSWrapper::log_benchmark()
+{
+    if (!benchmark_logging_) return;
+    const double now = steady_seconds();
+    if (now - last_benchmark_log_ < 1.0) return;
+    last_benchmark_log_ = now;
+    std::lock_guard<std::mutex> guard(control_mutex_);
+    for (const auto &entry : vehicle_name_ptr_map_)
+    {
+        const auto &v = *entry.second;
+        RCLCPP_INFO(nh_->get_logger(),
+            "HERCULES_METRICS steady_s=%.6f vehicle=%s state_reads=%llu unique_stamps=%llu odom_published=%llu commands_received=%llu rpc_dispatched=%llu watchdog_stops=%llu",
+            now, entry.first.c_str(), (unsigned long long)v.state_reads_,
+            (unsigned long long)v.unique_stamps_, (unsigned long long)v.odom_publications_,
+            (unsigned long long)v.commands_received_, (unsigned long long)v.rpc_dispatches_,
+            (unsigned long long)v.watchdog_stops_);
+    }
+}
+
 void AirsimROSWrapper::update_commands()
 {
-    for (auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
+    // Subscribers use the same mutex. Consume flags inside the lock, including reset.
+    std::lock_guard<std::mutex> guard(control_mutex_);
+    for (auto &entry : vehicle_name_ptr_map_)
     {
-        auto &vehicle_ros = vehicle_name_ptr_pair.second;
-
-        if (airsim_mode_ == AIRSIM_MODE::DRONE)
+        auto &v = *entry.second;
+        if (airsim_mode_ == AIRSIM_MODE::DRONE && enable_api_control_)
         {
-            auto drone = static_cast<MultiRotorROS *>(vehicle_ros.get());
-
-            // send control commands from the last callback to airsim
-            if (drone->has_vel_cmd_)
+            auto &drone = static_cast<MultiRotorROS &>(v);
+            if (drone.has_vel_cmd_ && !drone.action_in_progress_)
             {
-                std::lock_guard<std::mutex> guard(control_mutex_);
-                static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->moveByVelocityAsync(drone->vel_cmd_.x, drone->vel_cmd_.y, drone->vel_cmd_.z, vel_cmd_duration_, msr::airlib::DrivetrainType::MaxDegreeOfFreedom, drone->vel_cmd_.yaw_mode, drone->vehicle_name_);
+                static_cast<msr::airlib::MultirotorRpcLibClient *>(airsim_client_.get())->moveByVelocityAsync(
+                    drone.vel_cmd_.x, drone.vel_cmd_.y, drone.vel_cmd_.z, vel_cmd_duration_,
+                    msr::airlib::DrivetrainType::MaxDegreeOfFreedom, drone.vel_cmd_.yaw_mode, drone.vehicle_name_);
+                ++v.rpc_dispatches_; // Async submission, not task completion.
+                drone.has_vel_cmd_ = false;
             }
-            drone->has_vel_cmd_ = false;
         }
-        else if (airsim_mode_ == AIRSIM_MODE::CAR)
+        else if (airsim_mode_ == AIRSIM_MODE::CAR && enable_api_control_)
         {
-            // send control commands from the last callback to airsim
-            auto car = static_cast<CarROS *>(vehicle_ros.get());
-            if (enable_api_control_)
+            auto &car = static_cast<CarROS &>(v);
+            if (car.command_watchdog_.stop_if_expired(steady_seconds(), ugv_command_timeout_sec_, car.car_cmd_))
             {
-                if (car->has_car_cmd_)
-                {
-                    std::lock_guard<std::mutex> guard(control_mutex_);
-                    static_cast<msr::airlib::CarRpcLibClient *>(airsim_client_.get())->setCarControls(car->car_cmd_, vehicle_ros->vehicle_name_);
-                }
+                car.has_car_cmd_ = true;
+                ++v.watchdog_stops_;
             }
-            car->has_car_cmd_ = false;
+            if (car.has_car_cmd_)
+            {
+                static_cast<msr::airlib::CarRpcLibClient *>(airsim_client_.get())->setCarControls(car.car_cmd_, car.vehicle_name_);
+                ++v.rpc_dispatches_;
+                car.has_car_cmd_ = false;
+            }
         }
     }
-
-    // Only camera rotation, no translation movement of camera
     if (has_gimbal_cmd_)
-    {
-        std::lock_guard<std::mutex> guard(control_mutex_);
         airsim_client_->simSetCameraPose(gimbal_cmd_.camera_name, get_airlib_pose(0, 0, 0, gimbal_cmd_.target_quat), gimbal_cmd_.vehicle_name);
-    }
-
     has_gimbal_cmd_ = false;
 }
 

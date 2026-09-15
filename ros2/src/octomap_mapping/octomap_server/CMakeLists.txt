@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.5)
 project(octomap_server)
 
-set(CMAKE_BUILD_TYPE Debug)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build configuration" FORCE)
+endif()
 
 
 if(NOT CMAKE_CXX_STANDARD)

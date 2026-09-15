@@ -1,0 +1,9 @@
+string proxy_id
+string source
+float64[3] center
+float64 radius
+bool has_velocity
+float64[3] velocity
+builtin_interfaces/Time stamp
+uint32 point_count
+bool is_planar

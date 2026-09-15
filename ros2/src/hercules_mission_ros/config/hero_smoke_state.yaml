@@ -1,0 +1,21 @@
+mission_state_adapter:
+  ros__parameters:
+    agent_ids: [Drone1, Husky1]
+    vehicle_types: [drone, ugv]
+    odom_topics:
+      - /hercules_drone/Drone1/ground_truth/odom_local
+      - /hercules_ugv/Husky1/ground_truth/odom_local
+    # Explicit world-NED positions of each wrapper-local odometry zero from the
+    # validated 2026-09-08 run. The settings requested spawn positions were
+    # Drone1 [0,-3,-0.2] and Husky1 [0,3,-0.2], but those are not the local
+    # odometry origins after physics settling/estimator initialization.
+    # Future runtime-spawned agents must be supplied by the mission manager.
+    vehicle_origins_ned:
+      - 0.0
+      - -3.0
+      - 0.8238999247550964
+      - 0.004974978044629097
+      - 3.001892566680908
+      - 0.7162424921989441
+    state_topic_prefix: /hercules_mission/ground_truth
+    freshness_timeout_sec: 0.5

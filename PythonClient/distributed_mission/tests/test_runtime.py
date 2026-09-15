@@ -137,7 +137,7 @@ def test_target_start_anchor_is_quarter_route_only_on_rural_australia():
     flying = target_start_anchor_for_map(start, goal, "flyingcpp", 0.7, np.pi / 4.0)
 
     # For a route heading of zero, AirSim camera-right is +Y in NED.
-    assert np.allclose(rural, [-5.0, 7.0, -1.0])
+    assert np.allclose(rural, [0.0, 7.0, -1.0])
     assert np.allclose(flying, [20.0, 8.0, 0.7])
 
 
@@ -332,7 +332,7 @@ def test_target_tracking_defaults_to_camera_and_target_centered_objective():
     assert defaults.target_name == "Target1"
     assert defaults.target_ugv_circumradius == 5.0
     assert defaults.tracking_rate == 4.0
-    assert defaults.target_speed == 0.10
+    assert defaults.target_speed == 0.5
     assert defaults.tracking_measurement_std == 0.25
     assert defaults.tracking_process_noise == 0.20
     assert defaults.nominal_speed == 1.0

@@ -1,3 +1,4 @@
+#include "command_watchdog.hpp"
 #include "common/common_utils/StrictMode.hpp"
 STRICT_MODE_OFF // todo what does this do?
 #ifndef RPCLIB_MSGPACK
@@ -223,6 +224,9 @@ private:
         rclcpp::Time stamp_;
 
         std::string odom_frame_id_;
+        uint64_t state_reads_ = 0, unique_stamps_ = 0, odom_publications_ = 0;
+        uint64_t commands_received_ = 0, rpc_dispatches_ = 0, watchdog_stops_ = 0;
+        int64_t last_state_stamp_ = -1;
     };
 
     class CarROS : public VehicleROS
@@ -234,7 +238,8 @@ private:
         rclcpp::Publisher<airsim_interfaces::msg::CarState>::SharedPtr car_state_pub_;
         airsim_interfaces::msg::CarState car_state_msg_;
 
-        bool has_car_cmd_;
+        bool has_car_cmd_ = false;
+        hercules::CommandWatchdog command_watchdog_;
         msr::airlib::CarApiBase::CarControls car_cmd_;
     };
 
@@ -259,7 +264,8 @@ private:
         rclcpp::Service<airsim_interfaces::srv::Takeoff>::SharedPtr takeoff_srvr_;
         rclcpp::Service<airsim_interfaces::srv::Land>::SharedPtr land_srvr_;
 
-        bool has_vel_cmd_;
+        bool has_vel_cmd_ = false;
+        bool action_in_progress_ = false;
         VelCmd vel_cmd_;
     };
 
@@ -424,12 +430,20 @@ private:
     // todo for multiple drones with multiple sensors, this won't scale. make it a part of VehicleROS?
 
     std::mutex control_mutex_;
+    std::mutex flight_mutex_;
+    std::unique_ptr<msr::airlib::MultirotorRpcLibClient> flight_client_;
+    rclcpp::CallbackGroup::SharedPtr control_cb_;
+    double ugv_command_timeout_sec_ = 0.0;
+    bool benchmark_logging_ = false;
+    double last_benchmark_log_ = 0.0;
+    static double steady_seconds();
+    void log_benchmark();
 
     bool init_odom_received_ = false;          // becomes true after first odom‐tick
     nav_msgs::msg::Odometry init_odom_msg_;   // stores that very‐first Odometry
 
     // gimbal control
-    bool has_gimbal_cmd_;
+    bool has_gimbal_cmd_ = false;
     GimbalCmd gimbal_cmd_;
 
     /// ROS tf
