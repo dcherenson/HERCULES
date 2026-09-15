@@ -1,15 +1,18 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <Eigen/Core>
@@ -21,17 +24,23 @@
 #include <hercules_interfaces/msg/target_estimate.hpp>
 #include <hercules_interfaces/msg/target_measurement.hpp>
 #include <hercules_interfaces/msg/target_observation_diagnostics.hpp>
+#include <hercules_interfaces/msg/cbf_diagnostics_array.hpp>
+#include <hercules_interfaces/msg/mission_collision.hpp>
+#include <hercules_interfaces/msg/obstacle_proxy_array.hpp>
 #include <hercules_interfaces/msg/tracking_diagnostics.hpp>
 #include <hercules_interfaces/msg/tracking_epoch.hpp>
 #include <hercules_mission_core/formation_controller.hpp>
 #include <hercules_mission_core/mission_config.hpp>
 #include <hercules_mission_core/target_formation.hpp>
 #include <hercules_mission_core/target_motion.hpp>
+#include <hercules_tracking/models.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 #include "hercules_mission_ros/mission_actuation.hpp"
 #include "hercules_mission_ros/mission_gate.hpp"
 #include "hercules_mission_ros/target_source.hpp"
+#include "hercules_cbf_ros/cbf_adapter.hpp"
+#include "hercules_cbf_ros/obstacle_cache.hpp"
 #include "hercules_tracking_ros/neighbor_graph.hpp"
 #include "hercules_tracking_ros/tracking_adapter.hpp"
 
@@ -49,6 +58,30 @@ constexpr const char* kAll[] = {"Drone1", "Drone2", "SimpleFlight", "Drone4",
 
 double seconds(Clock::time_point then) {
   return std::chrono::duration<double>(Clock::now() - then).count();
+}
+
+struct ControlTargetEstimate {
+  hercules_mission_core::TargetEstimate estimate;
+  Eigen::Matrix2d covariance{Eigen::Matrix2d::Zero()};
+  double timestamp{0.0};
+  bool from_distributed{false};
+};
+
+const char* expectedVehicleType(const std::string& id) {
+  if (id == "Target1") return "target_ugv";
+  if (id.rfind("Drone", 0) == 0 || id == "SimpleFlight") return "drone";
+  return "ugv";
+}
+
+bool validCanonicalState(const hercules_interfaces::msg::GroundTruthState& message,
+                         const std::string& expected_id) {
+  if (!message.valid || message.agent_id != expected_id ||
+      message.header.frame_id != "airsim_world_ned" ||
+      message.vehicle_type != expectedVehicleType(expected_id)) return false;
+  for (const auto value : message.position) if (!std::isfinite(value)) return false;
+  for (const auto value : message.velocity) if (!std::isfinite(value)) return false;
+  for (const auto value : message.orientation) if (!std::isfinite(value)) return false;
+  return std::isfinite(message.yaw) && std::isfinite(message.yaw_rate);
 }
 
 hercules_mission_core::AgentState agentState(
@@ -98,7 +131,114 @@ class RuralNominalMissionNode : public rclcpp::Node {
     startup_timeout_ = declare_parameter<double>("startup_timeout_sec", 30.0);
     freshness_timeout_ = declare_parameter<double>("freshness_timeout_sec", 0.5);
     route_heading_ = declare_parameter<double>("route_heading_rad", 0.06241881);
+    target_speed_ = declare_parameter<double>("target_speed", config_.target_motion.speed);
+    target_pattern_length_ = declare_parameter<double>(
+        "target_pattern_length", config_.target_motion.longitudinal_span);
+    target_pattern_width_ = declare_parameter<double>(
+        "target_pattern_width", config_.target_motion.lateral_span);
+    target_sample_count_ = declare_parameter<int>(
+        "target_sample_count", config_.target_motion.sample_count);
+    target_start_sample_index_ = declare_parameter<int>(
+        "target_start_sample_index", config_.target_start_sample_index);
+    target_direction_ = declare_parameter<int>(
+        "target_direction", config_.target_motion.direction);
+    target_waypoint_radius_ = declare_parameter<double>(
+        "target_waypoint_radius", config_.target_motion.waypoint_radius);
+    target_heading_gain_ = declare_parameter<double>(
+        "target_heading_gain", config_.target_motion.heading_gain);
+    target_max_yaw_rate_ = declare_parameter<double>(
+        "target_max_yaw_rate", config_.target_motion.max_yaw_rate);
+    target_minimum_alignment_ = declare_parameter<double>(
+        "target_minimum_alignment", config_.target_motion.minimum_alignment);
+    target_center_x_ = declare_parameter<double>(
+        "target_center_x", std::numeric_limits<double>::quiet_NaN());
+    target_center_y_ = declare_parameter<double>(
+        "target_center_y", std::numeric_limits<double>::quiet_NaN());
+    target_center_z_ = declare_parameter<double>(
+        "target_center_z", std::numeric_limits<double>::quiet_NaN());
     uav_velocity_limit_ = declare_parameter<double>("uav_velocity_limit", 3.0);
+    cbf_enabled_ = declare_parameter<bool>("cbf_enabled", false);
+    cbf_method_name_ = declare_parameter<std::string>("cbf_method", "mestres");
+    cbf_obstacle_source_ = declare_parameter<std::string>("cbf_obstacle_source", "none");
+    cbf_uncertainty_radius_ = declare_parameter<double>("uncertainty_radius", 0.0);
+    cbf_config_.k1 = declare_parameter<double>("cbf_k1", cbf_config_.k1);
+    cbf_config_.k2 = declare_parameter<double>("cbf_k2", cbf_config_.k2);
+    cbf_config_.alpha = declare_parameter<double>("cbf_alpha", cbf_config_.alpha);
+    cbf_config_.uav_radius = declare_parameter<double>("cbf_uav_radius", cbf_config_.uav_radius);
+    cbf_config_.ugv_radius = declare_parameter<double>("cbf_ugv_radius", cbf_config_.ugv_radius);
+    cbf_config_.obstacle_margin = declare_parameter<double>("cbf_obstacle_margin", cbf_config_.obstacle_margin);
+    cbf_config_.uav_acceleration_limit = declare_parameter<double>("cbf_uav_acceleration_limit", cbf_config_.uav_acceleration_limit);
+    cbf_config_.ugv_acceleration_limit = declare_parameter<double>("cbf_ugv_acceleration_limit", cbf_config_.ugv_acceleration_limit);
+    cbf_config_.uav_velocity_limit = declare_parameter<double>("cbf_uav_velocity_limit", uav_velocity_limit_);
+    cbf_config_.ugv_speed_limit = declare_parameter<double>("cbf_ugv_speed_limit", cbf_config_.ugv_speed_limit);
+    cbf_config_.ugv_yaw_rate_limit = declare_parameter<double>("cbf_ugv_yaw_rate_limit", cbf_config_.ugv_yaw_rate_limit);
+    cbf_config_.lookahead_distance = declare_parameter<double>("cbf_lookahead_distance", 0.1);
+    cbf_config_.uav_altitude_floor = declare_parameter<double>(
+        "cbf_uav_altitude_floor", config_.target_ground_z + 2.0);
+    uav_altitude_ceiling_ = declare_parameter<double>(
+        "uav_altitude_ceiling", config_.target_ground_z - 7.0);
+    cbf_config_.solver_eps_abs = declare_parameter<double>("cbf_solver_eps_abs", cbf_config_.solver_eps_abs);
+    cbf_config_.solver_eps_rel = declare_parameter<double>("cbf_solver_eps_rel", cbf_config_.solver_eps_rel);
+    cbf_config_.solver_max_iter = declare_parameter<int>("cbf_solver_max_iter", cbf_config_.solver_max_iter);
+    cbf_config_.distributed_rounds = declare_parameter<int>("cbf_projection_rounds", cbf_config_.distributed_rounds);
+    cbf_config_.distributed_tolerance = declare_parameter<double>("cbf_projection_tolerance", cbf_config_.distributed_tolerance);
+    cbf_obstacle_stale_after_ = declare_parameter<double>("cbf_obstacle_stale_after", 1.3);
+    cbf_agent_deadline_ms_ = declare_parameter<double>("cbf_agent_deadline_ms", 5.0);
+    actuation_profile_ = declare_parameter<std::string>("actuation_profile", "current_ros");
+    if (actuation_profile_ != "current_ros" && actuation_profile_ != "python_cbf")
+      throw std::invalid_argument("actuation_profile must be current_ros or python_cbf");
+    if (cbf_method_name_ != "mestres" && cbf_method_name_ != "wang")
+      throw std::invalid_argument("cbf_method must be mestres or wang");
+    if (cbf_obstacle_source_ != "none" && cbf_obstacle_source_ != "truth" &&
+        cbf_obstacle_source_ != "perception")
+      throw std::invalid_argument("cbf_obstacle_source must be none, truth, or perception");
+    if (!std::isfinite(cbf_uncertainty_radius_) || !std::isfinite(route_heading_) ||
+        !std::isfinite(target_speed_) || !std::isfinite(target_pattern_length_) ||
+        !std::isfinite(target_pattern_width_) || !std::isfinite(target_waypoint_radius_) ||
+        !std::isfinite(target_heading_gain_) || !std::isfinite(target_max_yaw_rate_) ||
+        !std::isfinite(target_minimum_alignment_) ||
+        !std::isfinite(uav_velocity_limit_) ||
+        !std::isfinite(cbf_config_.k1) || !std::isfinite(cbf_config_.k2) ||
+        !std::isfinite(cbf_config_.alpha) || !std::isfinite(cbf_config_.uav_radius) ||
+        !std::isfinite(cbf_config_.ugv_radius) || !std::isfinite(cbf_config_.obstacle_margin) ||
+        !std::isfinite(cbf_config_.uav_acceleration_limit) ||
+        !std::isfinite(cbf_config_.ugv_acceleration_limit) ||
+        !std::isfinite(cbf_config_.uav_velocity_limit) ||
+        !std::isfinite(cbf_config_.ugv_speed_limit) ||
+        !std::isfinite(cbf_config_.ugv_yaw_rate_limit) ||
+        !std::isfinite(cbf_config_.lookahead_distance) ||
+        !std::isfinite(cbf_config_.uav_altitude_floor) || !std::isfinite(uav_altitude_ceiling_) ||
+        !std::isfinite(cbf_config_.solver_eps_abs) || !std::isfinite(cbf_config_.solver_eps_rel) ||
+        !std::isfinite(cbf_config_.distributed_tolerance) ||
+        !std::isfinite(cbf_obstacle_stale_after_) || !std::isfinite(cbf_agent_deadline_ms_) ||
+        cbf_config_.k1 < 0.0 || cbf_config_.k2 < 0.0 || cbf_config_.alpha < 0.0 ||
+        cbf_config_.uav_radius < 0.0 || cbf_config_.ugv_radius < 0.0 ||
+        cbf_config_.uav_acceleration_limit <= 0.0 || cbf_config_.ugv_acceleration_limit <= 0.0 ||
+        cbf_config_.uav_velocity_limit <= 0.0 || cbf_config_.ugv_speed_limit <= 0.0 ||
+        cbf_config_.ugv_yaw_rate_limit <= 0.0 || cbf_config_.lookahead_distance <= 0.0 ||
+        cbf_config_.solver_eps_abs <= 0.0 || cbf_config_.solver_eps_rel <= 0.0 ||
+        cbf_config_.solver_max_iter <= 0 || cbf_config_.distributed_rounds < 0 ||
+        cbf_config_.distributed_tolerance < 0.0 || cbf_obstacle_stale_after_ <= 0.0 ||
+        cbf_agent_deadline_ms_ < 0.0 || target_speed_ <= 0.0 ||
+        target_pattern_length_ <= 0.0 || target_pattern_width_ <= 0.0 ||
+        target_sample_count_ < 8 || target_waypoint_radius_ < 0.0 ||
+        target_heading_gain_ < 0.0 || target_max_yaw_rate_ <= 0.0 ||
+        target_minimum_alignment_ < 0.0 || target_minimum_alignment_ > 1.0 ||
+        (target_direction_ != 1 && target_direction_ != -1))
+      throw std::invalid_argument("invalid CBF limit, gain, or projection parameter");
+    const bool any_target_center = std::isfinite(target_center_x_) ||
+                                   std::isfinite(target_center_y_) ||
+                                   std::isfinite(target_center_z_);
+    const bool complete_target_center = std::isfinite(target_center_x_) &&
+                                        std::isfinite(target_center_y_) &&
+                                        std::isfinite(target_center_z_);
+    if (any_target_center && !complete_target_center)
+      throw std::invalid_argument("target_center_x/y/z must be all finite or all omitted");
+    cbf_config_.method = cbf_method_name_ == "wang" ? hercules_cbf::Method::kWang
+                                                     : hercules_cbf::Method::kMestres;
+    cbf_config_.uncertainty_radius = cbf_uncertainty_radius_;
+    cbf_diagnostics_publisher_ = create_publisher<hercules_interfaces::msg::CBFDiagnosticsArray>(
+        "/hercules_mission/cbf_diagnostics", 10);
     log_path_ = declare_parameter<std::string>(
         "log_path", "ros2/validation/rural_nominal/artifacts/mission.jsonl");
     distributed_target_source_ = std::make_unique<DistributedTargetSource>(config_.tracking.window_seconds);
@@ -108,9 +248,15 @@ class RuralNominalMissionNode : public rclcpp::Node {
           create_subscription<hercules_interfaces::msg::GroundTruthState>(
               std::string("/hercules_mission/ground_truth/") + id, 10,
               [this, id](hercules_interfaces::msg::GroundTruthState::ConstSharedPtr msg) {
-                if (msg->valid && msg->header.frame_id == "airsim_world_ned") {
+                if (msg && validCanonicalState(*msg, id)) {
                   states_[id] = *msg;
                   receipts_[id] = Clock::now();
+                } else {
+                  // An invalid/nonfinite sample must invalidate the cached
+                  // state immediately; otherwise an old valid sample could
+                  // keep the mission gate open until its age timeout.
+                  states_.erase(id);
+                  receipts_.erase(id);
                 }
               }));
       origin_subscriptions_.push_back(
@@ -121,6 +267,20 @@ class RuralNominalMissionNode : public rclcpp::Node {
                 origins_[id] = {msg->point.x, msg->point.y, msg->point.z};
               }));
     }
+    for (const char* id : kControlled) {
+      obstacle_caches_[id] = std::make_unique<hercules_cbf_ros::ObstacleCache>(
+          cbf_obstacle_stale_after_);
+      obstacle_subscriptions_.push_back(create_subscription<hercules_interfaces::msg::ObstacleProxyArray>(
+          std::string("/hercules_mission/obstacles/") + id, 10,
+          [this, id](hercules_interfaces::msg::ObstacleProxyArray::ConstSharedPtr message) {
+            obstacle_caches_.at(id)->receive(*message);
+          }));
+    }
+    collision_subscription_ = create_subscription<hercules_interfaces::msg::MissionCollision>(
+        "/hercules_mission/collisions", 20,
+        [this](hercules_interfaces::msg::MissionCollision::ConstSharedPtr message) {
+          collisions_[message->vehicle_name] = *message;
+        });
     if (target_source_name_ == "distributed_tracking") {
       epoch_publisher_ = create_publisher<hercules_interfaces::msg::TrackingEpoch>(
           "/hercules_tracking/epoch", rclcpp::QoS(20).reliable());
@@ -218,13 +378,29 @@ class RuralNominalMissionNode : public rclcpp::Node {
   void startMission() {
     const auto target = agentState(states_.at("Target1"));
     auto motion = config_.target_motion;
-    motion.center = target.position;
-    motion.center.z() = config_.target_ground_z;
+    const bool has_target_center = std::isfinite(target_center_x_) &&
+                                   std::isfinite(target_center_y_) &&
+                                   std::isfinite(target_center_z_);
+    if (has_target_center) {
+      motion.center = Eigen::Vector3d(target_center_x_, target_center_y_, target_center_z_);
+    } else {
+      motion.center = target.position;
+      motion.center.z() = config_.target_ground_z;
+    }
     motion.route_heading = route_heading_;
+    motion.speed = target_speed_;
+    motion.longitudinal_span = target_pattern_length_;
+    motion.lateral_span = target_pattern_width_;
+    motion.sample_count = target_sample_count_;
+    motion.waypoint_radius = target_waypoint_radius_;
+    motion.heading_gain = target_heading_gain_;
+    motion.max_yaw_rate = target_max_yaw_rate_;
+    motion.minimum_alignment = target_minimum_alignment_;
+    motion.direction = target_direction_;
     target_controller_ =
         std::make_unique<hercules_mission_core::FigureEightTargetController>(motion);
-    target_controller_->setIndex(config_.target_start_sample_index);
-    target_controller_->placeStartAt(target.position);
+    target_controller_->setIndex(target_start_sample_index_);
+    if (!has_target_center) target_controller_->placeStartAt(target.position);
     std::filesystem::create_directories(
         std::filesystem::path(log_path_).parent_path());
     log_.open(log_path_);
@@ -255,14 +431,20 @@ class RuralNominalMissionNode : public rclcpp::Node {
     epoch_publisher_->publish(message);
   }
 
-  hercules_mission_core::TargetEstimate controlEstimate(
+  ControlTargetEstimate controlEstimate(
       const std::string& id, const hercules_mission_core::AgentState& target,
       double mission_time) const {
-    if (target_source_name_ == "truth") return target_source_.estimate(target);
+    ControlTargetEstimate result;
+    result.timestamp = mission_time;
+    if (target_source_name_ == "truth") {
+      result.estimate = target_source_.estimate(target);
+      return result;
+    }
     const auto found = local_estimates_.find(id);
     const auto receipt = estimate_receipts_.find(id);
     if (found == local_estimates_.end() || receipt == estimate_receipts_.end()) {
-      return distributed_target_source_->estimate(std::nullopt, mission_time);
+      result.estimate = distributed_target_source_->estimate(std::nullopt, mission_time);
+      return result;
     }
     TimestampedTargetEstimate input;
     input.estimate.position = {found->second.position[0], found->second.position[1]};
@@ -270,7 +452,27 @@ class RuralNominalMissionNode : public rclcpp::Node {
     input.estimate.active = found->second.active;
     input.estimator_timestamp = hercules_tracking_ros::timeSeconds(found->second.stamp);
     input.receipt_age = seconds(receipt->second);
-    return distributed_target_source_->estimate(input, mission_time);
+    result.estimate = distributed_target_source_->estimate(input, mission_time);
+    result.from_distributed = true;
+    if (result.estimate.active) {
+      // TargetTrack::predicted() reports the XY covariance with only the
+      // position block of Q(dt) added.  It intentionally leaves the wire
+      // state covariance untouched, so reconstruct that reported covariance
+      // here for the target CBF proxy without changing tracker mathematics.
+      const double delta = std::max(0.0, mission_time - input.estimator_timestamp);
+      const auto process = hercules_tracking::constantAccelerationProcessNoise(
+          delta, config_.tracking.process_noise).topLeftCorner<2, 2>();
+      const auto& covariance = found->second.state_covariance;
+      const double c00 = covariance[0];
+      const double c01 = 0.5 * (covariance[1] + covariance[4]);
+      const double c11 = covariance[5];
+      if (std::isfinite(c00) && std::isfinite(c01) && std::isfinite(c11)) {
+        result.covariance << c00, c01, c01, c11;
+        result.covariance += process;
+        if (!result.covariance.allFinite()) result.covariance.setZero();
+      }
+    }
+    return result;
   }
 
   void step() {
@@ -301,18 +503,40 @@ class RuralNominalMissionNode : public rclcpp::Node {
     double step_max_ugv = 0.0;
     double step_min_radius = 1e9;
     double step_max_radius = 0.0;
+    hercules_interfaces::msg::CBFDiagnosticsArray cbf_diagnostics;
+    cbf_diagnostics.header.frame_id = "airsim_world_ned";
+    cbf_diagnostics.header.stamp = now();
+    cbf_diagnostics.step_id = step_;
 
     for (const char* id : kDrones) {
       const auto agent = agentState(states_.at(id));
-      const auto target_estimate = controlEstimate(id, target, mission_time);
+      const auto target_context = controlEstimate(id, target, mission_time);
+      const auto& target_estimate = target_context.estimate;
       control_estimates[id] = target_estimate;
       const auto acceleration = controller_.targetNominalControl(
           agent, target_estimate, route_heading_, config_.target_ground_z,
           config_.target_ugv_circumradius);
-      const auto velocity = target_estimate.active
-          ? uavVelocityCommand(agent.velocity, acceleration, config_.control_dt,
-                               uav_velocity_limit_)
+      const auto nominal_velocity = target_estimate.active
+          ? (actuation_profile_ == "python_cbf"
+                 ? pythonCbfUavVelocityCommand(agent.velocity, acceleration, config_.control_dt,
+                                               uav_velocity_limit_, uav_altitude_ceiling_,
+                                               agent.position.z())
+                 : uavVelocityCommand(agent.velocity, acceleration, config_.control_dt,
+                                      uav_velocity_limit_))
           : Eigen::Vector3d::Zero();
+      Eigen::Vector3d velocity = nominal_velocity;
+      if (cbf_enabled_) {
+        const auto filtered = runCbf(id, agent, acceleration, target_context);
+        velocity = actuation_profile_ == "python_cbf"
+            ? pythonCbfUavVelocityCommand(agent.velocity, filtered.result.safe_control,
+                                          config_.control_dt, uav_velocity_limit_,
+                                          uav_altitude_ceiling_, agent.position.z())
+            : uavVelocityCommand(agent.velocity, filtered.result.safe_control,
+                                 config_.control_dt, uav_velocity_limit_);
+        cbf_diagnostics.entries.push_back(filtered.diagnostics);
+      } else {
+        cbf_diagnostics.entries.push_back(disabledDiagnostics(id, agent, acceleration));
+      }
       commands[id] = velocity;
       const Eigen::Vector3d estimate_position(target_estimate.position.x(),
                                               target_estimate.position.y(),
@@ -330,12 +554,21 @@ class RuralNominalMissionNode : public rclcpp::Node {
     }
     for (const char* id : kUgvs) {
       const auto agent = agentState(states_.at(id));
-      const auto target_estimate = controlEstimate(id, target, mission_time);
+      const auto target_context = controlEstimate(id, target, mission_time);
+      const auto& target_estimate = target_context.estimate;
       control_estimates[id] = target_estimate;
       const auto command = controller_.targetNominalUnicycleControl(
           agent, target_estimate, route_heading_, config_.target_ground_z,
           config_.target_ugv_circumradius);
-      commands[id] = {command.x(), command.y(), 0.0};
+      Eigen::Vector2d model_command(command.x(), command.y());
+      if (cbf_enabled_) {
+        const auto filtered = runCbf(id, agent, model_command, target_context);
+        model_command = filtered.result.safe_control.head<2>();
+        cbf_diagnostics.entries.push_back(filtered.diagnostics);
+      } else {
+        cbf_diagnostics.entries.push_back(disabledDiagnostics(id, agent, model_command));
+      }
+      commands[id] = {model_command.x(), model_command.y(), 0.0};
       const Eigen::Vector3d estimate_position(target_estimate.position.x(),
                                               target_estimate.position.y(),
                                               config_.target_ground_z);
@@ -352,10 +585,13 @@ class RuralNominalMissionNode : public rclcpp::Node {
       const double radius = (agent.position.head<2>() - target.position.head<2>()).norm();
       step_min_radius = std::min(step_min_radius, radius);
       step_max_radius = std::max(step_max_radius, radius);
-      if (!dry_run_ && enable_formation_ && target_estimate.active) {
-        publishCar(id, ugvCarCommand(command.x(), command.y(),
-                                     agent.velocity.head<2>().norm(),
-                                     config_.formation.ugv_max_yaw_rate));
+      if (!dry_run_ && enable_formation_ && (target_estimate.active || cbf_enabled_)) {
+        publishCar(id, actuation_profile_ == "python_cbf"
+            ? pythonCbfUgvCarCommand(model_command.x(), model_command.y(),
+                                     agent.velocity.head<2>().norm(), cbf_config_.ugv_yaw_rate_limit,
+                                     false, cbf_config_.ugv_speed_limit)
+            : ugvCarCommand(model_command.x(), model_command.y(),
+                            agent.velocity.head<2>().norm(), config_.formation.ugv_max_yaw_rate));
       } else if (!dry_run_ && enable_formation_) {
         publishCar(id, stoppedCarCommand());
       }
@@ -368,8 +604,110 @@ class RuralNominalMissionNode : public rclcpp::Node {
     min_ugv_radius_ = std::min(min_ugv_radius_, step_min_radius);
     max_ugv_radius_ = std::max(max_ugv_radius_, step_max_radius);
     writeRecord(target, target_command, commands, desired_slots, slot_errors,
-                control_estimates, step_max_uav, step_max_ugv);
+                control_estimates, step_max_uav, step_max_ugv, cbf_diagnostics);
+    cbf_diagnostics_publisher_->publish(cbf_diagnostics);
     ++step_;
+  }
+
+  template <typename Control>
+  hercules_cbf_ros::AdapterResult runCbf(
+      const std::string& id, const hercules_mission_core::AgentState& agent,
+      const Control& nominal, const ControlTargetEstimate& target_context) {
+    const auto& target_estimate = target_context.estimate;
+    std::vector<hercules_interfaces::msg::GroundTruthState> neighbors;
+    const auto& ego_message = states_.at(id);
+    for (const char* other : kControlled) {
+      if (std::string(other) == id) continue;
+      const auto found = states_.find(other);
+      if (found == states_.end()) continue;
+      const auto other_state = agentState(found->second);
+      if (other_state.vehicle_type != agent.vehicle_type) continue;
+      if ((other_state.position - agent.position).norm() <= config_.communication_range)
+        neighbors.push_back(found->second);
+    }
+    std::vector<hercules_interfaces::msg::ObstacleProxy> obstacles;
+    bool static_sensor_valid = cbf_obstacle_source_ != "perception";
+    if (cbf_obstacle_source_ == "perception") {
+      const auto snapshot = obstacle_caches_.at(id)->snapshot();
+      // Preserve the last successful proxy set even after it becomes stale;
+      // its validity is carried separately and controls the sensor gate.
+      if (snapshot) obstacles = snapshot->message.proxies;
+      static_sensor_valid = snapshot && snapshot->valid;
+    }
+    if (agent.vehicle_type == hercules_mission_core::VehicleType::kUgv && target_estimate.active) {
+      hercules_interfaces::msg::TargetEstimate target_message;
+      const auto estimate_message = local_estimates_.find(id);
+      if (target_source_name_ == "distributed_tracking" && estimate_message != local_estimates_.end())
+        target_message = estimate_message->second;
+      target_message.active = true;
+      target_message.position = {target_estimate.position.x(), target_estimate.position.y()};
+      target_message.velocity = {target_estimate.velocity.x(), target_estimate.velocity.y()};
+      target_message.stamp = hercules_tracking_ros::timeMessage(target_context.timestamp);
+      target_message.state_covariance[0] = target_context.covariance(0, 0);
+      target_message.state_covariance[1] = target_context.covariance(0, 1);
+      target_message.state_covariance[4] = target_context.covariance(1, 0);
+      target_message.state_covariance[5] = target_context.covariance(1, 1);
+      double target_z = config_.target_ground_z;
+      const auto target_state = states_.find("Target1");
+      if (target_state != states_.end() && target_state->second.position.size() >= 3)
+        target_z = target_state->second.position[2];
+      hercules_cbf_ros::appendTargetProxy(target_message, id, cbf_config_.ugv_radius,
+                                          obstacles, target_z);
+    }
+    const bool target_proxy_active =
+        agent.vehicle_type == hercules_mission_core::VehicleType::kUgv &&
+        target_estimate.active;
+    const bool sensor_valid = static_sensor_valid || target_proxy_active;
+    hercules_cbf::CBFConfig config = cbf_config_;
+    if (agent.vehicle_type == hercules_mission_core::VehicleType::kUgv)
+      config.method = hercules_cbf::Method::kMestres;
+    Eigen::VectorXd input;
+    if constexpr (std::is_same_v<Control, Eigen::Vector3d>) input = nominal;
+    else input = nominal;
+    hercules_interfaces::msg::GroundTruthState ego = ego_message;
+    const auto selected = cbf_method_name_;
+    const auto effective = config.method == hercules_cbf::Method::kWang ? "wang" : "mestres";
+    auto output = hercules_cbf_ros::filterRequest(ego, input, neighbors, obstacles, config,
+                                                  sensor_valid, selected, effective);
+    output.diagnostics.target_active = target_estimate.active;
+    output.diagnostics.target_timestamp = target_context.timestamp;
+    output.diagnostics.deadline_miss = output.result.solve_time_ms > cbf_agent_deadline_ms_;
+    if (cbf_obstacle_source_ == "perception") {
+      const auto snapshot = obstacle_caches_.at(id)->snapshot();
+      output.diagnostics.static_obstacles_valid = snapshot && snapshot->valid;
+      output.diagnostics.static_obstacles_age = snapshot ? snapshot->age_seconds : 0.0;
+    } else {
+      output.diagnostics.static_obstacles_valid = true;
+      output.diagnostics.static_obstacles_age = 0.0;
+    }
+    const auto receipt = estimate_receipts_.find(id);
+    output.diagnostics.target_age = receipt == estimate_receipts_.end() ? 0.0 : seconds(receipt->second);
+    return output;
+  }
+
+  hercules_interfaces::msg::CBFDiagnostics disabledDiagnostics(
+      const std::string& id, const hercules_mission_core::AgentState& agent,
+      const Eigen::VectorXd& nominal) const {
+    hercules_interfaces::msg::CBFDiagnostics diagnostic;
+    diagnostic.header.frame_id = "airsim_world_ned";
+    diagnostic.agent_id = id;
+    diagnostic.enabled = false;
+    diagnostic.selected_method = cbf_method_name_;
+    diagnostic.effective_method = agent.vehicle_type == hercules_mission_core::VehicleType::kUgv
+        ? "mestres" : cbf_method_name_;
+    diagnostic.control_kind = agent.vehicle_type == hercules_mission_core::VehicleType::kUgv
+        ? "unicycle" : "double_integrator";
+    diagnostic.control_dimension = static_cast<uint32_t>(nominal.size());
+    diagnostic.nominal_control.assign(nominal.data(), nominal.data() + nominal.size());
+    diagnostic.safe_control = diagnostic.nominal_control;
+    diagnostic.success = false;
+    diagnostic.fallback = false;
+    diagnostic.solver_status = "disabled";
+    diagnostic.solver_iterations = 0;
+    diagnostic.final_feasible = true;
+    diagnostic.static_obstacles_valid = cbf_obstacle_source_ != "perception";
+    diagnostic.deadline_miss = false;
+    return diagnostic;
   }
 
   void publishUav(const std::string& id, const Eigen::Vector3d& velocity) {
@@ -443,13 +781,19 @@ class RuralNominalMissionNode : public rclcpp::Node {
     out << (std::isfinite(value) ? value : 0.0);
   }
 
+  void writeNullable(std::ostream& out, double value) {
+    if (std::isfinite(value)) out << value;
+    else out << "null";
+  }
+
   void writeRecord(const hercules_mission_core::AgentState& target,
                    const Eigen::Vector2d& target_command,
                    const std::map<std::string, Eigen::Vector3d>& commands,
                    const std::map<std::string, Eigen::Vector3d>& desired_slots,
                    const std::map<std::string, double>& slot_errors,
                    const std::map<std::string, hercules_mission_core::TargetEstimate>& control_estimates,
-                   double uav_error, double ugv_error) {
+                   double uav_error, double ugv_error,
+                   const hercules_interfaces::msg::CBFDiagnosticsArray& cbf_diagnostics) {
     log_ << std::setprecision(15) << "{\"step\":" << step_
          << ",\"dt\":" << config_.control_dt
          << ",\"timestamp\":" << seconds(mission_started_at_)
@@ -488,11 +832,18 @@ class RuralNominalMissionNode : public rclcpp::Node {
          << target_command.x() << ',' << target_command.y()
          << "],\"phase\":" << target_controller_->phase()
          << ",\"index\":" << target_controller_->index()
-         << ",\"collision\":{\"relevant\":false},\"pattern\":{\"type\":\"figure_eight\",\"center\":";
+         << ",\"collision\":{\"relevant\":false},\"pattern\":{\"type\":\"gerono_figure_eight\",\"center\":";
     writeVector(log_, target_controller_->config().center);
     log_ << ",\"route_heading\":" << route_heading_
-         << ",\"longitudinal_span\":" << config_.target_motion.longitudinal_span
-         << ",\"lateral_span\":" << config_.target_motion.lateral_span << "}},";
+         << ",\"longitudinal_span\":" << target_pattern_length_
+         << ",\"lateral_span\":" << target_pattern_width_
+         << ",\"speed\":" << target_speed_
+         << ",\"sample_count\":" << target_sample_count_
+         << ",\"direction\":" << target_direction_
+         << ",\"waypoint_radius\":" << target_waypoint_radius_
+         << ",\"heading_gain\":" << target_heading_gain_
+         << ",\"max_yaw_rate\":" << target_max_yaw_rate_
+         << ",\"minimum_alignment\":" << target_minimum_alignment_ << "}},";
     log_ << "\"target\":{\"name\":\"Target1\",\"position\":";
     writeVector(log_, target.position);
     log_ << "},\"targets\":{\"Target1\":{\"position\":";
@@ -623,8 +974,133 @@ class RuralNominalMissionNode : public rclcpp::Node {
         log_ << "[\"" << first << "\",\"" << second << "\"]";
       }
     }
-    log_ << "],"
-            "\"safety_communication_links\":[],\"collisions\":{}}\n";
+    log_ << "],\"obstacles\":{";
+    std::size_t obstacle_agent_index = 0;
+    for (const char* id : kControlled) {
+      if (obstacle_agent_index++) log_ << ',';
+      log_ << '\"' << id << "\":{\"source\":\"" << cbf_obstacle_source_
+           << "\",\"valid\":";
+      const auto snapshot = obstacle_caches_.at(id)->snapshot();
+      log_ << ((snapshot && snapshot->valid) ? "true" : "false")
+           << ",\"age\":";
+      writeNullable(log_, snapshot ? snapshot->age_seconds : std::numeric_limits<double>::quiet_NaN());
+      log_ << ",\"proxies\":[";
+      if (snapshot) {
+        for (std::size_t proxy_index = 0; proxy_index < snapshot->message.proxies.size(); ++proxy_index) {
+          if (proxy_index) log_ << ',';
+          const auto& proxy = snapshot->message.proxies[proxy_index];
+          log_ << "{\"id\":\"" << proxy.proxy_id << "\",\"source\":\""
+               << proxy.source << "\",\"center\":[";
+          for (std::size_t coordinate = 0; coordinate < proxy.center.size(); ++coordinate) {
+            if (coordinate) log_ << ',';
+            log_ << proxy.center[coordinate];
+          }
+          log_ << "],\"radius\":" << proxy.radius << '}';
+        }
+      }
+      log_ << "]}";
+    }
+    log_ << "},\"nominal_controls\":{";
+    for (std::size_t i = 0; i < cbf_diagnostics.entries.size(); ++i) {
+      if (i) log_ << ',';
+      const auto& value = cbf_diagnostics.entries[i];
+      log_ << '\"' << value.agent_id << "\":[";
+      for (std::size_t j = 0; j < value.nominal_control.size(); ++j) {
+        if (j) log_ << ',';
+        log_ << value.nominal_control[j];
+      }
+      log_ << ']';
+    }
+    log_ << "},\"safe_controls\":{";
+    for (std::size_t i = 0; i < cbf_diagnostics.entries.size(); ++i) {
+      if (i) log_ << ',';
+      const auto& value = cbf_diagnostics.entries[i];
+      log_ << '\"' << value.agent_id << "\":[";
+      for (std::size_t j = 0; j < value.safe_control.size(); ++j) {
+        if (j) log_ << ',';
+        log_ << value.safe_control[j];
+      }
+      log_ << ']';
+    }
+    log_ << "},\"actuation\":{\"profile\":\"" << actuation_profile_
+         << "\",\"commands\":{";
+    std::size_t actuation_index = 0;
+    for (const auto& [id, command] : commands) {
+      if (actuation_index++) log_ << ',';
+      log_ << '\"' << id << "\":[" << command.x() << ',' << command.y() << ','
+           << command.z() << ']';
+    }
+    log_ << "}},\"cbf\":{\"schema_version\":1,\"enabled\":"
+         << (cbf_enabled_ ? "true" : "false")
+         << ",\"step_id\":" << cbf_diagnostics.step_id << ",\"entries\":[";
+    for (std::size_t i = 0; i < cbf_diagnostics.entries.size(); ++i) {
+      if (i) log_ << ',';
+      const auto& value = cbf_diagnostics.entries[i];
+      log_ << "{\"agent_id\":\"" << value.agent_id
+           << "\",\"enabled\":" << (value.enabled ? "true" : "false")
+           << ",\"selected_method\":\"" << value.selected_method
+           << "\",\"effective_method\":\"" << value.effective_method
+           << "\",\"control_kind\":\"" << value.control_kind
+           << "\",\"nominal_control\":[";
+      for (std::size_t j = 0; j < value.nominal_control.size(); ++j) {
+        if (j) log_ << ',';
+        log_ << value.nominal_control[j];
+      }
+      log_ << "],\"safe_control\":[";
+      for (std::size_t j = 0; j < value.safe_control.size(); ++j) {
+        if (j) log_ << ',';
+        log_ << value.safe_control[j];
+      }
+      log_ << "],\"success\":" << (value.success ? "true" : "false")
+           << ",\"fallback\":" << (value.fallback ? "true" : "false")
+           << ",\"solver_status\":\"" << value.solver_status
+           << "\",\"solver_iterations\":" << value.solver_iterations
+           << ",\"primal_residual\":";
+      writeNullable(log_, value.primal_residual);
+      log_ << ",\"dual_residual\":";
+      writeNullable(log_, value.dual_residual);
+      log_ << ",\"minimum_barrier\":";
+      writeNullable(log_, value.minimum_barrier);
+      log_
+           << ",\"constraint_count\":" << value.constraint_count
+           << ",\"active_constraints\":" << value.active_constraints
+           << ",\"distributed_rounds\":" << value.distributed_rounds
+           << ",\"filter_time_ms\":" << value.filter_time_ms
+           << ",\"solver_time_ms\":" << value.solver_time_ms
+           << ",\"maximum_row_violation\":" << value.maximum_row_violation
+           << ",\"maximum_bound_violation\":" << value.maximum_bound_violation
+           << ",\"final_feasible\":" << (value.final_feasible ? "true" : "false")
+           << ",\"deadline_miss\":" << (value.deadline_miss ? "true" : "false")
+           << ",\"static_obstacles_valid\":"
+           << (value.static_obstacles_valid ? "true" : "false")
+           << ",\"static_obstacles_age\":";
+      writeNullable(log_, value.static_obstacles_age);
+      log_ << ",\"target_active\":" << (value.target_active ? "true" : "false")
+           << ",\"target_age\":";
+      writeNullable(log_, value.target_age);
+      log_ << ",\"target_timestamp\":";
+      writeNullable(log_, value.target_timestamp);
+      log_ << ",\"row_labels\":[";
+      for (std::size_t row = 0; row < value.row_labels.size(); ++row) {
+        if (row) log_ << ',';
+        log_ << '\"' << value.row_labels[row] << '\"';
+      }
+      log_ << "],\"intervention_norm\":" << value.intervention_norm << '}';
+    }
+    log_ << "]},\"safety_communication_links\":[],\"collisions\":{";
+    std::size_t collision_index = 0;
+    for (const auto& [id, value] : collisions_) {
+      if (collision_index++) log_ << ',';
+      log_ << "\"" << id << "\":{\"available\":" << (value.available ? "true" : "false")
+           << ",\"has_collided\":" << (value.has_collided ? "true" : "false")
+           << ",\"relevant\":" << (value.relevant ? "true" : "false")
+           << ",\"object_name\":\"" << value.object_name
+           << "\",\"object_id\":" << value.object_id
+           << ",\"penetration_depth\":" << value.penetration_depth
+           << ",\"simulator_timestamp\":" << value.simulator_timestamp
+           << ",\"event_id\":\"" << value.event_id << "\"}";
+    }
+    log_ << "}}\n";
     log_.flush();
   }
 
@@ -641,11 +1117,33 @@ class RuralNominalMissionNode : public rclcpp::Node {
   bool finished_{false};
   std::string target_source_name_{"truth"};
   std::string target_observation_source_{"truth"};
+  std::string actuation_profile_{"current_ros"};
   double duration_{30.0};
   double startup_timeout_{30.0};
   double freshness_timeout_{0.5};
+  bool cbf_enabled_{false};
+  std::string cbf_method_name_{"mestres"};
+  std::string cbf_obstacle_source_{"none"};
+  double cbf_uncertainty_radius_{0.0};
+  hercules_cbf::CBFConfig cbf_config_;
   double route_heading_{0.0};
+  double target_speed_{0.10};
+  double target_pattern_length_{10.0};
+  double target_pattern_width_{8.0};
+  int target_sample_count_{64};
+  int target_start_sample_index_{5};
+  int target_direction_{1};
+  double target_waypoint_radius_{1.0};
+  double target_heading_gain_{2.0};
+  double target_max_yaw_rate_{1.5};
+  double target_minimum_alignment_{0.75};
+  double target_center_x_{std::numeric_limits<double>::quiet_NaN()};
+  double target_center_y_{std::numeric_limits<double>::quiet_NaN()};
+  double target_center_z_{std::numeric_limits<double>::quiet_NaN()};
   double uav_velocity_limit_{3.0};
+  double uav_altitude_ceiling_{-8.0};
+  double cbf_obstacle_stale_after_{1.3};
+  double cbf_agent_deadline_ms_{5.0};
   std::string log_path_;
   std::ofstream log_;
   std::size_t step_{0};
@@ -668,6 +1166,7 @@ class RuralNominalMissionNode : public rclcpp::Node {
   std::map<std::string, hercules_interfaces::msg::TargetMeasurement> tracking_measurements_;
   std::map<std::string, hercules_interfaces::msg::TrackingDiagnostics> tracking_diagnostics_;
   std::optional<hercules_interfaces::msg::TargetObservationDiagnostics> observation_diagnostics_;
+  std::map<std::string, std::unique_ptr<hercules_cbf_ros::ObstacleCache>> obstacle_caches_;
   std::vector<rclcpp::Subscription<hercules_interfaces::msg::GroundTruthState>::SharedPtr>
       state_subscriptions_;
   std::vector<rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr>
@@ -680,7 +1179,13 @@ class RuralNominalMissionNode : public rclcpp::Node {
       tracking_diagnostic_subscriptions_;
   rclcpp::Subscription<hercules_interfaces::msg::TargetObservationDiagnostics>::SharedPtr
       observation_diagnostics_subscription_;
+  std::vector<rclcpp::Subscription<hercules_interfaces::msg::ObstacleProxyArray>::SharedPtr>
+      obstacle_subscriptions_;
+  rclcpp::Subscription<hercules_interfaces::msg::MissionCollision>::SharedPtr
+      collision_subscription_;
+  std::map<std::string, hercules_interfaces::msg::MissionCollision> collisions_;
   rclcpp::Publisher<hercules_interfaces::msg::TrackingEpoch>::SharedPtr epoch_publisher_;
+  rclcpp::Publisher<hercules_interfaces::msg::CBFDiagnosticsArray>::SharedPtr cbf_diagnostics_publisher_;
   std::map<std::string, rclcpp::Publisher<airsim_interfaces::msg::VelCmd>::SharedPtr>
       uav_publishers_;
   std::map<std::string,

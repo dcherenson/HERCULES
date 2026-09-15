@@ -14,6 +14,11 @@ herculesvenv/bin/python ros2/validation/rural_nominal/render_validation.py \
   ros2/validation/rural_nominal/artifacts/mission.jsonl
 ```
 
+Use `--display-config` and `--playback-speed` when comparing a Python export
+with a ROS export. The config is a small JSON object containing the shared
+route heading, origin, and fixed bounds; it does not combine the output files.
+The ROS exporter can create it from both logs with `--reference-log`.
+
 Use `--skip-animation` only for a fast dependency check. These are empirical
 visual and implementation diagnostics, not stability or safety evidence.
 

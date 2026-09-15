@@ -13,6 +13,7 @@ from modules.mission_plots import (
     sensor_view_for_record,
     _target_tracking_enabled,
     _topdown_limits,
+    plot_topdown_animation,
 )
 
 
@@ -178,9 +179,26 @@ def test_collision_plot_accepts_and_marks_authoritative_collision_records(tmp_pa
     plot_collision_clearances(records, str(output_path), {"Drone1": 1.0, "Husky1": 1.25})
 
     assert output_path.is_file()
-
     trajectory_path = tmp_path / "trajectory.png"
     from modules.mission_plots import plot_trajectories_3d
 
     plot_trajectories_3d(records, str(trajectory_path))
     assert trajectory_path.is_file()
+
+
+def test_topdown_animation_can_hide_target_tracking_proxies(tmp_path):
+    record = _record(0, {"Husky1": [0.0, 0.0, 0.0]}, {
+        "Husky1": {"proxies": [{"center": [1.0, 0.0, 0.0], "radius": 0.5,
+                                  "source": "target_tracking"}]}
+    })
+    record["target_tracking"] = {"enabled": True, "agents": {}}
+    record["target_truth"] = {"position": [2.0, 0.0, 0.0],
+                               "pattern": {"center": [2.0, 0.0, 0.0],
+                                           "route_heading": 0.0,
+                                           "longitudinal_span": 4.0,
+                                           "lateral_span": 2.0}}
+    mp4 = tmp_path / "hidden.mp4"
+    gif = tmp_path / "hidden.gif"
+    plot_topdown_animation([record], str(mp4), str(gif), fps=2.0,
+                           show_target_proxies=False)
+    assert mp4.is_file() and gif.is_file()

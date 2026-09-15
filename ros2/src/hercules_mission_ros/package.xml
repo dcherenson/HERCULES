@@ -9,6 +9,8 @@
   <depend>eigen</depend>
   <depend>airsim_interfaces</depend>
   <depend>hercules_interfaces</depend>
+  <depend>hercules_cbf</depend>
+  <depend>hercules_cbf_ros</depend>
   <depend>hercules_mission_core</depend>
   <depend>hercules_tracking_ros</depend>
   <depend>geometry_msgs</depend>

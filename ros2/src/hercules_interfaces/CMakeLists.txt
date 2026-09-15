@@ -16,6 +16,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TrackingEpoch.msg"
   "msg/TrackingHandoff.msg"
   "msg/TrackingRoundStatus.msg"
+  "msg/ObstacleProxy.msg"
+  "msg/ObstacleProxyArray.msg"
+  "msg/CBFDiagnostics.msg"
+  "msg/CBFDiagnosticsArray.msg"
+  "msg/MissionCollision.msg"
   DEPENDENCIES builtin_interfaces std_msgs
 )
 

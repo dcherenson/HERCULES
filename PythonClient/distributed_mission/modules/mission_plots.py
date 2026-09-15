@@ -338,7 +338,12 @@ def _topdown_limits(records: Sequence[Mapping], names: Sequence[str], heading: f
 
 
 def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: str,
-                           fps: float | None = None, playback_speed: float = 2.0) -> Tuple[str, str]:
+                           fps: float | None = None, playback_speed: float = 2.0,
+                           show_target_proxies: bool = True,
+                           route_heading: float | None = None,
+                           display_origin: Any | None = None,
+                           display_bounds: Any | None = None,
+                           title_prefix: str | None = None) -> Tuple[str, str]:
     """Render the compact route-up top-down presentation animation."""
 
     import matplotlib
@@ -360,11 +365,18 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
         for name in names if (records[0].get("states") or {}).get(name, {}).get("position") is not None
     ]
     origin = np.mean(np.asarray(initial_positions), axis=0)[:2] if initial_positions else np.zeros(2)
+    if display_origin is not None:
+        origin = np.asarray(display_origin, dtype=float).reshape(2)
     first_position = np.mean(np.asarray(initial_positions), axis=0) if initial_positions else np.zeros(3)
     goal = np.asarray(records[0].get("goal", first_position + [0.0, 1.0, 0.0]), dtype=float)
-    heading = float(np.arctan2(goal[1] - first_position[1], goal[0] - first_position[0]))
+    heading = (float(route_heading) if route_heading is not None else
+               float(np.arctan2(goal[1] - first_position[1], goal[0] - first_position[0])))
     target_tracking = any(_target_tracking_enabled(record) for record in records)
-    lower, upper = _topdown_limits(records, names, heading, origin, include_goal=not target_tracking)
+    if display_bounds is None:
+        lower, upper = _topdown_limits(records, names, heading, origin, include_goal=not target_tracking)
+    else:
+        bounds = np.asarray(display_bounds, dtype=float).reshape(2, 2)
+        lower, upper = bounds[0], bounds[1]
     source_fps = max(float(fps if fps is not None else 1.0 / max(float(records[0].get("dt", 0.1)), 1e-6)), 1.0)
     if playback_speed <= 0.0:
         raise ValueError("playback_speed must be positive")
@@ -437,11 +449,13 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
                 obstacle_data = (record.get("obstacles") or {}).get(name, {})
                 for proxy in obstacle_data.get("proxies", []) if isinstance(obstacle_data, Mapping) else []:
                     try:
-                        if proxy.get("source") == "target_tracking":
+                        if proxy.get("source") == "target_tracking" and not show_target_proxies:
                             continue
                         proxy_center = route_up_xy(np.asarray(proxy["center"], dtype=float), heading, origin)
                         axis.add_patch(Circle(proxy_center, float(proxy.get("radius", 0.0)), fill=False,
-                                              edgecolor=colors[name], alpha=0.35, linestyle=":", linewidth=1.0))
+                                              edgecolor=("darkorange" if proxy.get("source") == "target_tracking" else colors[name]),
+                                              alpha=0.45, linestyle=("--" if proxy.get("source") == "target_tracking" else ":"),
+                                              linewidth=1.0))
                     except (KeyError, TypeError, ValueError):
                         continue
                 if types.get(name) == "drone":
@@ -529,6 +543,8 @@ def plot_topdown_animation(records: Sequence[Mapping], mp4_path: str, gif_path: 
             axis.set_xlim(lower[0], upper[0])
             axis.set_ylim(lower[1], upper[1])
             axis.set_aspect("equal", adjustable="box")
+            if title_prefix is not None:
+                axis.set_title(title_prefix)
             axis.set_xlabel("Route-left (m)")
             axis.set_ylabel("Progress to goal (m)")
             legend_handles = [

@@ -8,11 +8,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake ninja-build pkg-config git curl unzip sudo \
     python3-colcon-common-extensions python3-rosdep python3-pytest python3-pip \
     python3-numpy python3-matplotlib python3-pil ffmpeg \
-    libeigen3-dev gdb gdbserver clangd procps sysstat iproute2 netcat-openbsd \
+    libeigen3-dev libgtest-dev gdb gdbserver clangd procps sysstat iproute2 netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m pip install --no-cache-dir \
     osqp==1.0.4 jinja2==3.1.6 joblib==1.5.1 MarkupSafe==3.0.2 \
     rpc-msgpack==0.6
+COPY docker/ros2/requirements-perception.lock /tmp/requirements-perception.lock
+RUN python3 -m pip install --no-cache-dir -r /tmp/requirements-perception.lock && \
+    rm -f /tmp/requirements-perception.lock
+COPY docker/ros2/install_osqp.sh /tmp/install_osqp.sh
+RUN chmod +x /tmp/install_osqp.sh && /tmp/install_osqp.sh && rm -f /tmp/install_osqp.sh
 # Dockerfile.dockerignore makes this a manifest-only tree, not a source copy.
 COPY ros2/src/ /tmp/ros-dependencies/src/
 RUN source /opt/ros/humble/setup.bash && \

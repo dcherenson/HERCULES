@@ -53,4 +53,29 @@ CarCommand stoppedCarCommand() {
   return result;
 }
 
+Eigen::Vector3d pythonCbfUavVelocityCommand(
+    const Eigen::Vector3d& measured_velocity,
+    const Eigen::Vector3d& nominal_acceleration, double dt,
+    double velocity_limit, double ceiling_z, double position_z) {
+  Eigen::Vector3d result = uavVelocityCommand(measured_velocity, nominal_acceleration,
+                                               dt, velocity_limit);
+  result.z() = std::max(result.z(), (ceiling_z - position_z) / dt);
+  result.z() = clip(result.z(), -velocity_limit, velocity_limit);
+  return result;
+}
+
+CarCommand pythonCbfUgvCarCommand(double desired_speed, double desired_yaw_rate,
+                                  double measured_speed, double cbf_yaw_rate_limit,
+                                  bool target_vehicle, double speed_limit) {
+  if (speed_limit <= 0.0) {
+    throw std::invalid_argument("UGV speed limit must be positive");
+  }
+  double speed = std::max(0.0, desired_speed);
+  double yaw_rate = desired_yaw_rate;
+  if (speed < 0.05 && std::abs(yaw_rate) > 0.05)
+    speed = std::min(0.3, speed_limit);
+  if (speed < 0.05) return stoppedCarCommand();
+  return ugvCarCommand(speed, yaw_rate, measured_speed, cbf_yaw_rate_limit, target_vehicle);
+}
+
 }  // namespace hercules_mission_ros

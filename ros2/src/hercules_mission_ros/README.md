@@ -200,3 +200,45 @@ not a replacement for the successful numerical and trajectory comparison.
 These results validate only the two settings-defined smoke vehicles and the
 observed origins above. See the Rural nominal validation report for the later
 nine-vehicle runtime-calibrated experiment.
+
+## Separate ROS mission media
+
+Set `record_video:=true` on `rural_nominal.launch.py` to capture the same three
+streams used by the Python distributed mission: the moving `mission_follow`
+chase camera, a selected UAV `front_center`, and a selected UGV
+`front_center`. Capture runs in a separate Python node and camera frames are
+encoded only after the mission control loop finishes. Each run writes its own
+`topdown.mp4`/`topdown.gif`, `mission_chase.mp4`/`.gif`, FPV files, and
+`media_manifest.json` under `video_output_dir`.
+
+The Unreal settings must contain the recording-only `mission_follow` external
+camera before startup. Prepare a copy of the normal Rural Australia settings,
+then point the host launcher at that copy:
+
+```bash
+herculesvenv/bin/python ros2/src/hercules_mission_ros/scripts/prepare_rural_video_settings.py \
+  --source docker/ros2/settings.rural-nominal.json \
+  --output /tmp/settings.rural-video.json
+HERCULES_UNREAL_SETTINGS=/tmp/settings.rural-video.json \
+  ./docker/ros2/launch_rural_mission_sim.sh -noraytracing -NoLumenReflections
+```
+
+The helper adds only the recording cameras and leaves the mounted perception
+cameras unchanged. An already-running Unreal session cannot create the
+external camera from the ROS launch file.
+
+For an existing ROS JSONL and captured frame directory, export media without
+rerunning the mission:
+
+```bash
+./docker/ros2/exec.sh ros2 run hercules_mission_ros render_ros_media \
+  --log /workspaces/hercules/ros2/validation/rural_nominal/artifacts/mission.jsonl \
+  --output-dir /workspaces/hercules/ros2/validation/rural_nominal/artifacts/mission-media \
+  --staging-dir /workspaces/hercules/ros2/validation/rural_nominal/artifacts/mission-frames \
+  --route-heading -1.5083775167989393 --playback-speed 2
+```
+
+To make separate Python and ROS top-down animations use identical bounds,
+first compute a shared display file with `--reference-log`, then pass that
+file to each export using `--display-config`. The files remain separate; the
+shared JSON only fixes route heading, origin, and plot limits.

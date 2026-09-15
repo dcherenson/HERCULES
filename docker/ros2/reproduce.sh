@@ -20,6 +20,10 @@ distributed camera-observation mission. It renders PNG, MP4, GIF, JSON, JSONL,
 and text output under the Git-ignored
 ros2/validation/reproduction/artifacts directory.
 
+For chase and FPV streams, start Unreal with a settings file produced by
+`prepare_rural_video_settings.py` and set `HERCULES_UNREAL_SETTINGS` before
+running this script.
+
 Camera mode requires a rendered Unreal session. Do not launch with -nullrhi;
 use the ordinary visible launch or -RenderOffscreen.
 EOF
@@ -123,18 +127,27 @@ main() {
   run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
     enable_target:=true enable_formation:=true \
     target_source:=truth \
+    record_video:=true \
+    "video_output_dir:=$container_artifacts/truth_nominal/media" \
+    "video_staging_dir:=$container_artifacts/truth_nominal/recording_frames" \
     "duration_sec:=$MISSION_DURATION" \
     "log_path:=$container_artifacts/truth_nominal/mission.jsonl"
   reset_simulator
   run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
     enable_target:=true enable_formation:=true \
     target_source:=distributed_tracking target_observation_source:=truth \
+    record_video:=true \
+    "video_output_dir:=$container_artifacts/distributed_truth/media" \
+    "video_staging_dir:=$container_artifacts/distributed_truth/recording_frames" \
     "duration_sec:=$MISSION_DURATION" \
     "log_path:=$container_artifacts/distributed_truth/mission.jsonl"
   reset_simulator
   run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
     enable_target:=true enable_formation:=true \
     target_source:=distributed_tracking target_observation_source:=camera \
+    record_video:=true \
+    "video_output_dir:=$container_artifacts/distributed_camera/media" \
+    "video_staging_dir:=$container_artifacts/distributed_camera/recording_frames" \
     "duration_sec:=$MISSION_DURATION" \
     "log_path:=$container_artifacts/distributed_camera/mission.jsonl"
 

@@ -20,6 +20,14 @@ Eigen::Vector3d uavVelocityCommand(const Eigen::Vector3d& measured_velocity,
 CarCommand ugvCarCommand(double desired_speed, double desired_yaw_rate,
                          double measured_speed, double max_yaw_rate,
                          bool target_vehicle = false);
+Eigen::Vector3d pythonCbfUavVelocityCommand(const Eigen::Vector3d& measured_velocity,
+                                             const Eigen::Vector3d& nominal_acceleration,
+                                             double dt, double velocity_limit,
+                                             double ceiling_z, double position_z);
+CarCommand pythonCbfUgvCarCommand(double desired_speed, double desired_yaw_rate,
+                                  double measured_speed, double cbf_yaw_rate_limit,
+                                  bool target_vehicle = false,
+                                  double speed_limit = 3.0);
 CarCommand stoppedCarCommand();
 
 }  // namespace hercules_mission_ros

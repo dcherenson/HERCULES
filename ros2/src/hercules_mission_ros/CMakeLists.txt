@@ -9,6 +9,8 @@ find_package(ament_cmake REQUIRED)
 find_package(airsim_interfaces REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(hercules_interfaces REQUIRED)
+find_package(hercules_cbf REQUIRED)
+find_package(hercules_cbf_ros REQUIRED)
 find_package(hercules_mission_core REQUIRED)
 find_package(hercules_tracking_ros REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -41,8 +43,8 @@ ament_target_dependencies(state_node rclcpp)
 add_executable(rural_nominal_mission_node src/mission_node.cpp)
 target_link_libraries(rural_nominal_mission_node ${PROJECT_NAME}_core)
 ament_target_dependencies(rural_nominal_mission_node
-  airsim_interfaces geometry_msgs hercules_interfaces rclcpp)
-target_link_libraries(rural_nominal_mission_node hercules_tracking_ros::hercules_tracking_ros_core)
+  airsim_interfaces geometry_msgs hercules_interfaces hercules_cbf_ros rclcpp)
+target_link_libraries(rural_nominal_mission_node hercules_tracking_ros::hercules_tracking_ros_core hercules_cbf::hercules_cbf hercules_cbf_ros::hercules_cbf_ros)
 
 foreach(target ${PROJECT_NAME}_core ${PROJECT_NAME}_ros state_node rural_nominal_mission_node)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
@@ -55,10 +57,16 @@ install(TARGETS ${PROJECT_NAME}_core ${PROJECT_NAME}_ros
 install(TARGETS state_node rural_nominal_mission_node DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/direct_pose_bridge.py
   DESTINATION lib/${PROJECT_NAME} RENAME direct_pose_bridge)
+install(PROGRAMS scripts/ros_video_recorder.py
+  DESTINATION lib/${PROJECT_NAME} RENAME ros_video_recorder)
+install(PROGRAMS scripts/render_ros_media.py
+  DESTINATION lib/${PROJECT_NAME} RENAME render_ros_media)
+install(PROGRAMS scripts/prepare_rural_video_settings.py
+  DESTINATION lib/${PROJECT_NAME} RENAME prepare_rural_video_settings)
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 ament_export_targets(${PROJECT_NAME}Targets HAS_LIBRARY_TARGET)
-ament_export_dependencies(Eigen3 geometry_msgs hercules_interfaces hercules_mission_core nav_msgs)
+ament_export_dependencies(Eigen3 geometry_msgs hercules_interfaces hercules_mission_core hercules_cbf hercules_cbf_ros nav_msgs)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)

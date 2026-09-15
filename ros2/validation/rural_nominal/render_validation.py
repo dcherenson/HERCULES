@@ -157,6 +157,37 @@ def save_tracking_counts(records, output: Path):
     plt.close(fig)
 
 
+def cbf_metrics(records):
+    """Summarize optional Phase 2/3 CBF diagnostics, accepting old logs."""
+    entries = []
+    for row in records:
+        value = row.get("cbf") or {}
+        if isinstance(value, dict):
+            entries.extend(item for item in value.get("entries", []) if isinstance(item, dict))
+    if not entries:
+        return {"available": False, "steps": 0, "entries": 0}
+    enabled = [item for item in entries if item.get("enabled", False)]
+    fallbacks = [item for item in enabled if item.get("fallback", False)]
+    deadline_misses = [item for item in enabled if item.get("deadline_miss", False)]
+    interventions = [float(item.get("intervention_norm", 0.0)) for item in enabled
+                     if item.get("intervention_norm") is not None]
+    barriers = [float(item["minimum_barrier"]) for item in enabled
+                if item.get("minimum_barrier") is not None and np.isfinite(item["minimum_barrier"])]
+    return {
+        "available": True,
+        "steps": len(records),
+        "entries": len(entries),
+        "enabled_entries": len(enabled),
+        "fallback_entries": len(fallbacks),
+        "deadline_misses": len(deadline_misses),
+        "fraction_intervened": float(np.mean(np.asarray(interventions) > 1e-12)) if interventions else 0.0,
+        "maximum_intervention_norm": float(max(interventions)) if interventions else 0.0,
+        "minimum_reported_barrier": float(min(barriers)) if barriers else None,
+        "final_infeasible_entries": int(sum(not item.get("final_feasible", True) for item in enabled)),
+        "methods": sorted({str(item.get("effective_method", "")) for item in enabled}),
+    }
+
+
 def metrics(records):
     result = {"agents": {}, "global": {}}
     for name in CONTROLLED:
@@ -228,6 +259,7 @@ def metrics(records):
         "rejected_command_count": 0,
         "origin_validation_errors": 0,
     }
+    result["cbf"] = cbf_metrics(records)
     tracking_rows = {}
     for row in records:
         tracking = row.get("target_tracking") or {}
@@ -267,6 +299,13 @@ def main():
     parser.add_argument("jsonl", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--skip-animation", action="store_true")
+    parser.add_argument("--display-config", type=Path,
+                        help="shared JSON containing route_heading, origin, and bounds")
+    parser.add_argument("--route-heading", type=float)
+    parser.add_argument("--display-origin", nargs=2, type=float, metavar=("X", "Y"))
+    parser.add_argument("--display-bounds", nargs=4, type=float,
+                        metavar=("XMIN", "YMIN", "XMAX", "YMAX"))
+    parser.add_argument("--playback-speed", type=float, default=1.0)
     args = parser.parse_args()
     output = args.output_dir or args.jsonl.parent
     output.mkdir(parents=True, exist_ok=True)
@@ -285,8 +324,23 @@ def main():
         sys.path.insert(0, str(repo / "PythonClient"))
         sys.path.insert(0, str(repo / "PythonClient" / "distributed_mission"))
         from distributed_mission.modules.mission_plots import plot_topdown_animation
-        plot_topdown_animation(records, str(output / "topdown.mp4"),
-                               str(output / "topdown.gif"), 10.0, 1.0)
+        display = {}
+        if args.display_config:
+            display = json.loads(args.display_config.read_text(encoding="utf-8"))
+        route_heading = args.route_heading if args.route_heading is not None else display.get("route_heading")
+        display_origin = args.display_origin if args.display_origin is not None else display.get("origin")
+        display_bounds = args.display_bounds
+        if display_bounds is not None:
+            display_bounds = [[display_bounds[0], display_bounds[1]],
+                              [display_bounds[2], display_bounds[3]]]
+        elif display.get("bounds") is not None:
+            display_bounds = display["bounds"]
+        plot_topdown_animation(
+            records, str(output / "topdown.mp4"), str(output / "topdown.gif"),
+            10.0, args.playback_speed,
+            route_heading=route_heading, display_origin=display_origin,
+            display_bounds=display_bounds,
+        )
 
 
 if __name__ == "__main__":
