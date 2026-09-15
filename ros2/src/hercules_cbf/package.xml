@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>hercules_cbf</name>
+  <version>0.1.0</version>
+  <description>Simulator-independent C++ implementation of the HERCULES distributed CBF filters.</description>
+  <maintainer email="maintainers@example.com">HERCULES developers</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>eigen</depend>
+  <test_depend>gtest</test_depend>
+  <export><build_type>cmake</build_type></export>
+</package>

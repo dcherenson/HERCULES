@@ -1,0 +1,12 @@
+std_msgs/Header header
+string vehicle_name
+bool available
+bool has_collided
+bool relevant
+string object_name
+int32 object_id
+float64 penetration_depth
+float64 simulator_timestamp
+float64[] object_position
+string event_id
+string poll_status

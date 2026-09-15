@@ -1,0 +1,30 @@
+rural_nominal_mission:
+  ros__parameters:
+    target_source: distributed_tracking
+    target_observation_source: camera
+    cbf_enabled: false
+    cbf_method: mestres
+    cbf_obstacle_source: none
+    uncertainty_radius: 0.0
+    actuation_profile: current_ros
+    cbf_k1: 2.0
+    cbf_k2: 2.0
+    cbf_alpha: 2.0
+    cbf_uav_radius: 1.0
+    cbf_ugv_radius: 1.25
+    cbf_obstacle_margin: 0.0
+    cbf_uav_acceleration_limit: 6.0
+    cbf_ugv_acceleration_limit: 3.0
+    cbf_uav_velocity_limit: 3.0
+    cbf_ugv_speed_limit: 3.0
+    cbf_ugv_yaw_rate_limit: 1.5
+    cbf_lookahead_distance: 0.1
+    cbf_uav_altitude_floor: 1.0
+    cbf_solver_eps_abs: 1.0e-5
+    cbf_solver_eps_rel: 1.0e-5
+    cbf_solver_max_iter: 4000
+    cbf_projection_rounds: 20
+    cbf_projection_tolerance: 0.001
+    cbf_obstacle_stale_after: 1.3
+    cbf_agent_deadline_ms: 5.0
+    uav_altitude_ceiling: -8.0

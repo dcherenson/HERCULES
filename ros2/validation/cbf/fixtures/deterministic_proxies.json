@@ -1,0 +1,8 @@
+{
+  "frame_id": "airsim_world_ned",
+  "description": "small deterministic replay set for offline CBF/perception checks",
+  "proxies": [
+    {"proxy_id": "fixture_box_0", "source": "fixture", "center": [4.0, 0.0, 0.0], "radius": 0.75, "velocity": [0.0, 0.0, 0.0], "is_planar": true},
+    {"proxy_id": "fixture_moving_0", "source": "fixture", "center": [0.0, 4.0, 0.0], "radius": 0.50, "velocity": [-0.2, 0.0, 0.0], "is_planar": true}
+  ]
+}
