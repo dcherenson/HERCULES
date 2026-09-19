@@ -2,6 +2,12 @@
 set -euo pipefail
 TOOL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$TOOL_DIR/../.." && pwd)"
+# Homebrew's Docker cask cannot always create the privileged /usr/local/bin
+# symlink on managed Macs.  Prefer the normal PATH, then fall back to the
+# Desktop-bundled CLI so all repository helpers remain usable.
+if ! command -v docker >/dev/null 2>&1 && [[ -x /Applications/Docker.app/Contents/Resources/bin/docker ]]; then
+  export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+fi
 export LOCAL_UID="$(id -u)" LOCAL_GID="$(id -g)"
 compose() { docker compose -f "$TOOL_DIR/compose.yaml" "$@"; }
 ensure_dev() {
@@ -13,6 +19,10 @@ dev_exec() {
   if [[ -t 0 && -t 1 ]]; then options+=(-t); fi
   if [[ -n ${HERCULES_BUILD_ROOT:-} ]]; then options+=(-e "HERCULES_BUILD_ROOT=$HERCULES_BUILD_ROOT"); fi
   options+=(-e "HERCULES_SOURCE_OVERLAY=${HERCULES_SOURCE_OVERLAY:-1}")
+  if [[ -n ${HERCULES_RUN_ID:-} ]]; then options+=(-e "HERCULES_RUN_ID=$HERCULES_RUN_ID"); fi
+  if [[ -n ${AIRSIM_HOST:-} ]]; then options+=(-e "AIRSIM_HOST=$AIRSIM_HOST"); fi
+  if [[ -n ${AIRSIM_MULTIROTOR_PORT:-} ]]; then options+=(-e "AIRSIM_MULTIROTOR_PORT=$AIRSIM_MULTIROTOR_PORT"); fi
+  if [[ -n ${AIRSIM_CAR_PORT:-} ]]; then options+=(-e "AIRSIM_CAR_PORT=$AIRSIM_CAR_PORT"); fi
   # Some Compose versions select a one-off build container for `exec dev`.
   # `ps -q` excludes one-off containers and identifies the persistent service.
   docker exec "${options[@]}" "$(compose ps -q dev)" "$@"

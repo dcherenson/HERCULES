@@ -1339,6 +1339,7 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     parser.add_argument("--k2", type=float, default=2.0)
     parser.add_argument("--alpha", type=float, default=2.0)
     parser.add_argument("--communication-range", type=float, default=COMMUNICATION_RANGE_METERS)
+    parser.add_argument("--airsim-host", default="127.0.0.1", help="AirSim RPC host (Mac Docker fallback: host.docker.internal)")
     parser.add_argument("--multirotor-port", type=int, default=41451)
     parser.add_argument("--car-port", type=int, default=41452)
     parser.add_argument("--uproject-path", default=None)
@@ -1507,6 +1508,7 @@ def main(argv: List[str] = None) -> int:
         map_name=args.map_name,
         unreal_editor_path=args.unreal_editor_path,
         uproject_path=args.uproject_path,
+        host=args.airsim_host,
         multirotor_port=args.multirotor_port,
         car_port=args.car_port,
         resolution=(args.resx, args.resy),
@@ -1990,6 +1992,8 @@ def main(argv: List[str] = None) -> int:
                 facade.airsim,
                 args.multirotor_port,
                 {name: "target_bottom" for name in uav_names} | {name: "front_center" for name in ugv_names},
+                host=args.airsim_host,
+                endpoint_ports={name: args.multirotor_port for name in uav_names} | {name: args.car_port for name in ugv_names},
                 target_id=target_name,
                 target_actor_pattern=target_name + "*",
                 sensing_range=args.target_sensing_range,
@@ -2166,6 +2170,8 @@ def main(argv: List[str] = None) -> int:
                     ],
                     recording_folder,
                     args.video_fps,
+                    host=args.airsim_host,
+                    endpoint_ports={args.record_uav: args.multirotor_port, args.record_ugv: args.car_port},
                 )
                 frame_recorder.start()
                 recording_started = True

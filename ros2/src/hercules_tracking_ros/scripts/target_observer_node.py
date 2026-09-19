@@ -33,8 +33,7 @@ def _source_modules():
     for root in roots:
         mission = str(root / "PythonClient" / "distributed_mission")
         client = str(root / "PythonClient")
-        site = str(root / "herculesvenv" / "lib" / "python3.10" / "site-packages")
-        for path in (site, client, mission):
+        for path in (client, mission):
             if path not in sys.path:
                 sys.path.insert(0, path)
     from modules.target_observation import (  # pylint: disable=import-outside-toplevel
@@ -70,17 +69,33 @@ class TargetObserverNode(Node):
         super().__init__("target_observer")
         self.declare_parameter("observation_source", "camera")
         self.declare_parameter("target_id", "Target1")
+        self.declare_parameter("host_ip", "127.0.0.1")
         self.declare_parameter("rpc_port", 41451)
+        self.declare_parameter("drone_port", int(self.get_parameter("rpc_port").value))
+        self.declare_parameter("ugv_port", 41452)
         self.declare_parameter("target_sensing_range", 100.0)
         self.declare_parameter("tracking_measurement_std", 0.25)
         self.declare_parameter("tracking_rate", 4.0)
         self.declare_parameter("truth_seed", 7)
+        self.declare_parameter("truth_rng_mode", "seeded")
         self.source = str(self.get_parameter("observation_source").value)
         self.target_id = str(self.get_parameter("target_id").value)
         if self.source not in ("truth", "camera"):
             raise ValueError("observation_source must be truth or camera")
         self.sensing_range = float(self.get_parameter("target_sensing_range").value)
         self.measurement_std = float(self.get_parameter("tracking_measurement_std").value)
+        self.host_ip = str(self.get_parameter("host_ip").value or "127.0.0.1")
+        self.drone_port = int(self.get_parameter("drone_port").value)
+        self.ugv_port = int(self.get_parameter("ugv_port").value)
+        self.truth_rng_mode = str(self.get_parameter("truth_rng_mode").value).strip().lower()
+        if self.truth_rng_mode in ("deterministic", "seeded"):
+            self.truth_rng_mode = "seeded"
+        elif self.truth_rng_mode in ("python_global", "python-global", "global"):
+            self.truth_rng_mode = "python_global"
+        elif self.truth_rng_mode in ("random", "nondeterministic"):
+            self.truth_rng_mode = "random"
+        else:
+            raise ValueError("truth_rng_mode must be seeded, python_global, or random")
         self.measurement_publishers = {
             agent: self.create_publisher(
                 RosTargetMeasurement,
@@ -109,7 +124,15 @@ class TargetObserverNode(Node):
         self.mapper = mapper_type()
         self.truth_function = truth_function
         seed = int(self.get_parameter("truth_seed").value)
-        self.rng = {name: np.random.default_rng(seed + 1009 * index) for index, name in enumerate(AGENTS)}
+        if self.truth_rng_mode == "python_global":
+            shared_rng = np.random.default_rng(seed)
+            self.rng = {name: shared_rng for name in AGENTS}
+        else:
+            self.rng = {
+                name: np.random.default_rng(seed + 1009 * index)
+                if self.truth_rng_mode == "seeded" else np.random.default_rng()
+                for index, name in enumerate(AGENTS)
+            }
         self.worker = None
         self.published_capture_ids: Dict[str, str] = {}
         self.truth_capture_count = 0
@@ -119,8 +142,13 @@ class TargetObserverNode(Node):
         if self.source == "camera":
             self.worker = worker_type(
                 _airsim_module(),
-                int(self.get_parameter("rpc_port").value),
+                self.drone_port,
                 CAMERAS,
+                host=self.host_ip,
+                endpoint_ports={
+                    **{name: self.drone_port for name in AGENTS[:5]},
+                    **{name: self.ugv_port for name in AGENTS[5:]},
+                },
                 target_id=self.target_id,
                 target_actor_pattern=self.target_id + "*",
                 sensing_range=self.sensing_range,
@@ -132,7 +160,8 @@ class TargetObserverNode(Node):
             self.poll_timer = self.create_timer(0.01, self.publish_camera_samples)
         self.diagnostics_timer = self.create_timer(1.0, self.publish_diagnostics)
         self.get_logger().info(
-            f"target observation source={self.source}; cameras={CAMERAS if self.source == 'camera' else 'truth'}"
+            f"target observation source={self.source}; rng={self.truth_rng_mode}; "
+            f"host={self.host_ip}; cameras={CAMERAS if self.source == 'camera' else 'truth'}"
         )
 
     def destroy_node(self):

@@ -2,6 +2,8 @@
 !docker/
 !docker/ros2/
 !docker/ros2/entrypoint.sh
+!docker/ros2/requirements-perception.lock
+!docker/ros2/install_osqp.sh
 !ros2/
 !ros2/src/
 !ros2/src/**/

@@ -35,6 +35,7 @@ def generate_launch_description():
     cbf_enabled = LaunchConfiguration("cbf_enabled")
     cbf_method = LaunchConfiguration("cbf_method")
     cbf_obstacle_source = LaunchConfiguration("cbf_obstacle_source")
+    truth_obstacle_fixture = LaunchConfiguration("truth_obstacle_fixture")
     uncertainty_radius = LaunchConfiguration("uncertainty_radius")
     actuation_profile = LaunchConfiguration("actuation_profile")
     mission_config = LaunchConfiguration("mission_config")
@@ -52,6 +53,17 @@ def generate_launch_description():
     gif_height = LaunchConfiguration("gif_height")
     playback_speed = LaunchConfiguration("playback_speed")
     video_keep_frames = LaunchConfiguration("video_keep_frames")
+    video_rpc_port = LaunchConfiguration("video_rpc_port")
+    video_car_port = LaunchConfiguration("video_car_port")
+    airsim_host = LaunchConfiguration("airsim_host")
+    drone_port = LaunchConfiguration("drone_port")
+    ugv_port = LaunchConfiguration("ugv_port")
+    is_vulkan = LaunchConfiguration("is_vulkan")
+    publish_clock = LaunchConfiguration("publish_clock")
+    use_sim_time = LaunchConfiguration("use_sim_time")
+    state_freshness_timeout = LaunchConfiguration("state_freshness_timeout_sec")
+    startup_timeout = LaunchConfiguration("startup_timeout_sec")
+    truth_rng_mode = LaunchConfiguration("truth_rng_mode")
     route_heading = LaunchConfiguration("route_heading_rad")
     target_speed = LaunchConfiguration("target_speed")
     target_pattern_length = LaunchConfiguration("target_pattern_length")
@@ -79,6 +91,7 @@ def generate_launch_description():
         DeclareLaunchArgument("cbf_enabled", default_value="false"),
         DeclareLaunchArgument("cbf_method", default_value="mestres"),
         DeclareLaunchArgument("cbf_obstacle_source", default_value="none"),
+        DeclareLaunchArgument("truth_obstacle_fixture", default_value="false"),
         DeclareLaunchArgument("uncertainty_radius", default_value="0.0"),
         DeclareLaunchArgument("actuation_profile", default_value="current_ros"),
         DeclareLaunchArgument("mission_config", default_value=default_mission_config),
@@ -99,6 +112,22 @@ def generate_launch_description():
         DeclareLaunchArgument("gif_height", default_value="540"),
         DeclareLaunchArgument("playback_speed", default_value="2.0"),
         DeclareLaunchArgument("video_keep_frames", default_value="false"),
+        DeclareLaunchArgument("video_rpc_port", default_value="41451"),
+        DeclareLaunchArgument("video_car_port", default_value="41452"),
+        DeclareLaunchArgument("airsim_host", default_value=os.environ.get("AIRSIM_HOST", "127.0.0.1")),
+        DeclareLaunchArgument("drone_port", default_value=os.environ.get("AIRSIM_MULTIROTOR_PORT", "41451")),
+        DeclareLaunchArgument("ugv_port", default_value=os.environ.get("AIRSIM_CAR_PORT", "41452")),
+        DeclareLaunchArgument("is_vulkan", default_value="true"),
+        DeclareLaunchArgument("publish_clock", default_value="false"),
+        DeclareLaunchArgument("use_sim_time", default_value="false"),
+        DeclareLaunchArgument("state_freshness_timeout_sec", default_value="0.5"),
+        # Startup can be slow on a host-shared Unreal/Docker session while
+        # nine AirSim wrappers connect and the state adapter receives two
+        # advancing samples per vehicle.  Keep the node's normal 30 s default
+        # unless the caller explicitly requests a longer trial grace period.
+        DeclareLaunchArgument("startup_timeout_sec", default_value="30.0"),
+        DeclareLaunchArgument("truth_rng_mode", default_value="seeded",
+                              choices=["seeded", "random", "python_global"]),
         DeclareLaunchArgument("route_heading_rad", default_value="-1.5083775167989393"),
         DeclareLaunchArgument("target_speed", default_value="0.10"),
         DeclareLaunchArgument("target_pattern_length", default_value="10.0"),
@@ -118,13 +147,24 @@ def generate_launch_description():
             default_value="/workspaces/hercules/ros2/validation/rural_nominal/artifacts/mission.jsonl"),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(wrapper_launch),
-            launch_arguments={"vehicles": "both", "enable_api_control": "true",
+            launch_arguments={"vehicles": "both", "host_ip": airsim_host,
+                              "drone_port": drone_port, "ugv_port": ugv_port,
+                              "is_vulkan": is_vulkan,
+                              "publish_clock": publish_clock,
+                              "use_sim_time": use_sim_time,
+                              "enable_api_control": "true",
                               "ugv_command_timeout_sec": "0.5"}.items()),
         Node(package="hercules_mission_ros", executable="direct_pose_bridge",
              name="mission_direct_pose_bridge", output="screen",
-             parameters=[{"vehicle_names": VEHICLES}]),
+             parameters=[{"vehicle_names": VEHICLES, "rpc_host": airsim_host,
+                          "rpc_port": ParameterValue(drone_port, value_type=int),
+                          "car_port": ParameterValue(ugv_port, value_type=int)}]),
         Node(package="hercules_mission_ros", executable="state_node",
-             name="mission_state_adapter", output="screen", parameters=[state_config]),
+             name="mission_state_adapter", output="screen",
+             parameters=[state_config, {
+                 "freshness_timeout_sec": ParameterValue(
+                     state_freshness_timeout, value_type=float)
+             }]),
         Node(package="hercules_mission_ros", executable="rural_nominal_mission_node",
              name="rural_nominal_mission", output="screen",
              parameters=[cbf_config, mission_config, {"dry_run": ParameterValue(dry_run, value_type=bool),
@@ -136,6 +176,7 @@ def generate_launch_description():
                           "cbf_enabled": ParameterValue(cbf_enabled, value_type=bool),
                           "cbf_method": cbf_method,
                           "cbf_obstacle_source": cbf_obstacle_source,
+                          "truth_obstacle_fixture": ParameterValue(truth_obstacle_fixture, value_type=bool),
                           "uncertainty_radius": ParameterValue(uncertainty_radius, value_type=float),
                           "actuation_profile": actuation_profile,
                           "route_heading_rad": ParameterValue(route_heading, value_type=float),
@@ -143,6 +184,7 @@ def generate_launch_description():
                           "target_pattern_length": ParameterValue(target_pattern_length, value_type=float),
                           "target_pattern_width": ParameterValue(target_pattern_width, value_type=float),
                           "target_sample_count": ParameterValue(target_sample_count, value_type=int),
+                          "startup_timeout_sec": ParameterValue(startup_timeout, value_type=float),
                           "target_start_sample_index": ParameterValue(target_start_sample_index, value_type=int),
                           "target_direction": ParameterValue(target_direction, value_type=int),
                           "target_waypoint_radius": ParameterValue(target_waypoint_radius, value_type=float),
@@ -158,10 +200,15 @@ def generate_launch_description():
         package="hercules_tracking_ros", executable="target_observer_node",
         name="target_observer", output="screen", condition=distributed,
         parameters=[{"observation_source": observation_source,
+                     "host_ip": airsim_host,
+                     "rpc_port": ParameterValue(drone_port, value_type=int),
+                     "drone_port": ParameterValue(drone_port, value_type=int),
+                     "ugv_port": ParameterValue(ugv_port, value_type=int),
                      "tracking_rate": 4.0,
                      "tracking_measurement_std": 0.25,
                      "target_sensing_range": 100.0,
-                     "truth_seed": 7}],
+                     "truth_seed": 7,
+                     "truth_rng_mode": truth_rng_mode}],
     ))
     for agent in VEHICLES[:-1]:
         actions.append(Node(
@@ -185,13 +232,19 @@ def generate_launch_description():
         condition=IfCondition(PythonExpression([
             "'", cbf_obstacle_source, "' == 'perception'"
         ])),
-        parameters=[os.path.join(cbf_share, "config", "rural_perception.yaml")],
+        parameters=[os.path.join(cbf_share, "config", "rural_perception.yaml"),
+                    {"host_ip": airsim_host,
+                     "rpc_port": ParameterValue(drone_port, value_type=int),
+                     "car_port": ParameterValue(ugv_port, value_type=int)}],
     ))
     actions.append(Node(
         package="hercules_cbf_ros", executable="mission_collision_observer_node",
         name="mission_collision_observer", output="screen",
         condition=IfCondition(enable_collision_observer),
-        parameters=[os.path.join(cbf_share, "config", "rural_perception.yaml")],
+        parameters=[os.path.join(cbf_share, "config", "rural_perception.yaml"),
+                    {"host_ip": airsim_host,
+                     "rpc_port": ParameterValue(drone_port, value_type=int),
+                     "car_port": ParameterValue(ugv_port, value_type=int)}],
     ))
     actions.append(Node(
         package="hercules_mission_ros", executable="ros_video_recorder",
@@ -212,6 +265,9 @@ def generate_launch_description():
             "duration_sec": ParameterValue(duration, value_type=float),
             "video_keep_frames": ParameterValue(video_keep_frames, value_type=bool),
             "route_heading_rad": ParameterValue(route_heading, value_type=float),
+            "video_rpc_host": airsim_host,
+            "video_rpc_port": ParameterValue(video_rpc_port, value_type=int),
+            "video_car_port": ParameterValue(video_car_port, value_type=int),
         }],
     ))
     return LaunchDescription(actions)

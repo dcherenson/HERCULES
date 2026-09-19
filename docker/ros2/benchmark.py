@@ -25,8 +25,11 @@ def stop(process):
 
 
 def main():
-    for port in (41451, 41452):
-        with socket.create_connection(('127.0.0.1', port), timeout=2):
+    host = os.environ.get('AIRSIM_HOST', '127.0.0.1')
+    drone_port = int(os.environ.get('AIRSIM_MULTIROTOR_PORT', '41451'))
+    car_port = int(os.environ.get('AIRSIM_CAR_PORT', '41452'))
+    for port in (drone_port, car_port):
+        with socket.create_connection((host, port), timeout=2):
             pass
     nodes = subprocess.check_output(['ros2', 'node', 'list'], text=True)
     if '/hercules_drone' in nodes or '/hercules_ugv' in nodes:
@@ -43,6 +46,7 @@ def main():
             try:
                 wrapper = subprocess.Popen([
                     'ros2', 'launch', 'airsim_ros_pkgs', 'hercules_host.launch.py',
+                    f'host_ip:={host}', f'drone_port:={drone_port}', f'ugv_port:={car_port}',
                     f'enable_api_control:={str(active).lower()}', 'benchmark_logging:=true',
                     f'update_airsim_control_every_n_sec:={period}',
                 ], stdout=wrapper_file, stderr=subprocess.STDOUT, start_new_session=True)

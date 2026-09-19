@@ -9,6 +9,7 @@ are cached asynchronously so image RPCs do not consume the CBF deadline.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import socket
 import threading
 import time
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
@@ -236,8 +237,14 @@ class TargetObservationWorker:
     horizontal_fov_deg: float = 120.0
     target_radius: float = 1.25
     rate_hz: float = 4.0
+    # Appended after the historical positional fields so callers that pass
+    # target_id/pattern positionally remain source-compatible.
+    host: str = "127.0.0.1"
+    endpoint_ports: Optional[Mapping[str, int]] = None
 
     def __post_init__(self) -> None:
+        self.host = str(self.host or "127.0.0.1")
+        self.endpoint_ports = dict(self.endpoint_ports or {})
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -250,6 +257,37 @@ class TargetObservationWorker:
         self.capture_timestamps = []
         self.rpc_durations = []
         self._fov_by_camera: Dict[Tuple[str, str], float] = {}
+
+    def _port_for_agent(self, agent: str) -> int:
+        """Select the AirSim service for a vehicle without breaking callers.
+
+        Hero mode exposes multirotors on 41451 and cars on 41452.  An
+        explicit endpoint map wins; otherwise the historical ``port`` value
+        remains the default and Husky/UGV names are routed to the car port.
+        """
+        if agent in self.endpoint_ports:
+            return int(self.endpoint_ports[agent])
+        if str(agent).lower().startswith(("husky", "ugv", "car")):
+            return 41452
+        return int(self.port)
+
+    def _client_for_agent(self, agent: str) -> Any:
+        client_type = getattr(self.airsim_module, "MultirotorClient", None)
+        if client_type is None:
+            raise RuntimeError("AirSim module does not provide MultirotorClient")
+        host = self.host
+        if host in {"host.docker.internal", "docker.for.mac.host.internal"}:
+            try:
+                addresses = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+                if addresses:
+                    host = str(addresses[0][4][0])
+            except OSError:
+                pass
+        try:
+            return client_type(ip=host, port=self._port_for_agent(agent))
+        except TypeError:
+            # Lightweight test doubles and old bindings may not accept ``ip``.
+            return client_type(port=self._port_for_agent(agent))
 
     def start(self) -> None:
         if self._thread is not None:
@@ -416,20 +454,21 @@ class TargetObservationWorker:
         )
 
     def _run(self) -> None:
-        try:
-            client = self.airsim_module.MultirotorClient(port=int(self.port))
-        except Exception:
-            self.error_count += 1
-            return
         period = 1.0 / max(float(self.rate_hz), 1e-6)
         deadline = time.monotonic()
+        clients: Dict[str, Any] = {}
         while not self._stop.is_set():
             for agent, camera in self.agent_cameras.items():
                 if self._stop.is_set():
                     break
                 started = time.monotonic()
                 try:
-                    measurement = self._capture(client, str(agent), str(camera))
+                    agent_name = str(agent)
+                    client = clients.get(agent_name)
+                    if client is None:
+                        client = self._client_for_agent(agent_name)
+                        clients[agent_name] = client
+                    measurement = self._capture(client, agent_name, str(camera))
                     with self._lock:
                         self._latest[str(agent)] = measurement
                         self.capture_count += 1
@@ -443,3 +482,10 @@ class TargetObservationWorker:
                         self.rpc_durations.append(time.monotonic() - started)
             deadline += period
             self._stop.wait(max(0.0, deadline - time.monotonic()))
+        for client in clients.values():
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass

@@ -160,6 +160,7 @@ class RuralNominalMissionNode : public rclcpp::Node {
     cbf_enabled_ = declare_parameter<bool>("cbf_enabled", false);
     cbf_method_name_ = declare_parameter<std::string>("cbf_method", "mestres");
     cbf_obstacle_source_ = declare_parameter<std::string>("cbf_obstacle_source", "none");
+    truth_obstacle_fixture_ = declare_parameter<bool>("truth_obstacle_fixture", false);
     cbf_uncertainty_radius_ = declare_parameter<double>("uncertainty_radius", 0.0);
     cbf_config_.k1 = declare_parameter<double>("cbf_k1", cbf_config_.k1);
     cbf_config_.k2 = declare_parameter<double>("cbf_k2", cbf_config_.k2);
@@ -192,6 +193,10 @@ class RuralNominalMissionNode : public rclcpp::Node {
     if (cbf_obstacle_source_ != "none" && cbf_obstacle_source_ != "truth" &&
         cbf_obstacle_source_ != "perception")
       throw std::invalid_argument("cbf_obstacle_source must be none, truth, or perception");
+    if (cbf_obstacle_source_ == "truth" && !truth_obstacle_fixture_)
+      throw std::invalid_argument(
+          "cbf_obstacle_source=truth requires truth_obstacle_fixture=true; "
+          "RuralAustralia parity uses none");
     if (!std::isfinite(cbf_uncertainty_radius_) || !std::isfinite(route_heading_) ||
         !std::isfinite(target_speed_) || !std::isfinite(target_pattern_length_) ||
         !std::isfinite(target_pattern_width_) || !std::isfinite(target_waypoint_radius_) ||
@@ -264,12 +269,17 @@ class RuralNominalMissionNode : public rclcpp::Node {
               std::string("/hercules_mission/calibrated_origin/") + id,
               rclcpp::QoS(1).transient_local().reliable(),
               [this, id](geometry_msgs::msg::PointStamped::ConstSharedPtr msg) {
-                origins_[id] = {msg->point.x, msg->point.y, msg->point.z};
+                const Eigen::Vector3d origin(msg->point.x, msg->point.y, msg->point.z);
+                if (origin.allFinite()) {
+                  origins_[id] = origin;
+                } else {
+                  origins_.erase(id);
+                }
               }));
     }
     for (const char* id : kControlled) {
       obstacle_caches_[id] = std::make_unique<hercules_cbf_ros::ObstacleCache>(
-          cbf_obstacle_stale_after_);
+          cbf_obstacle_stale_after_, id, "wall");
       obstacle_subscriptions_.push_back(create_subscription<hercules_interfaces::msg::ObstacleProxyArray>(
           std::string("/hercules_mission/obstacles/") + id, 10,
           [this, id](hercules_interfaces::msg::ObstacleProxyArray::ConstSharedPtr message) {
@@ -626,13 +636,60 @@ class RuralNominalMissionNode : public rclcpp::Node {
         neighbors.push_back(found->second);
     }
     std::vector<hercules_interfaces::msg::ObstacleProxy> obstacles;
+    std::optional<hercules_cbf_ros::ObstacleSnapshot> static_snapshot;
     bool static_sensor_valid = cbf_obstacle_source_ != "perception";
     if (cbf_obstacle_source_ == "perception") {
-      const auto snapshot = obstacle_caches_.at(id)->snapshot();
+      static_snapshot = obstacle_caches_.at(id)->snapshot();
       // Preserve the last successful proxy set even after it becomes stale;
       // its validity is carried separately and controls the sensor gate.
-      if (snapshot) obstacles = snapshot->message.proxies;
-      static_sensor_valid = snapshot && snapshot->valid;
+      if (static_snapshot) obstacles = static_snapshot->message.proxies;
+      static_sensor_valid = static_snapshot && static_snapshot->valid;
+      if (static_snapshot) {
+        // The Python mission replays static perception with zero obstacle
+        // velocity and adds a bounded age margin only while the capture is
+        // still fresh.  Keep stale geometry for the UGV target-proxy path,
+        // but never let an expired snapshot acquire extra authority.
+        const double age = std::max(0.0, static_snapshot->age_seconds);
+        const double speed_limit = agent.vehicle_type ==
+                hercules_mission_core::VehicleType::kUgv
+            ? cbf_config_.ugv_speed_limit : cbf_config_.uav_velocity_limit;
+        const double acceleration_limit = agent.vehicle_type ==
+                hercules_mission_core::VehicleType::kUgv
+            ? cbf_config_.ugv_acceleration_limit
+            : cbf_config_.uav_acceleration_limit;
+        const double age_margin = static_snapshot->valid
+            ? std::min(speed_limit * age +
+                           0.5 * acceleration_limit * age * age,
+                       0.25)  // RuralAustralia max_proxy_radius is 1 m.
+            : 0.0;
+        std::vector<hercules_interfaces::msg::ObstacleProxy> filtered;
+        filtered.reserve(obstacles.size());
+        for (auto& obstacle : obstacles) {
+          obstacle.has_velocity = false;
+          obstacle.velocity = {0.0, 0.0, 0.0};
+          obstacle.radius += age_margin;
+          const bool explicit_proxy = obstacle.source.rfind("truth", 0) == 0 ||
+                                      obstacle.source == "target_tracking";
+          bool body_proxy = false;
+          if (!explicit_proxy) {
+            const Eigen::Vector3d center(obstacle.center[0], obstacle.center[1], obstacle.center[2]);
+            for (const char* other : kControlled) {
+              const auto state = states_.find(other);
+              if (state == states_.end()) continue;
+              const double body_radius = expectedVehicleType(other) == std::string("ugv")
+                  ? cbf_config_.ugv_radius : cbf_config_.uav_radius;
+              const Eigen::Vector3d position(state->second.position[0], state->second.position[1],
+                                             state->second.position[2]);
+              if ((center - position).norm() <= body_radius + 0.5) {
+                body_proxy = true;
+                break;
+              }
+            }
+          }
+          if (!body_proxy) filtered.push_back(obstacle);
+        }
+        obstacles.swap(filtered);
+      }
     }
     if (agent.vehicle_type == hercules_mission_core::VehicleType::kUgv && target_estimate.active) {
       hercules_interfaces::msg::TargetEstimate target_message;
@@ -673,9 +730,8 @@ class RuralNominalMissionNode : public rclcpp::Node {
     output.diagnostics.target_timestamp = target_context.timestamp;
     output.diagnostics.deadline_miss = output.result.solve_time_ms > cbf_agent_deadline_ms_;
     if (cbf_obstacle_source_ == "perception") {
-      const auto snapshot = obstacle_caches_.at(id)->snapshot();
-      output.diagnostics.static_obstacles_valid = snapshot && snapshot->valid;
-      output.diagnostics.static_obstacles_age = snapshot ? snapshot->age_seconds : 0.0;
+      output.diagnostics.static_obstacles_valid = static_snapshot && static_snapshot->valid;
+      output.diagnostics.static_obstacles_age = static_snapshot ? static_snapshot->age_seconds : 0.0;
     } else {
       output.diagnostics.static_obstacles_valid = true;
       output.diagnostics.static_obstacles_age = 0.0;
@@ -1124,6 +1180,7 @@ class RuralNominalMissionNode : public rclcpp::Node {
   bool cbf_enabled_{false};
   std::string cbf_method_name_{"mestres"};
   std::string cbf_obstacle_source_{"none"};
+  bool truth_obstacle_fixture_{false};
   double cbf_uncertainty_radius_{0.0};
   hercules_cbf::CBFConfig cbf_config_;
   double route_heading_{0.0};

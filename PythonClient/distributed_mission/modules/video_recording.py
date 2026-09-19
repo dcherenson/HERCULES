@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import socket
 import shutil
 import subprocess
 import threading
@@ -46,9 +47,12 @@ class AirSimFrameRecorder:
     """
 
     def __init__(self, airsim_module: Any, port: int, streams: Sequence[Tuple[str, str]],
-                 staging_dir: str, fps: float):
+                 staging_dir: str, fps: float, host: str = "127.0.0.1",
+                 endpoint_ports: Optional[Mapping[str, int]] = None):
         self.airsim_module = airsim_module
         self.port = int(port)
+        self.host = str(host or "127.0.0.1")
+        self.endpoint_ports = dict(endpoint_ports or {})
         self.streams = list(streams)
         self.staging_dir = staging_dir
         self.fps = float(fps)
@@ -60,6 +64,30 @@ class AirSimFrameRecorder:
         self.metadata_path = os.path.join(staging_dir, "capture_metadata.jsonl")
         self._metadata_lock = threading.Lock()
         self._stats_lock = threading.Lock()
+
+    def _port_for_vehicle(self, vehicle: str) -> int:
+        if vehicle in self.endpoint_ports:
+            return int(self.endpoint_ports[vehicle])
+        if str(vehicle).lower().startswith(("husky", "ugv", "car")):
+            return 41452
+        return self.port
+
+    def _client_for_vehicle(self, vehicle: str) -> Any:
+        client_type = getattr(self.airsim_module, "MultirotorClient", None)
+        if client_type is None:
+            raise RuntimeError("AirSim module does not provide MultirotorClient")
+        host = self.host
+        if host in {"host.docker.internal", "docker.for.mac.host.internal"}:
+            try:
+                addresses = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+                if addresses:
+                    host = str(addresses[0][4][0])
+            except OSError:
+                pass
+        try:
+            return client_type(ip=host, port=self._port_for_vehicle(vehicle))
+        except TypeError:
+            return client_type(port=self._port_for_vehicle(vehicle))
 
     def start(self) -> None:
         if self._thread is not None:
@@ -95,7 +123,7 @@ class AirSimFrameRecorder:
 
     def _run_stream(self, vehicle: str, camera: str) -> None:
         try:
-            client = self.airsim_module.MultirotorClient(port=self.port)
+            client = self._client_for_vehicle(vehicle)
         except Exception:
             with self._stats_lock:
                 self.error_count += 1
@@ -163,6 +191,12 @@ class AirSimFrameRecorder:
                     self.error_count += 1
             deadline += period
             self._stop.wait(max(0.0, deadline - time.monotonic()))
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
 
 def _quat_matrix(values: Any) -> np.ndarray:

@@ -7,7 +7,11 @@ services:
       args:
         DEV_UID: ${LOCAL_UID:-1000}
         DEV_GID: ${LOCAL_GID:-1000}
-    network_mode: host
+    # Linux and Docker Desktop host networking are the primary path.  If host
+    # networking is unavailable on the Mac, set HERCULES_NETWORK_MODE=bridge
+    # and use AIRSIM_HOST=host.docker.internal with HERCULES_RPC_BIND_IP=0.0.0.0
+    # for the native Unreal launcher.
+    network_mode: ${HERCULES_NETWORK_MODE:-host}
     init: true
     stdin_open: true
     tty: true
@@ -17,5 +21,8 @@ services:
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
       ROS_LOCALHOST_ONLY: "1"
+      AIRSIM_HOST: ${AIRSIM_HOST:-127.0.0.1}
+      AIRSIM_MULTIROTOR_PORT: ${AIRSIM_MULTIROTOR_PORT:-41451}
+      AIRSIM_CAR_PORT: ${AIRSIM_CAR_PORT:-41452}
       BUILD_TYPE: ${BUILD_TYPE:-RelWithDebInfo}
       BUILD_JOBS: ${BUILD_JOBS:-2}

@@ -2,6 +2,9 @@
 # Source this file; it does not alter the caller's shell options.
 HERCULES_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 export BUILD_TYPE="${BUILD_TYPE:-RelWithDebInfo}"
+export AIRSIM_HOST="${AIRSIM_HOST:-127.0.0.1}"
+export AIRSIM_MULTIROTOR_PORT="${AIRSIM_MULTIROTOR_PORT:-41451}"
+export AIRSIM_CAR_PORT="${AIRSIM_CAR_PORT:-41452}"
 case "$BUILD_TYPE" in Release|RelWithDebInfo|Debug) ;; *) echo "Invalid BUILD_TYPE: $BUILD_TYPE" >&2; return 2 ;; esac
 export HERCULES_BUILD_ROOT="${HERCULES_BUILD_ROOT:-$HERCULES_ROOT/ros2/.docker/humble/$BUILD_TYPE}"
 # ROS setup scripts are not nounset-safe.

@@ -195,9 +195,13 @@ CBFResult filter(const CBFRequest& request, const CBFConfig& config) {
   }
   if (solve.success && config.method == Method::kMestres && !constraints.rows.empty())
     result.safe_control = projectedCorrection(result.safe_control, constraints, config, &result.distributed_rounds);
+  // Python's oracle reports activity on the solver/projection control before
+  // replacing an unsuccessful solve with its fail-safe command.  Preserve
+  // that request-level diagnostic so failure cases remain comparable.
+  const Eigen::VectorXd& active_control = solve.success ? result.safe_control : solve.control;
   result.active_constraints = 0;
   for (std::size_t index = 0; index < constraints.rows.size(); ++index)
-    if (std::abs(constraints.rows[index].dot(result.safe_control) - constraints.rhs[index]) < 1e-3)
+    if (std::abs(constraints.rows[index].dot(active_control) - constraints.rhs[index]) < 1e-3)
       ++result.active_constraints;
   result.maximum_row_violation = maximumRowViolation(result.safe_control, constraints);
   result.maximum_bound_violation = maximumBoundViolation(result.safe_control, constraints);

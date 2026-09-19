@@ -43,6 +43,8 @@ UGVS = ["Husky1", "Husky2", "Husky3"]
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--python-log", type=Path, required=True)
+    parser.add_argument("--airsim-host", default="127.0.0.1",
+                        help="AirSim RPC host (Docker Desktop bridge: host.docker.internal)")
     parser.add_argument("--rpc-port", type=int, default=41451)
     parser.add_argument("--car-port", type=int, default=41452)
     args = parser.parse_args()
@@ -87,6 +89,7 @@ def main() -> int:
 
     config = AirSimLaunchConfig(
         launch_mode="existing",
+        host=args.airsim_host,
         multirotor_port=args.rpc_port,
         car_port=args.car_port,
     )

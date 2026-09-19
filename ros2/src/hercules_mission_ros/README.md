@@ -2,10 +2,34 @@
 
 `hercules_mission_ros` converts the existing wrapper's vehicle-local odometry
 into the common frame used by the working Python mission. The package also has
-a separate, bounded RuralAustralia nominal-mission runner. Distributed
-tracking and perception live in `hercules_tracking_ros`; this package consumes
-each agent's local estimate but intentionally contains no tracker instance,
-CBF, conformal prediction, or perception implementation.
+a separate, bounded RuralAustralia nominal-mission runner. Distributed target
+tracking lives in `hercules_tracking_ros`; this package consumes each agent's
+local estimate and owns mission orchestration, origin calibration, and actuation.
+The optional CBF core/ROS adapter and read-only obstacle/collision observers live
+in `hercules_cbf` and `hercules_cbf_ros`, and the mission node invokes them only
+when enabled.
+
+## Comparing the Python and ROS paths
+
+Use the no-CBF ROS configuration as the first comparison baseline:
+
+```bash
+./docker/ros2/reproduce_cbf.sh --mode no_cbf --obstacles none --dry-run
+```
+
+Run this live harness only when a supported Linux AirSim/Unreal simulator is
+reachable; `dry_run` disables actuation but still requires ROS state and origin
+discovery. A Mac-only setup should use the Docker build/test gate and the
+Python/C++ replay tests first, then perform live mode comparisons on Linux.
+
+The `rural_tracking_mestres.yaml` and `rural_tracking_wang.yaml` profiles enable
+the corresponding native filter for later experiments. CBF mode comparison is
+separate from the default tracking reproduction gate. The perception-backed
+observer reuses Python capture/detection helpers, but its canonical camera pose,
+vehicle-origin, and orientation contract must be validated before a camera CBF
+run is treated as equivalent to the Python-only implementation. Compare the
+deterministic Python/C++ replay and no-CBF ROS artifacts first, then compare live
+truth-observation runs, and only then evaluate camera/perception CBF behavior.
 
 ## Canonical frame
 
@@ -136,6 +160,12 @@ predicted to the control time; a missing, inactive, future-dated, or stale
 estimate produces zero UAV acceleration or a hard-stop UGV command. There is
 no truth fallback.
 
+The default launch leaves CBF disabled (`cbf_enabled:=false` and
+`cbf_obstacle_source:=none`). This preserves a clean ROS-versus-Python tracking
+comparison without safety-filter intervention. Enable CBF explicitly with the
+mode profiles or launch arguments only after the no-CBF run and the required
+origin/capture validation succeed.
+
 For the deterministic observation gate, change only
 `target_observation_source:=truth`. To reproduce the historical direct-truth
 control path, set `target_source:=truth`; tracker/observer nodes are then not
@@ -148,7 +178,7 @@ The staged live gates are launch arguments. Target-only validation uses
 uses both enable arguments set to `true`. Logs are rendered with:
 
 ```bash
-herculesvenv/bin/python ros2/validation/rural_nominal/render_validation.py \
+../.venvs/hercules-python310/bin/python ros2/validation/rural_nominal/render_validation.py \
   ros2/validation/rural_nominal/artifacts/mission.jsonl
 ```
 
@@ -197,6 +227,13 @@ physics/RPC/ROS validation and plot generation, but a visible Unreal screenshot
 could not be produced in this environment. Screenshots remain supplementary,
 not a replacement for the successful numerical and trajectory comparison.
 
+That paragraph is historical Linux evidence. On Apple Silicon, the
+platform-aware launch helpers select the native UE 5.2.1 Metal editor and omit
+the Linux NVIDIA/Vulkan variables. When Docker Desktop host networking is not
+enabled, use `HERCULES_NETWORK_MODE=bridge`,
+`HERCULES_RPC_BIND_IP=0.0.0.0`, and `AIRSIM_HOST=host.docker.internal`, with
+the same host and ports passed to every ROS and Python client.
+
 These results validate only the two settings-defined smoke vehicles and the
 observed origins above. See the Rural nominal validation report for the later
 nine-vehicle runtime-calibrated experiment.
@@ -216,7 +253,7 @@ camera before startup. Prepare a copy of the normal Rural Australia settings,
 then point the host launcher at that copy:
 
 ```bash
-herculesvenv/bin/python ros2/src/hercules_mission_ros/scripts/prepare_rural_video_settings.py \
+../.venvs/hercules-python310/bin/python ros2/src/hercules_mission_ros/scripts/prepare_rural_video_settings.py \
   --source docker/ros2/settings.rural-nominal.json \
   --output /tmp/settings.rural-video.json
 HERCULES_UNREAL_SETTINGS=/tmp/settings.rural-video.json \

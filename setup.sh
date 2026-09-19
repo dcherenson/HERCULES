@@ -7,10 +7,36 @@ pushd "$SCRIPT_DIR" >/dev/null
 
 downloadHighPolySuv=true
 MIN_CMAKE_VERSION=3.12.0
-function version_less_than_equal_to() { test "$(printf '%s\n' "$@" | sort -V | head -n 1)" = "$1"; }
 
-# brew gives error if package is already installed
-function brew_install() { brew list $1 &>/dev/null || brew install $1; }
+# Install a Homebrew formula only when it is not already present. Formulae
+# such as llvm@18 are keg-only, so checking the formula database is more
+# reliable than relying on PATH links.
+function brew_install() { brew list --formula "$1" &>/dev/null || brew install "$1"; }
+
+# BSD sort on macOS does not implement GNU sort's -V option. Homebrew's
+# coreutils provides gsort; retain the GNU sort path on Linux and use a small
+# numeric fallback if neither implementation is available.
+function version_less_than_equal_to() {
+    local first="$1"
+    local second="$2"
+    local sort_command=sort
+    if command -v gsort >/dev/null 2>&1; then
+        sort_command=gsort
+    fi
+    if "$sort_command" -V </dev/null >/dev/null 2>&1; then
+        test "$(printf '%s\n' "$first" "$second" | "$sort_command" -V | head -n 1)" = "$first"
+        return
+    fi
+    awk -v first="$first" -v second="$second" '
+        function normalized(value, parts, count, result, i) {
+            count = split(value, parts, ".")
+            result = ""
+            for (i = 1; i <= 3; i++) result = result sprintf("%03d", (i <= count ? parts[i] + 0 : 0))
+            return result
+        }
+        BEGIN { exit !(normalized(first) <= normalized(second)) }
+    '
+}
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]
@@ -25,11 +51,17 @@ case $key in
 esac
 done
 
+# Homebrew metadata updates are opt-in so setup does not trigger a blanket
+# refresh on an already configured Mac. Set HERCULES_BREW_UPDATE=1 when needed.
 # llvm tools
 if [ "$(uname)" == "Darwin" ]; then # osx
-    brew update
+    command -v brew >/dev/null 2>&1 || {
+        echo "ERROR: Homebrew is required on macOS. Install it from https://brew.sh/" >&2
+        exit 1
+    }
+    if [[ "${HERCULES_BREW_UPDATE:-0}" == "1" ]]; then brew update; fi
     # Update below line for newer versions
-    brew install llvm@18
+    brew_install llvm@18
 else # linux
     sudo apt-get update
     sudo apt-get -y install --no-install-recommends \
@@ -68,19 +100,19 @@ fi
 #TODO: figure out how to do below in travis
 # Install additional tools, CMake if required
 if [ "$(uname)" == "Darwin" ]; then # osx
-    if [[ ! -z "${whoami}" ]]; then #this happens when running in travis
-        sudo dseditgroup -o edit -a `whoami` -t user dialout
+    if command -v dseditgroup >/dev/null 2>&1 && [[ -n "${USER:-}" ]]; then #this happens when running in travis
+        sudo dseditgroup -o edit -a "$USER" -t user dialout
     fi
 
     # MacOS 11 has new Python env management that breaks the Python 2-to-3
     # build process. We need to make sure brew updates before attempting to
     # install, since it will update packaages
-    brew update
+    if [[ "${HERCULES_BREW_UPDATE:-0}" == "1" ]]; then brew update; fi
     brew_install wget
     brew_install coreutils
 
     if version_less_than_equal_to $cmake_ver $MIN_CMAKE_VERSION; then
-        brew install cmake  # should get cmake 3.8
+        brew_install cmake
     else
         echo "Already have good version of cmake: $cmake_ver"
     fi

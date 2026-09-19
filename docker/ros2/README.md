@@ -1,9 +1,16 @@
 # Native HERCULES + Docker ROS 2 Humble
 
-Unreal runs on the Linux host. This image contains ROS 2 Humble/Jammy, development
-tools, and dependencies for the entire ROS workspace. The repository is mounted at
-`/workspaces/hercules`; Unreal and repository source are not copied into the image.
-Existing Python controllers are unchanged.
+This guide applies to the macOS parity branch as well as the Linux-origin
+`codex/ros2` branch; generated build and validation outputs stay outside Git.
+
+Unreal runs natively on the simulator host, while this image contains ROS 2
+Humble/Jammy, development tools, and dependencies for the entire ROS workspace.
+The repository is mounted at `/workspaces/hercules`; Unreal and repository source
+are not copied into the image. Existing Python controllers are unchanged. Ubuntu
+22.04 x86-64 remains the reference end-to-end host. Docker Desktop on macOS can
+run the deterministic image/workspace build, tests, and artifact comparison, and
+can host a native UE 5.2.1 Metal run after the explicit Mac networking and
+architecture preflight below.
 
 ## Build and shell
 
@@ -51,8 +58,11 @@ rosdep failures are not skipped. Missing rpclib 2.3.0 and Eigen 3.4.0 source dep
 are fetched by `bootstrap.sh`; existing directories are preserved. Native plugin
 setup/build scripts are never invoked.
 
-Image builds resolve dependencies from package manifests only. Rebuild the image
-after changing manifests. Helpers deliberately do not restart a busy container:
+Image builds resolve dependencies from package manifests only. The image also
+installs the pinned Python perception stack from `requirements-perception.lock`
+and builds the pinned native OSQP/QDLDL sources. Rebuild the image after changing
+manifests or either dependency lock. Helpers deliberately do not restart a busy
+container:
 
 ```bash
 # After stopping work in the dev container, adopt the rebuilt image:
@@ -72,7 +82,110 @@ Use an empty output directory for each clean verification. The separate Compose
 project avoids older Compose versions confusing a one-off build with `dev`.
 Debuggers `gdb`, `gdbserver`, and `clangd` are installed; compile commands are exported.
 
+## macOS + Docker Desktop
+
+On an Apple Silicon Mac, install and start Docker Desktop, then allow the
+checkout's parent directory in Docker Desktop's File Sharing settings. Install
+the native tools used by the AirSim/plugin build and the Python oracle:
+
+```bash
+brew install cmake ninja llvm@18 wget coreutils rsync unzip
+brew install --cask docker
+open -a Docker
+docker version
+docker compose version
+```
+
+Use Python 3.10 for the reference mission environment. The lockfile was
+captured on 3.10.12; use a version manager when that exact patch is required.
+Keep the environment outside the checkout so platform-specific wheels are
+never mistaken for container dependencies:
+
+```bash
+python3.10 --version
+mkdir -p ../.venvs
+python3.10 -m venv ../.venvs/hercules-python310
+source ../.venvs/hercules-python310/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r PythonClient/requirements-herculesvenv.txt
+```
+
+The Docker image itself is a Linux environment and may be arm64 or amd64
+depending on Docker Desktop's selected architecture. The ROS/C++ build and RPC
+protocol are architecture-independent, but the native UE editor and AirSim
+plugin must match. The Darwin `build.sh` path now defaults to native `arm64` and
+does not require Rosetta; use `HERCULES_MAC_ARCH=x86_64` only for an intentional
+legacy Intel build. Record `uname -m`, editor architecture, image architecture,
+and build target architecture in any comparison report.
+
+The Compose file uses `network_mode: host`, which is the Linux assumption. On
+Docker Desktop, first check whether the installed version supports optional host
+networking and enable it if you want the Linux-like `127.0.0.1` path. Otherwise
+use a bridge/forwarded setup and pass `host.docker.internal` to every AirSim
+client (`host_ip` for ROS wrappers, `rpc_host` for the direct pose bridge, and
+`--airsim-host` for Python). Mixing loopback and `host.docker.internal` clients
+invalidates a comparison. Keep `ROS_DOMAIN_ID=42`; `ROS_LOCALHOST_ONLY=1` is
+appropriate when all ROS nodes run in the same container, while host-side ROS
+tools require a separate DDS/network configuration.
+
+Record the selected network path and test the Mac host from the container before
+starting ROS nodes:
+
+```bash
+docker compose -f docker/ros2/compose.yaml config
+docker compose -f docker/ros2/compose.yaml up -d --build
+docker compose -f docker/ros2/compose.yaml exec dev getent hosts host.docker.internal
+docker compose -f docker/ros2/compose.yaml exec dev nc -vz host.docker.internal 41451
+docker compose -f docker/ros2/compose.yaml exec dev nc -vz host.docker.internal 41452
+```
+
+The launch helpers select the Mac editor bundle on Darwin and skip the Linux
+NVIDIA/Vulkan variables. If an older checkout is being used, launch the editor
+directly as shown below. macOS uses Metal; `-nullrhi` is acceptable only for a
+truth/physics check and cannot validate camera/depth output.
+
+```bash
+export UE_ROOT="/Users/Shared/Epic Games/UE_5.2"
+export UNREAL_EDITOR="$UE_ROOT/Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
+"$UNREAL_EDITOR" "$PWD/Unreal/Environments/Blocks/Blocks.uproject" \
+  /Game/RuralAustralia/Maps/RuralAustralia_Example_01 \
+  -game -windowed -ResX=960 -ResY=540 -nosplash \
+  "-settings=$PWD/docker/ros2/settings.rural-nominal.json"
+```
+
+Before a bridged live run, verify that *all* launch paths propagate the same
+host value, including reset/benchmark helpers. If a node or helper has no RPC
+host parameter, stop at the deterministic build/parity gate and treat that as a
+Mac portability item rather than silently running against its own container
+loopback.
+
+## Optional CBF mode comparison
+
+The default mission configuration keeps the CBF filter and obstacle observers
+disabled. The separate harness records one resolved run directory per mode:
+
+```bash
+./docker/ros2/reproduce_cbf.sh --mode no_cbf --obstacles none --dry-run
+./docker/ros2/reproduce_cbf.sh --mode mestres --obstacles none --dry-run
+./docker/ros2/reproduce_cbf.sh --mode wang --obstacles perception --dry-run
+```
+
+Run these commands with a reachable AirSim/Unreal simulator already running.
+`--dry-run` disables actuation but still requires live ROS state and origin
+discovery; use `--live` (or `--dry-run false`) for an actuated comparison. On
+macOS without a reachable simulator, use `./docker/ros2/reproduce.sh` and the
+package parity tests; these mode commands are not an offline CBF comparison.
+
+Use `no_cbf` as the baseline before enabling a filter. Perception-backed runs
+require a rendered simulator and validated canonical camera/frame-origin data.
+The observer reuses Python capture helpers, but a successful process launch does
+not by itself establish Python/ROS perception parity. The mode driver currently
+uses the launch's default 30-second duration; invoke the launch directly with
+`duration_sec:=...` when another duration is required.
+
 ## Start the native simulator
+
+The Linux helper path is the reference validation route:
 
 Use a built Blocks project with the AirSim plugin. The example settings select Hero
 mode, one `Drone1` (SimpleFlight), and one `Husky1` (CPHusky), separated around the
@@ -84,6 +197,25 @@ export UNREAL_EDITOR=/path/to/Unreal/Engine/Binaries/Linux/UnrealEditor
 ./docker/ros2/launch_sim.sh
 ```
 
+For a native macOS UE 5.2.1 editor, use the platform-aware helper after the Mac
+preflight, or launch directly as a fallback. Do not export `VK_ICD_FILENAMES`,
+PRIME, or GLX variables; macOS uses Metal:
+
+```bash
+export UE_ROOT="/Users/Shared/Epic Games/UE_5.2"
+export UNREAL_EDITOR="$UE_ROOT/Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
+"$UNREAL_EDITOR" "$PWD/Unreal/Environments/Blocks/Blocks.uproject" \
+  /Game/RuralAustralia/Maps/RuralAustralia_Example_01 \
+  -game -windowed -ResX=960 -ResY=540 -nosplash \
+  "-settings=$PWD/docker/ros2/settings.rural-nominal.json"
+```
+
+If Docker Desktop is using bridge networking, pass `host_ip:=host.docker.internal`
+to the ROS AirSim wrapper and `rpc_host:=host.docker.internal` to the direct pose
+bridge. Python runs use `--airsim-host host.docker.internal`. Use one host value
+for every client and verify both RPC ports from inside the container before
+starting the mission.
+
 Alternatively pass `-settings=<absolute-path-to-settings.hero-smoke.json>` to your
 native simulator launcher. Choose an open, reasonably level PlayerStart area before
 the motion test. `launch_sim.sh` also forwards Unreal command-line arguments.
@@ -91,8 +223,10 @@ the motion test. `launch_sim.sh` also forwards Unreal command-line arguments.
 cannot validate camera/image output and its performance is not a rendered benchmark.
 
 Hero's current native source uses drone RPC port 41451 and Husky RPC port 41452.
-The host network makes `127.0.0.1` in the container reach those host servers. No GPU
-passthrough or port mappings are needed. ROS discovery defaults to localhost and
+On Linux with `network_mode: host`, `127.0.0.1` in the container reaches those
+host servers. Docker Desktop/macOS has different host-network semantics: use
+optional host networking only after verifying it, or use the bridge address
+`host.docker.internal` consistently. ROS discovery defaults to localhost and
 domain 42; use the same domain for all participating terminals.
 
 ## Observe, then command
@@ -169,9 +303,12 @@ see the validation report for that remaining native limitation. Example:
 
 `hercules_control_core` contains only plain C++/Eigen state types and a bounded test
 sequence. `hercules_control_adapter` converts ROS messages; `smoke_node` owns ROS
-subscriptions, publishing, and asynchronous service requests. No new bridge,
-controller, estimator, or planner was introduced. Adapter command clamps are
-smoke-test limits, not a general-purpose control API.
+subscriptions, publishing, and asynchronous service requests. No new general
+purpose controller, estimator, or planner was introduced. The separate
+`hercules_cbf`/`hercules_cbf_ros` packages provide an optional native safety filter,
+ROS adapter, obstacle cache, and read-only observers; these are disabled by the
+default mission configuration. Adapter command clamps are smoke-test limits, not
+a general-purpose control API.
 
 The current HERCULES wrapper flips Y/Z in odometry, subtracts its startup position,
 and makes orientation startup-relative, while retaining fixed-axis velocity. This
@@ -182,6 +319,11 @@ as native NED components, so our adapter flips Y/Z and yaw-rate signs when sendi
 them. It does not flip incoming odometry again. A broader frame/TF correction is
 outside this change; multi-vehicle odometry also retains the existing shared initial
 reference behavior.
+
+The wrapper's `is_vulkan` parameter selects the expected RGB/BGR image encoding;
+it is not a renderer selector. Linux Vulkan validation historically used `true`.
+For macOS Metal, inspect one received image and set the encoding consistently
+before enabling camera perception; do not infer it from the operating system.
 
 Build corrections are the first two items below; subscription/service fixes repair
 the command path, and serialization/leases/empty-map checks are test-safety changes.
@@ -213,8 +355,12 @@ Logs, CPU samples, and `summary.csv` are saved beneath the active build root's
 distinct state timestamps, wrapper command receipt, and RPC dispatch. Drone dispatch
 counts asynchronous RPC submissions; UGV dispatch counts successful synchronous
 returns. Neither is proof of an Unreal physics step or per-command acknowledgement.
-Adapter timing is not controller computation timing. No controller exists yet, and
-the documented roughly 50 Hz RPC ceiling is not assumed or modified.
+Adapter timing is not controller computation timing. The mission formation and
+optional CBF filters are not benchmarked by this wrapper smoke report, and the
+documented roughly 50 Hz RPC ceiling is not assumed or modified.
 
-See [VALIDATION.md](VALIDATION.md) for the actual build, test, simulator, and benchmark
-results from this implementation.
+See [VALIDATION.md](VALIDATION.md) for the **historical Linux** build, test,
+simulator, and benchmark record. It predates the Mac workflow and is not a
+current macOS/Metal acceptance result. CBF-specific offline/live evidence is in
+[`ros2/validation/cbf/REPORT.md`](../../ros2/validation/cbf/REPORT.md) and is
+likewise tied to the run metadata recorded there.

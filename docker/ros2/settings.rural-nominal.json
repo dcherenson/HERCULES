@@ -10,9 +10,9 @@
     "SimpleFlight": {"VehicleType":"SimpleFlight","X":0.0,"Y":0.0,"Z":-5.0,"Yaw":3.576334,"AutoCreate":true,"Cameras":{"target_bottom":{"External":false,"X":0.0,"Y":0.0,"Z":0.0,"Roll":0.0,"Pitch":-90.0,"Yaw":0.0,"CaptureSettings":[{"ImageType":0,"Width":320,"Height":240,"FOV_Degrees":120.0,"MotionBlurAmount":0},{"ImageType":2,"Width":320,"Height":240,"FOV_Degrees":120.0,"MotionBlurAmount":0}]}}},
     "Drone4": {"VehicleType":"SimpleFlight","X":-2.120862,"Y":1.871349,"Z":-5.0,"Yaw":3.576334,"AutoCreate":true,"Cameras":{"target_bottom":{"External":false,"X":0.0,"Y":0.0,"Z":0.0,"Roll":0.0,"Pitch":-90.0,"Yaw":0.0,"CaptureSettings":[{"ImageType":0,"Width":320,"Height":240,"FOV_Degrees":120.0,"MotionBlurAmount":0},{"ImageType":2,"Width":320,"Height":240,"FOV_Degrees":120.0,"MotionBlurAmount":0}]}}},
     "Drone5": {"VehicleType":"SimpleFlight","X":1.871349,"Y":2.120862,"Z":-5.0,"Yaw":3.576334,"AutoCreate":true,"Cameras":{"target_bottom":{"External":false,"X":0.0,"Y":0.0,"Z":0.0,"Roll":0.0,"Pitch":-90.0,"Yaw":0.0,"CaptureSettings":[{"ImageType":0,"Width":320,"Height":240,"FOV_Degrees":120.0,"MotionBlurAmount":0},{"ImageType":2,"Width":320,"Height":240,"FOV_Degrees":120.0,"MotionBlurAmount":0}]}}},
-    "Husky1": {"VehicleType":"CPHusky","X":0.0,"Y":0.0,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true},
-    "Husky2": {"VehicleType":"CPHusky","X":-3.332599,"Y":-2.212190,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true},
-    "Husky3": {"VehicleType":"CPHusky","X":-3.582112,"Y":1.780020,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true},
+    "Husky1": {"VehicleType":"CPHusky","X":0.0,"Y":0.0,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true,"Sensors":{"Lidar1":{"SensorType":6,"Enabled":true,"NumberOfChannels":16,"PointsPerSecond":100000,"X":0.0,"Y":0.0,"Z":-1.0}}},
+    "Husky2": {"VehicleType":"CPHusky","X":-3.332599,"Y":-2.212190,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true,"Sensors":{"Lidar1":{"SensorType":6,"Enabled":true,"NumberOfChannels":16,"PointsPerSecond":100000,"X":0.0,"Y":0.0,"Z":-1.0}}},
+    "Husky3": {"VehicleType":"CPHusky","X":-3.582112,"Y":1.780020,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true,"Sensors":{"Lidar1":{"SensorType":6,"Enabled":true,"NumberOfChannels":16,"PointsPerSecond":100000,"X":0.0,"Y":0.0,"Z":-1.0}}},
     "Target1": {"VehicleType":"CPHusky","X":4.928371,"Y":1.302154,"Z":-1.0,"Yaw":3.576334,"AutoCreate":true}
   }
 }

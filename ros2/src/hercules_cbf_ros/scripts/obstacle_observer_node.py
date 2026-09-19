@@ -11,15 +11,19 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
+import threading
 import time
+from types import SimpleNamespace
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 import rclpy
 from builtin_interfaces.msg import Time
+from geometry_msgs.msg import PointStamped
 from hercules_interfaces.msg import GroundTruthState, ObstacleProxy, ObstacleProxyArray
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Header
 
 
@@ -37,9 +41,13 @@ def _source_modules():
     from modules.obstacle_detection import (  # pylint: disable=import-outside-toplevel
         ObstacleDetector, PerceptionConfig,
     )
-    from orchestrator import _capture_obstacles  # pylint: disable=import-outside-toplevel
+    from orchestrator import (  # pylint: disable=import-outside-toplevel
+        _capture_obstacles,
+        filter_agent_body_obstacle_proxies,
+    )
     from simulation.airsim_runtime import AirSimFacade, AirSimLaunchConfig  # pylint: disable=import-outside-toplevel
-    return ObstacleDetector, PerceptionConfig, _capture_obstacles, AirSimFacade, AirSimLaunchConfig
+    return (ObstacleDetector, PerceptionConfig, _capture_obstacles,
+            filter_agent_body_obstacle_proxies, AirSimFacade, AirSimLaunchConfig)
 
 
 def _time_message(value: float) -> Time:
@@ -86,13 +94,71 @@ def snapshot_message(agent_id: str, capture_id: str, source: str,
     return result
 
 
+def _finite_vector(values, size: int) -> Optional[np.ndarray]:
+    candidate = np.asarray(values, dtype=float).reshape(-1)
+    if candidate.size != size or not np.all(np.isfinite(candidate)):
+        return None
+    return candidate.copy()
+
+
+def _kinematics_from_state(message: GroundTruthState):
+    """Build the tiny AirSim kinematics shape expected by the oracle.
+
+    The ROS state adapter is the canonical source of orientation.  The
+    detector helper only needs ``kinematics.orientation`` for LiDAR pose
+    composition, so avoid manufacturing a second frame conversion here.
+    """
+    orientation = _finite_vector(message.orientation, 4)
+    if orientation is None or np.linalg.norm(orientation) < 1e-9:
+        orientation = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=float)
+    else:
+        orientation /= np.linalg.norm(orientation)
+    quaternion = SimpleNamespace(
+        w_val=float(orientation[0]), x_val=float(orientation[1]),
+        y_val=float(orientation[2]), z_val=float(orientation[3]),
+    )
+    return SimpleNamespace(orientation=quaternion)
+
+
+def _capture_state(facade, agent: str, message: GroundTruthState,
+                   origin: np.ndarray) -> Dict[str, object]:
+    """Combine canonical ROS pose data with AirSim frame-origin metadata."""
+    position = _finite_vector(message.position, 3)
+    velocity = _finite_vector(message.velocity, 3)
+    if position is None or velocity is None:
+        raise ValueError("canonical state contains a nonfinite position or velocity")
+    origin = _finite_vector(origin, 3)
+    if origin is None:
+        raise ValueError("calibrated origin is unavailable or nonfinite")
+    state: Dict[str, object] = {
+        "position": position,
+        "velocity": velocity,
+        "yaw": float(message.yaw),
+        "actor_position": position.copy(),
+        "kinematics_position": position - origin,
+        "kinematics": _kinematics_from_state(message),
+    }
+
+    # The canonical ROS state is already in world NED.  The Python capture
+    # helper expects actor_position in that frame and kinematics_position in
+    # the vehicle's local start frame, whose translation is the calibrated
+    # origin.  Keep this deterministic rather than mixing in a second RPC
+    # read that can race the state topic.
+    return state
+
+
 class ObstacleObserverNode(Node):
     def __init__(self) -> None:
         super().__init__("obstacle_observer")
         self.declare_parameter("source", "perception")
         self.declare_parameter("sensor_rate", 2.5)
         self.declare_parameter("stale_after", 1.3)
+        self.declare_parameter("host_ip", "127.0.0.1")
         self.declare_parameter("rpc_port", 41451)
+        self.declare_parameter("car_port", 41452)
+        self.declare_parameter("uav_radius", 1.0)
+        self.declare_parameter("ugv_radius", 1.25)
+        self.declare_parameter("body_exclusion_margin", 0.5)
         self.declare_parameter("map_name", "rural_australia")
         self.source = str(self.get_parameter("source").value)
         if self.source not in ("perception", "truth", "none"):
@@ -103,22 +169,47 @@ class ObstacleObserverNode(Node):
         self.proxy_publishers = {agent: self.create_publisher(
             ObstacleProxyArray, f"/hercules_mission/obstacles/{agent}", 10) for agent in AGENTS}
         self.states: Dict[str, GroundTruthState] = {}
+        self.origins: Dict[str, np.ndarray] = {}
         # ``Node.subscriptions`` is also managed by rclpy and read-only.
         self.state_subscriptions = [self.create_subscription(
             GroundTruthState, f"/hercules_mission/ground_truth/{agent}",
             lambda message, agent=agent: self.states.__setitem__(agent, message), 10)
             for agent in AGENTS]
+        origin_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.origin_subscriptions = [self.create_subscription(
+            PointStamped, f"/hercules_mission/calibrated_origin/{agent}",
+            lambda message, agent=agent: self.origins.__setitem__(
+                agent, np.asarray([message.point.x, message.point.y, message.point.z], dtype=float)),
+            origin_qos)
+            for agent in AGENTS]
         # ``Node.executor`` is an rclpy-managed read-only property.
         self.worker_pool = ThreadPoolExecutor(max_workers=len(AGENTS), thread_name_prefix="cbf-perception")
+        # The AirSim msgpack/Tornado client is not safe for concurrent writes.
+        # Workers remain independent at the scheduling level, but all RPC
+        # capture calls pass through this short critical section.
+        self.capture_lock = threading.Lock()
         self.futures = {}
-        detector_type, config_type, capture_type, facade_type, launch_type = _source_modules()
+        (detector_type, config_type, capture_type, filter_type,
+         facade_type, launch_type) = _source_modules()
         self.capture = capture_type
+        self.filter_agent_body_obstacle_proxies = filter_type
         # AirSim RPC clients are mutable and are not safe to share across the
         # worker pool.  Keep the constructor types/config here and create one
         # facade (and its clients) inside each capture worker.
         self.facade_type = facade_type
         self.launch_type = launch_type
+        self.host_ip = str(self.get_parameter("host_ip").value or "127.0.0.1")
         self.rpc_port = int(self.get_parameter("rpc_port").value)
+        self.car_port = int(self.get_parameter("car_port").value)
+        self.uav_radius = float(self.get_parameter("uav_radius").value)
+        self.ugv_radius = float(self.get_parameter("ugv_radius").value)
+        self.body_exclusion_margin = float(self.get_parameter("body_exclusion_margin").value)
+        if (not np.isfinite(self.uav_radius) or not np.isfinite(self.ugv_radius) or
+                not np.isfinite(self.body_exclusion_margin) or
+                self.uav_radius < 0.0 or self.ugv_radius < 0.0 or
+                self.body_exclusion_margin < 0.0):
+            raise ValueError("body radii and exclusion margin must be finite and nonnegative")
         self.map_name = str(self.get_parameter("map_name").value).strip().lower()
         stale_after = float(self.get_parameter("stale_after").value)
 
@@ -168,13 +259,19 @@ class ObstacleObserverNode(Node):
         return super().destroy_node()
 
     def schedule(self) -> None:
-        if self.source == "none":
+        if self.source in ("none", "truth"):
             now = time.time()
             for agent in AGENTS:
                 self.proxy_publishers[agent].publish(snapshot_message(
-                    agent, f"empty_{int(now * 1e6)}_{agent}", "none", True, True, now, []))
+                    agent, f"empty_{int(now * 1e6)}_{agent}", self.source,
+                    True, True, now, []))
             return
         for agent, state in list(self.states.items()):
+            origin = self.origins.get(agent)
+            if origin is None or origin.shape != (3,) or not np.all(np.isfinite(origin)):
+                # Perception frames are undefined until the latched origin
+                # arrives; do not emit a plausible-looking misframed sample.
+                continue
             if agent not in self.proxy_publishers or agent in self.futures and not self.futures[agent].done():
                 continue
             self.futures[agent] = self.worker_pool.submit(self.capture_one, agent, state)
@@ -182,25 +279,35 @@ class ObstacleObserverNode(Node):
 
     def capture_one(self, agent: str, message: GroundTruthState) -> Tuple[ObstacleProxyArray, bool]:
         try:
-            state = {
-                "position": np.asarray(message.position, dtype=float),
-                "velocity": np.asarray(message.velocity, dtype=float),
-                "yaw": float(message.yaw),
-                "actor_position": np.asarray(message.position, dtype=float),
-                "kinematics_position": np.asarray(message.position, dtype=float),
-            }
-            facade = self.facades.get(agent)
-            if facade is None:
-                facade = self.facade_type(self.launch_type(
-                    launch_mode="existing", multirotor_port=self.rpc_port))
-                facade.connect()
-                self.facades[agent] = facade
-            proxies, valid, _, trace = self.capture(
-                facade, self.detectors[agent], agent,
-                "drone" if message.vehicle_type == "drone" else "ugv",
-                state, time.time(), {})
+            with self.capture_lock:
+                facade = self.facades.get(agent)
+                if facade is None:
+                    facade = self.facade_type(self.launch_type(
+                        launch_mode="existing", host=self.host_ip,
+                        multirotor_port=self.rpc_port, car_port=self.car_port))
+                    facade.connect()
+                    self.facades[agent] = facade
+                state = _capture_state(facade, agent, message, self.origins.get(agent))
+                proxies, valid, sensor_view, trace = self.capture(
+                    facade, self.detectors[agent], agent,
+                    "drone" if message.vehicle_type == "drone" else "ugv",
+                    state, time.time(), {})
+            if valid:
+                states = dict(self.states)
+                vehicle_radii = {
+                    name: self.uav_radius
+                    if str(getattr(value, "vehicle_type", "")).lower() == "drone"
+                    else self.ugv_radius
+                    for name, value in states.items()
+                }
+                proxies, _ = self.filter_agent_body_obstacle_proxies(
+                    proxies, states, vehicle_radii,
+                    exclusion_margin=self.body_exclusion_margin,
+                )
             capture_id = str(trace.get("capture_id", "")) or f"capture_{time.time_ns()}_{agent}"
-            return snapshot_message(agent, capture_id, self.source, True, valid, time.time(), proxies), True
+            capture_stamp = float(sensor_view.get("capture_timestamp", time.time()))
+            return snapshot_message(agent, capture_id, self.source, True, valid,
+                                    capture_stamp, proxies), True
         except Exception as error:  # worker failures are transport data, not node failure
             self.get_logger().warning(f"obstacle capture failed for {agent}: {error}")
             now = time.time()

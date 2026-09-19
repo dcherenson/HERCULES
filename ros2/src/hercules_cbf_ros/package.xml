@@ -10,7 +10,11 @@
   <depend>hercules_interfaces</depend>
   <depend>builtin_interfaces</depend>
   <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>rclpy</depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-sklearn</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>
   <export><build_type>ament_cmake</build_type></export>

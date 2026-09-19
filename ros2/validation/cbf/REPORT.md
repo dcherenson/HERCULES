@@ -1,18 +1,30 @@
-# Phase 3 validation report
+# Phase 3 validation report (historical Linux/replay record)
 
-Phase 3 is complete through the reproducible offline/replay gate. The clean
-image `hercules-ros2:humble-phase3-final` was built with the pinned perception
-stack (NumPy 1.26.4, SciPy 1.15.3, scikit-learn 1.7.1, threadpoolctl 3.6.0)
-and native OSQP. The selected ROS overlay built successfully and its complete
-package gate passed **129 tests, 0 errors, 0 failures, 0 skipped**. The
-distributed-mission Python suite passed **135 tests**; the CBF metrics tests
-passed **2 tests**.
+> This is a historical record of the Phase 3 work, not a current macOS/Metal
+> acceptance report. The live portions were run on a Linux host with a Linux
+> Unreal/Vulkan environment; generated artifacts are ignored/untracked and are
+> not portable evidence. Re-run the gates at the current `HEAD`, recording the
+> exact Git revision, image digest, host architecture, renderer, and RPC network
+> path before using these numbers for a comparison.
 
-The deterministic replay under `artifacts/deterministic_replay/` exercises the
-three executable modes and generates `compare/metrics.json` and
-`compare/cbf_modes.png`. It reports 30% Mestres interventions (maximum 0.2 m/s²),
-20% Wang interventions (maximum 0.1 m/s²), no fallbacks or deadline misses, and
-the no-CBF disabled baseline. Old logs without CBF fields remain accepted.
+Phase 3 was complete through the reproducible offline/replay gate **for the
+named historical image**. The clean image `hercules-ros2:humble-phase3-final`
+was built with the pinned perception stack (NumPy 1.26.4, SciPy 1.15.3,
+scikit-learn 1.7.1, threadpoolctl 3.6.0) and native OSQP. The selected ROS
+overlay built successfully and its complete package gate passed **129 tests, 0
+errors, 0 failures, 0 skipped**. The distributed-mission Python suite passed
+**135 tests**; the CBF metrics tests passed **2 tests**. These counts are
+historical observations, not a guarantee that a fresh checkout or Mac image
+has the same package/test totals.
+
+The deterministic replay under the historical host's
+`artifacts/deterministic_replay/` exercises the three executable modes and
+generates `compare/metrics.json` and `compare/cbf_modes.png`. It reports 30%
+Mestres interventions (maximum 0.2 m/s²), 20% Wang interventions (maximum 0.1
+m/s²), no fallbacks or deadline misses, and the no-CBF disabled baseline. Old
+logs without CBF fields remain accepted. This is numerical/replay evidence; it
+does not validate Metal image capture, Docker Desktop networking, or closed-loop
+obstacle perception.
 
 AirSim was subsequently started natively from
 `docker/ros2/launch_rural_mission_sim.sh` with
@@ -27,13 +39,13 @@ row). The collision observer reported all nine vehicles available with
 
 The camera/Wang smoke run reached mission completion, but its obstacle observer
 exited during startup because the ROS node attempted to assign rclpy's
-read-only `publishers` and `subscriptions` properties. Those handles have now
-been renamed in the source. A subsequent 500-tick camera attempt exposed the
-next issue: creating a new AirSim facade for every capture caused stale-state
-warnings; all 403 detections were invalid, so it is not a valid closed-loop
-perception trial. The long compile that followed also caused the first Unreal
-process to exit; the simulator has since been restarted and is currently
-reachable.
+read-only `publishers` and `subscriptions` properties. Those handles were
+subsequently renamed in the source. A later 500-tick camera attempt exposed a
+second issue: creating a new AirSim facade for every capture caused stale-state
+warnings; all 403 detections were invalid, so it is **not** a valid closed-loop
+perception trial. A long compile also caused the first Unreal process to exit.
+These are historical failure observations; they do not describe the current
+simulator state or prove that the corresponding Mac/Metal path works.
 
 The completed Rural Australia timing/trajectory experiment is documented in
 `COMPARISON_500_REPORT.md`. It includes the Python camera run (500 rows), the
@@ -44,8 +56,16 @@ runs, native/Python CBF timings, tracking counters, translated trajectories,
 and numerical RMSE values are in `artifacts/comparison_500.json` and
 `artifacts/comparison_500_trajectories.png`. These runs are diagnostic timing
 and behavior evidence; different live simulator starting states mean they do
-not establish a normalized trajectory or closed-loop safety comparison.
+not establish a normalized trajectory or closed-loop safety comparison. The
+Python rows use the Python distributed-mission CBF implementation; they are not
+an old no-CBF Python-only baseline. Exact Python/C++ numerical parity comes from
+the deterministic request replay, while trajectory/latency differences are
+reported separately.
 
 `docker/ros2/reproduce_cbf.sh` remains the reproduction entry point; it records
 the resolved configuration, source profile, timing, freshness and collision
-artifacts when a full AirSim sequence is run.
+artifacts when a full AirSim sequence is run. For a Mac run, first pass the
+Docker Desktop networking/architecture/Metal preflight in `ROS2_HANDOFF.md` and
+record one AirSim host value for every client. A truth-observation smoke pass is
+not a camera-parity pass; leave the camera result incomplete when capture or
+pose/origin validation fails.

@@ -3,6 +3,10 @@ source "$(dirname -- "$0")/common.sh"
 inside_or_exec "$@"
 HERCULES_SOURCE_OVERLAY=0 source "$TOOL_DIR/env.sh"
 "$TOOL_DIR/bootstrap.sh"
+# The checkout is bind-mounted from macOS and may appear with a different
+# numeric owner inside the container.  Allow setuptools_scm/ament's git
+# introspection to inspect this explicitly trusted workspace.
+git config --global --add safe.directory "$REPO_ROOT" 2>/dev/null || true
 export CMAKE_BUILD_PARALLEL_LEVEL="${BUILD_JOBS:-2}"
 export MAKEFLAGS="-j$CMAKE_BUILD_PARALLEL_LEVEL"
 mkdir -p "$HERCULES_BUILD_ROOT"

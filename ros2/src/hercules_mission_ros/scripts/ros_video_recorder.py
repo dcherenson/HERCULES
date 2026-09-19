@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 import sys
 import time
@@ -60,6 +61,8 @@ class RosVideoRecorder(Node):
         self.finish_grace = float(self.declare_parameter("video_finish_grace_sec", 3.0).value)
         self.postprocess_timeout = float(self.declare_parameter("video_postprocess_timeout_sec", 20.0).value)
         self.rpc_port = int(self.declare_parameter("video_rpc_port", 41451).value)
+        self.rpc_host = str(self.declare_parameter("video_rpc_host", "127.0.0.1").value or "127.0.0.1")
+        self.car_port = int(self.declare_parameter("video_car_port", 41452).value)
         self.route_heading = float(self.declare_parameter("route_heading_rad", 0.0).value)
         self.keep_frames = bool(self.declare_parameter("video_keep_frames", False).value)
         if self.record_uav not in CONTROLLED or self.record_ugv not in CONTROLLED:
@@ -97,7 +100,18 @@ class RosVideoRecorder(Node):
         try:
             import hercules_cosysairsim as airsim  # pylint: disable=import-outside-toplevel
             self.air = airsim
-            self.client = airsim.MultirotorClient(port=self.rpc_port)
+            rpc_host = self.rpc_host
+            if rpc_host in {"host.docker.internal", "docker.for.mac.host.internal"}:
+                try:
+                    addresses = socket.getaddrinfo(rpc_host, None, socket.AF_INET, socket.SOCK_STREAM)
+                    if addresses:
+                        rpc_host = str(addresses[0][4][0])
+                except OSError:
+                    pass
+            try:
+                self.client = airsim.MultirotorClient(ip=rpc_host, port=self.rpc_port)
+            except TypeError:
+                self.client = airsim.MultirotorClient(port=self.rpc_port)
             self.client.confirmConnection()
             # AirSim applies simSetCameraPose relative to the detached
             # camera's configured base pose in this build.  The Python
@@ -122,7 +136,10 @@ class RosVideoRecorder(Node):
                    (self.record_uav, "front_center"),
                    (self.record_ugv, "front_center")]
         self.recorder = recorder_type(airsim, self.rpc_port, streams,
-                                      str(self.staging_dir), self.video_fps)
+                                      str(self.staging_dir), self.video_fps,
+                                      host=self.rpc_host,
+                                      endpoint_ports={self.record_uav: self.rpc_port,
+                                                      self.record_ugv: self.car_port})
         self.recorder.start()
         self.started_at = time.monotonic()
         self.get_logger().info("ROS camera recording started")

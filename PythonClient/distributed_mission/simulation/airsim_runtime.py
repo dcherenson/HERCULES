@@ -13,9 +13,27 @@ import threading
 import time
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
+
+
+def resolve_rpc_host(host: str) -> str:
+    """Prefer an IPv4 literal for Docker Desktop's host alias.
+
+    Some msgpack-rpc builds select the IPv6 ``host.docker.internal`` answer
+    first even though AirSim listens on IPv4. Resolving this alias explicitly
+    keeps the bridge path deterministic without changing ordinary hostnames.
+    """
+    value = str(host or "127.0.0.1")
+    if value in {"host.docker.internal", "docker.for.mac.host.internal"}:
+        try:
+            addresses = socket.getaddrinfo(value, None, socket.AF_INET, socket.SOCK_STREAM)
+            if addresses:
+                return str(addresses[0][4][0])
+        except OSError:
+            pass
+    return value
 
 
 @dataclass
@@ -28,6 +46,10 @@ class AirSimLaunchConfig:
     host: str = "127.0.0.1"
     multirotor_port: int = 41451
     car_port: int = 41452
+    # Optional per-vehicle override for Hero deployments that partition the
+    # RPC services differently. The normal Rural mapping is inferred from
+    # UAV/Husky names and remains backward-compatible with older callers.
+    vehicle_ports: Optional[Mapping[str, int]] = None
     resolution: tuple = (800, 600)
     startup_timeout: float = 120.0
     suppress_unreal_output: bool = True
@@ -59,6 +81,9 @@ class AirSimLaunchConfig:
             self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
         if self.uproject_path is None:
             self.uproject_path = os.path.join(self.project_root, "Unreal", "Environments", "Blocks", "Blocks.uproject")
+        self.vehicle_ports = {
+            str(name): int(port) for name, port in (self.vehicle_ports or {}).items()
+        }
         if self.camera_director_position is not None:
             self.camera_director_position = tuple(float(value) for value in self.camera_director_position)
             if len(self.camera_director_position) != 3:
@@ -418,27 +443,53 @@ class AirSimFacade:
         self.car = car_client
         self._vehicle_names = set()
 
+    def _is_ugv(self, name: str, vehicle_type: Optional[str] = None) -> bool:
+        if vehicle_type is not None:
+            return str(vehicle_type).lower() in {"ugv", "car", "cphusky"}
+        configured_port = self.config.vehicle_ports.get(str(name))
+        if configured_port is not None:
+            return int(configured_port) == int(self.config.car_port)
+        return str(name).lower().startswith(("husky", "ugv", "car", "target"))
+
+    def _client_for_vehicle(self, name: str, vehicle_type: Optional[str] = None) -> Any:
+        """Return the endpoint client for a vehicle, with old-client fallback."""
+        if self._is_ugv(name, vehicle_type) and self.car is not None:
+            return self.car
+        return self.multirotor
+
     def connect(self) -> None:
         if self.airsim is None:
             import hercules_cosysairsim as airsim
             self.airsim = airsim
+        rpc_host = resolve_rpc_host(self.config.host)
         if self.multirotor is None:
-            self.multirotor = self.airsim.MultirotorClient(port=self.config.multirotor_port)
+            try:
+                self.multirotor = self.airsim.MultirotorClient(
+                    ip=rpc_host, port=self.config.multirotor_port
+                )
+            except TypeError:
+                self.multirotor = self.airsim.MultirotorClient(port=self.config.multirotor_port)
         if self.car is None:
-            self.car = self.airsim.CarClient(port=self.config.car_port)
+            try:
+                self.car = self.airsim.CarClient(ip=rpc_host, port=self.config.car_port)
+            except TypeError:
+                self.car = self.airsim.CarClient(port=self.config.car_port)
         self.multirotor.confirmConnection()
         self.car.confirmConnection()
-        try:
-            self._vehicle_names = set(self.multirotor.listVehicles())
-        except Exception:
-            self._vehicle_names = set()
+        self._vehicle_names = set()
+        for client in (self.multirotor, self.car):
+            try:
+                self._vehicle_names.update(client.listVehicles())
+            except Exception:
+                pass
 
     def spawn_vehicle(self, name: str, vehicle_type: str, pose: Any) -> bool:
         if name in self._vehicle_names:
             return False
         vehicle_name = "simpleflight" if vehicle_type == "drone" else "cphusky"
+        client = self._client_for_vehicle(name, vehicle_type)
         try:
-            self.multirotor.simAddVehicle(name, vehicle_name, pose)
+            client.simAddVehicle(name, vehicle_name, pose)
             self._vehicle_names.add(name)
             return True
         except Exception:
@@ -456,7 +507,7 @@ class AirSimFacade:
         return bool(result) if result is not None else True
 
     def set_vehicle_pose(self, name: str, pose: Any) -> None:
-        self.multirotor.simSetVehiclePose(pose, True, vehicle_name=name)
+        self._client_for_vehicle(name).simSetVehiclePose(pose, True, vehicle_name=name)
 
     def vehicle_frame_origin(self, name: str) -> Optional[np.ndarray]:
         """Return the world-NED origin of a configured vehicle frame.
@@ -468,13 +519,14 @@ class AirSimFacade:
         """
 
         try:
-            kinematics = self.multirotor.simGetGroundTruthKinematics(vehicle_name=name)
+            client = self._client_for_vehicle(name)
+            kinematics = client.simGetGroundTruthKinematics(vehicle_name=name)
             kinematics_position = np.array([
                 kinematics.position.x_val,
                 kinematics.position.y_val,
                 kinematics.position.z_val,
             ], dtype=float)
-            pose = self.multirotor.simGetObjectPose(name, True)
+            pose = client.simGetObjectPose(name, True)
             raw_position = getattr(pose, "position", None)
             if raw_position is None:
                 return None
@@ -495,7 +547,8 @@ class AirSimFacade:
             client.armDisarm(True, name)
 
     def state(self, name: str) -> Dict[str, Any]:
-        kinematics = self.multirotor.simGetGroundTruthKinematics(vehicle_name=name)
+        client = self._client_for_vehicle(name)
+        kinematics = client.simGetGroundTruthKinematics(vehicle_name=name)
         kinematics_position = np.array([kinematics.position.x_val, kinematics.position.y_val, kinematics.position.z_val], dtype=float)
         # Ground-truth kinematics are expressed in the vehicle's starting
         # point frame. CBF obstacle truth and Unreal collision reports use
@@ -504,7 +557,7 @@ class AirSimFacade:
         position = kinematics_position.copy()
         actor_position = None
         try:
-            actor_pose = self.multirotor.simGetObjectPose(name, True)
+            actor_pose = client.simGetObjectPose(name, True)
             raw_position = getattr(actor_pose, "position", None)
             if raw_position is not None:
                 candidate = np.array([raw_position.x_val, raw_position.y_val, raw_position.z_val], dtype=float)
@@ -534,7 +587,8 @@ class AirSimFacade:
         """Return authoritative AirSim collision state for one vehicle."""
 
         try:
-            info = self.multirotor.simGetCollisionInfo(vehicle_name=name)
+            client = self._client_for_vehicle(name)
+            info = client.simGetCollisionInfo(vehicle_name=name)
             record = {
                 "available": True,
                 "has_collided": bool(getattr(info, "has_collided", False)),
@@ -546,7 +600,7 @@ class AirSimFacade:
             object_name = record["object_name"]
             if object_name:
                 try:
-                    pose = self.multirotor.simGetObjectPose(object_name, True)
+                    pose = client.simGetObjectPose(object_name, True)
                     position = getattr(pose, "position", None)
                     if position is not None:
                         candidate = np.array([position.x_val, position.y_val, position.z_val], dtype=float)
@@ -610,7 +664,8 @@ class AirSimFacade:
     def set_recording_camera_pose(self, camera_name: str, pose: Any, vehicle_name: str) -> None:
         """Move an external recording camera without touching vehicle cameras."""
 
-        self.multirotor.simSetCameraPose(camera_name, pose, vehicle_name=vehicle_name)
+        self._client_for_vehicle(vehicle_name).simSetCameraPose(
+            camera_name, pose, vehicle_name=vehicle_name)
 
     def start_recording(self) -> None:
         self.multirotor.startRecording()

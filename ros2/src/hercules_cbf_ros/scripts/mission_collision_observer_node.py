@@ -40,12 +40,18 @@ class MissionCollisionObserverNode(Node):
     def __init__(self) -> None:
         super().__init__("mission_collision_observer")
         self.declare_parameter("poll_rate", 10.0)
+        self.declare_parameter("host_ip", "127.0.0.1")
         self.declare_parameter("rpc_port", 41451)
+        self.declare_parameter("car_port", 41452)
         self.poll_rate = max(1.0, float(self.get_parameter("poll_rate").value))
+        self.host_ip = str(self.get_parameter("host_ip").value or "127.0.0.1")
+        self.rpc_port = int(self.get_parameter("rpc_port").value)
+        self.car_port = int(self.get_parameter("car_port").value)
         self.publisher = self.create_publisher(MissionCollision, "/hercules_mission/collisions", 20)
         facade_type, config_type = _source_modules()
-        self.facade = facade_type(config_type(launch_mode="existing", multirotor_port=int(
-            self.get_parameter("rpc_port").value)))
+        self.facade = facade_type(config_type(
+            launch_mode="existing", host=self.host_ip,
+            multirotor_port=self.rpc_port, car_port=self.car_port))
         self.connected = False
         self.active_events: Set[str] = set()
         self.timer = self.create_timer(1.0 / self.poll_rate, self.poll)

@@ -10,7 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-numpy python3-matplotlib python3-pil ffmpeg \
     libeigen3-dev libgtest-dev gdb gdbserver clangd procps sysstat iproute2 netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
-RUN python3 -m pip install --no-cache-dir \
+# Ubuntu Jammy's pip/packaging pair is too old for the scikit-build backend
+# used by the pinned ARM64 OSQP release. Upgrade the build toolchain once,
+# then disable build isolation so OSQP sees the compatible packaging module.
+RUN python3 -m pip install --no-cache-dir --upgrade \
+    pip setuptools wheel packaging scikit-build-core setuptools-scm \
+    && python3 -m pip install --no-cache-dir --no-build-isolation \
     osqp==1.0.4 jinja2==3.1.6 joblib==1.5.1 MarkupSafe==3.0.2 \
     rpc-msgpack==0.6
 COPY docker/ros2/requirements-perception.lock /tmp/requirements-perception.lock

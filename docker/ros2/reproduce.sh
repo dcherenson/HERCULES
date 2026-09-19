@@ -3,6 +3,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+# Support a Homebrew cask install where the privileged CLI symlink was not
+# created; Docker Desktop still ships the client inside the application.
+if ! command -v docker >/dev/null 2>&1 && [[ -x /Applications/Docker.app/Contents/Resources/bin/docker ]]; then
+  export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+fi
 COMPOSE_FILE="$SCRIPT_DIR/compose.yaml"
 ARTIFACT_DIR="$REPO_ROOT/ros2/validation/reproduction/artifacts"
 WITH_LIVE_VIDEO=false
@@ -62,8 +67,26 @@ export LOCAL_UID="$(id -u)"
 export LOCAL_GID="$(id -g)"
 export BUILD_TYPE="${BUILD_TYPE:-RelWithDebInfo}"
 export BUILD_JOBS="${BUILD_JOBS:-2}"
+export AIRSIM_HOST="${AIRSIM_HOST:-127.0.0.1}"
+export AIRSIM_MULTIROTOR_PORT="${AIRSIM_MULTIROTOR_PORT:-41451}"
+export AIRSIM_CAR_PORT="${AIRSIM_CAR_PORT:-41452}"
+# Unreal's native Mac renderer uses Metal; Linux launches retain the existing
+# Vulkan default.  Override this explicitly when validating another renderer.
+if [[ -z ${HERCULES_IS_VULKAN:-} ]]; then
+  if [[ $(uname -s) == Darwin ]]; then HERCULES_IS_VULKAN=false; else HERCULES_IS_VULKAN=true; fi
+fi
+export HERCULES_IS_VULKAN
 export HERCULES_BUILD_ROOT="/workspaces/hercules/ros2/.docker/humble/reproduction/$RUN_ID"
 RESULT_LOG="$ARTIFACT_DIR/reproduction-$RUN_ID.log"
+
+ROS_NETWORK_ARGS=(
+  "airsim_host:=$AIRSIM_HOST"
+  "drone_port:=$AIRSIM_MULTIROTOR_PORT"
+  "ugv_port:=$AIRSIM_CAR_PORT"
+  "video_rpc_port:=$AIRSIM_MULTIROTOR_PORT"
+  "video_car_port:=$AIRSIM_CAR_PORT"
+  "is_vulkan:=$HERCULES_IS_VULKAN"
+)
 
 run_live_stage() {
   local timeout_seconds="$1"
@@ -85,8 +108,36 @@ run_live_stage() {
 
 reset_simulator() {
   "$SCRIPT_DIR/exec.sh" env PYTHONPATH=/workspaces/hercules/PythonClient \
-    python3 -c 'import hercules_cosysairsim as airsim; client = airsim.MultirotorClient(port=41451); client.confirmConnection(); client.reset()'
+    python3 - "$AIRSIM_HOST" "$AIRSIM_MULTIROTOR_PORT" <<'PY'
+import sys
+import socket
+import hercules_cosysairsim as airsim
+
+host, port = sys.argv[1], int(sys.argv[2])
+if host in {"host.docker.internal", "docker.for.mac.host.internal"}:
+    try:
+        addresses = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+        if addresses:
+            host = addresses[0][4][0]
+    except OSError:
+        pass
+client = airsim.MultirotorClient(ip=host, port=port)
+client.confirmConnection()
+client.reset()
+PY
   sleep 2
+}
+
+check_rpc() {
+  local port="$1"
+  "$SCRIPT_DIR/exec.sh" python3 - "$AIRSIM_HOST" "$port" <<'PY'
+import socket
+import sys
+
+host, port = sys.argv[1], int(sys.argv[2])
+with socket.create_connection((host, port), timeout=2):
+    pass
+PY
 }
 
 main() {
@@ -105,10 +156,10 @@ main() {
     return
   fi
 
-  for port in 41451 41452; do
-    if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+  for port in "$AIRSIM_MULTIROTOR_PORT" "$AIRSIM_CAR_PORT"; do
+    if ! check_rpc "$port"; then
       echo "AirSim RPC port $port is unavailable." >&2
-      echo "Start the RuralAustralia simulator first; see ROS2_HANDOFF.md." >&2
+      echo "Start RuralAustralia and verify AIRSIM_HOST=$AIRSIM_HOST is reachable from the ROS container; see ROS2_HANDOFF.md." >&2
       return 1
     fi
   done
@@ -117,6 +168,7 @@ main() {
   mkdir -p "$ARTIFACT_DIR/truth_nominal" \
     "$ARTIFACT_DIR/distributed_truth" "$ARTIFACT_DIR/distributed_camera"
   run_live_stage 50 dry_run:=true duration_sec:=5 \
+    "${ROS_NETWORK_ARGS[@]}" \
     target_source:=truth \
     "log_path:=$container_artifacts/dry_run.jsonl"
   [[ "$(wc -l < "$ARTIFACT_DIR/dry_run.jsonl")" -ge 40 ]] || {
@@ -125,6 +177,7 @@ main() {
   }
   reset_simulator
   run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
+    "${ROS_NETWORK_ARGS[@]}" \
     enable_target:=true enable_formation:=true \
     target_source:=truth \
     record_video:=true \
@@ -134,6 +187,7 @@ main() {
     "log_path:=$container_artifacts/truth_nominal/mission.jsonl"
   reset_simulator
   run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
+    "${ROS_NETWORK_ARGS[@]}" \
     enable_target:=true enable_formation:=true \
     target_source:=distributed_tracking target_observation_source:=truth \
     record_video:=true \
@@ -143,6 +197,7 @@ main() {
     "log_path:=$container_artifacts/distributed_truth/mission.jsonl"
   reset_simulator
   run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
+    "${ROS_NETWORK_ARGS[@]}" \
     enable_target:=true enable_formation:=true \
     target_source:=distributed_tracking target_observation_source:=camera \
     record_video:=true \
