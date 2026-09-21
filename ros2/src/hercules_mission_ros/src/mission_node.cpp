@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -15,12 +16,16 @@
 #include <type_traits>
 #include <vector>
 
+#include <Eigen/Cholesky>
 #include <Eigen/Core>
 #include <airsim_interfaces/msg/car_controls.hpp>
 #include <airsim_interfaces/msg/vel_cmd.hpp>
 #include <airsim_interfaces/srv/land.hpp>
+#include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <hercules_interfaces/msg/ground_truth_state.hpp>
+#include <hercules_interfaces/msg/localization_diagnostics.hpp>
+#include <hercules_interfaces/msg/localization_estimate.hpp>
 #include <hercules_interfaces/msg/target_estimate.hpp>
 #include <hercules_interfaces/msg/target_measurement.hpp>
 #include <hercules_interfaces/msg/target_observation_diagnostics.hpp>
@@ -55,6 +60,7 @@ constexpr const char* kControlled[] = {"Drone1", "Drone2", "SimpleFlight", "Dron
 constexpr const char* kAll[] = {"Drone1", "Drone2", "SimpleFlight", "Drone4",
                                 "Drone5", "Husky1", "Husky2", "Husky3",
                                 "Target1"};
+constexpr const char* kLocalizationFrame = "airsim_world_ned";
 
 double seconds(Clock::time_point then) {
   return std::chrono::duration<double>(Clock::now() - then).count();
@@ -66,6 +72,19 @@ struct ControlTargetEstimate {
   double timestamp{0.0};
   bool from_distributed{false};
 };
+
+struct LocalizationOrderKey {
+  std::int32_t stamp_sec{0};
+  std::uint32_t stamp_nanosec{0};
+  std::uint64_t sequence{0};
+};
+
+bool timestampValid(const builtin_interfaces::msg::Time& stamp) {
+  // ROS 2 timestamps use a signed seconds field and a nanosecond remainder.
+  // Simulation time is non-negative; accepting zero keeps the first valid
+  // sample usable before /clock has advanced.
+  return stamp.sec >= 0 && stamp.nanosec < 1000000000U;
+}
 
 const char* expectedVehicleType(const std::string& id) {
   if (id == "Target1") return "target_ugv";
@@ -82,6 +101,32 @@ bool validCanonicalState(const hercules_interfaces::msg::GroundTruthState& messa
   for (const auto value : message.velocity) if (!std::isfinite(value)) return false;
   for (const auto value : message.orientation) if (!std::isfinite(value)) return false;
   return std::isfinite(message.yaw) && std::isfinite(message.yaw_rate);
+}
+
+bool validLocalizationEstimate(const hercules_interfaces::msg::LocalizationEstimate& message,
+                               const std::string& expected_id,
+                               const std::string& expected_algorithm) {
+  if (!message.valid || !message.initialized || message.stale ||
+      message.agent_id != expected_id || message.algorithm != expected_algorithm ||
+      message.header.frame_id != kLocalizationFrame ||
+      message.frame_id != kLocalizationFrame || !timestampValid(message.header.stamp) ||
+      !std::all_of(message.position.begin(), message.position.end(),
+                   [](double value) { return std::isfinite(value); }) ||
+      !std::all_of(message.velocity.begin(), message.velocity.end(),
+                   [](double value) { return std::isfinite(value); }) ||
+      !std::all_of(message.covariance.begin(), message.covariance.end(),
+                   [](double value) { return std::isfinite(value); }) ||
+      !std::isfinite(message.yaw) || !std::isfinite(message.yaw_rate)) {
+    return false;
+  }
+  Eigen::Map<const Eigen::Matrix3d> covariance(message.covariance.data());
+  if (!covariance.isApprox(covariance.transpose(),
+                           1e-8 * (1.0 + covariance.norm()))) {
+    return false;
+  }
+  const Eigen::LLT<Eigen::Matrix3d> factor(covariance);
+  return factor.info() == Eigen::Success &&
+         factor.matrixL().toDenseMatrix().diagonal().array().all() > 0.0;
 }
 
 hercules_mission_core::AgentState agentState(
@@ -130,6 +175,25 @@ class RuralNominalMissionNode : public rclcpp::Node {
     duration_ = declare_parameter<double>("duration_sec", 30.0);
     startup_timeout_ = declare_parameter<double>("startup_timeout_sec", 30.0);
     freshness_timeout_ = declare_parameter<double>("freshness_timeout_sec", 0.5);
+    localization_algorithm_ = declare_parameter<std::string>(
+        "localization_algorithm", "recursive_decentralized");
+    if (localization_algorithm_ != "recursive_decentralized" &&
+        localization_algorithm_ != "gs_ci") {
+      throw std::invalid_argument(
+          "localization_algorithm must be recursive_decentralized or gs_ci");
+    }
+    const auto localization_source =
+        declare_parameter<std::string>("localization_source", "estimate");
+    const auto control_source = declare_parameter<std::string>("control_source", "");
+    localization_source_ = control_source.empty() ? localization_source : control_source;
+    if (localization_source_ != "estimate" && localization_source_ != "truth") {
+      throw std::invalid_argument("localization_source must be estimate or truth");
+    }
+    localization_stale_after_ = declare_parameter<double>(
+        "localization_stale_after_sec", 0.5);
+    if (!std::isfinite(localization_stale_after_) || localization_stale_after_ <= 0.0) {
+      throw std::invalid_argument("localization_stale_after_sec must be positive");
+    }
     route_heading_ = declare_parameter<double>("route_heading_rad", 0.06241881);
     target_speed_ = declare_parameter<double>("target_speed", config_.target_motion.speed);
     target_pattern_length_ = declare_parameter<double>(
@@ -278,6 +342,62 @@ class RuralNominalMissionNode : public rclcpp::Node {
               }));
     }
     for (const char* id : kControlled) {
+      localization_subscriptions_.push_back(
+          create_subscription<hercules_interfaces::msg::LocalizationEstimate>(
+              std::string("/hercules_localization/") + id + "/estimate", 20,
+              [this, id](hercules_interfaces::msg::LocalizationEstimate::ConstSharedPtr msg) {
+                if (!msg || !validLocalizationEstimate(*msg, id, localization_algorithm_)) {
+                  // An invalid or explicitly stale sample invalidates the
+                  // active control estimate immediately.  Retain the last
+                  // accepted planar pose separately so CBF geometry can stay
+                  // conservative, but never keep steering from an old sample
+                  // during the freshness grace period.
+                  localization_estimates_.erase(id);
+                  localization_receipts_.erase(id);
+                  ++localization_rejections_[id];
+                  return;
+                }
+                const auto previous = localization_order_.find(id);
+                const bool timestamp_older =
+                    previous != localization_order_.end() &&
+                    (msg->header.stamp.sec < previous->second.stamp_sec ||
+                     (msg->header.stamp.sec == previous->second.stamp_sec &&
+                      msg->header.stamp.nanosec < previous->second.stamp_nanosec));
+                if (previous != localization_order_.end() &&
+                    (msg->sequence <= previous->second.sequence || timestamp_older)) {
+                  // A late/replayed estimate must not move the control state
+                  // backwards.  Keep the last accepted estimate and let its
+                  // receipt age drive the normal stale handling path.
+                  ++localization_rejections_[id];
+                  return;
+                }
+                localization_estimates_[id] = *msg;
+                localization_receipts_[id] = Clock::now();
+                localization_order_[id] = {
+                    msg->header.stamp.sec, msg->header.stamp.nanosec, msg->sequence};
+                last_localized_states_[id] = states_.count(id) ? states_.at(id) :
+                    hercules_interfaces::msg::GroundTruthState{};
+                auto& cached = last_localized_states_.at(id);
+                cached.position[0] = msg->position[0];
+                cached.position[1] = msg->position[1];
+                cached.velocity[0] = msg->velocity[0];
+                cached.velocity[1] = msg->velocity[1];
+                cached.yaw = msg->yaw;
+                cached.yaw_rate = msg->yaw_rate;
+                cached.valid = true;
+              }));
+      localization_diagnostic_subscriptions_.push_back(
+          create_subscription<hercules_interfaces::msg::LocalizationDiagnostics>(
+              std::string("/hercules_localization/") + id + "/diagnostics", 20,
+              [this, id](hercules_interfaces::msg::LocalizationDiagnostics::ConstSharedPtr msg) {
+                if (msg && msg->agent_id == id &&
+                    (msg->algorithm.empty() || msg->algorithm == localization_algorithm_) &&
+                    timestampValid(msg->header.stamp)) {
+                  localization_diagnostics_[id] = *msg;
+                }
+              }));
+    }
+    for (const char* id : kControlled) {
       obstacle_caches_[id] = std::make_unique<hercules_cbf_ros::ObstacleCache>(
           cbf_obstacle_stale_after_, id, "wall");
       obstacle_subscriptions_.push_back(create_subscription<hercules_interfaces::msg::ObstacleProxyArray>(
@@ -341,8 +461,9 @@ class RuralNominalMissionNode : public rclcpp::Node {
             std::chrono::duration<double>(config_.control_dt)),
         [this]() { tick(); });
     RCLCPP_INFO(get_logger(),
-                "Rural nominal mission waiting for nine calibrated states (%s)",
-                dry_run_ ? "dry-run: actuation disabled" : "live actuation");
+                "Rural nominal mission waiting for nine calibrated states and eight localization estimates (%s; algorithm=%s)",
+                dry_run_ ? "dry-run: actuation disabled" : "live actuation",
+                localization_algorithm_.c_str());
   }
 
  private:
@@ -362,12 +483,91 @@ class RuralNominalMissionNode : public rclcpp::Node {
                         freshness_timeout_);
   }
 
+  bool localizationFresh(const std::string& id) const {
+    if (localization_source_ == "truth") return true;
+    const auto estimate = localization_estimates_.find(id);
+    const auto receipt = localization_receipts_.find(id);
+    return estimate != localization_estimates_.end() && estimate->second.valid &&
+           estimate->second.initialized && !estimate->second.stale &&
+           receipt != localization_receipts_.end() &&
+           seconds(receipt->second) <= localization_stale_after_;
+  }
+
+  bool localizationReady() const {
+    if (localization_source_ == "truth") return true;
+    for (const char* id : kControlled) {
+      if (!localizationFresh(id)) return false;
+    }
+    return true;
+  }
+
+  hercules_interfaces::msg::GroundTruthState localizedMessage(
+      const std::string& id, bool retain_last = true) const {
+    const auto truth = states_.find(id);
+    if (truth == states_.end()) {
+      return hercules_interfaces::msg::GroundTruthState();
+    }
+    if (localization_source_ == "truth") {
+      return truth->second;
+    }
+    if (!localizationFresh(id)) {
+      if (retain_last) {
+        const auto cached = last_localized_states_.find(id);
+        if (cached != last_localized_states_.end()) {
+          // Keep the last accepted planar estimate as a static geometry
+          // obstacle, but retain the current simulator truth for the vertical
+          // channel.  AirSim can continue publishing z/vz while a planar
+          // localization stream is delayed or disconnected.
+          auto stopped = cached->second;
+          stopped.position[2] = truth->second.position[2];
+          stopped.velocity[2] = truth->second.velocity[2];
+          stopped.velocity[0] = 0.0;
+          stopped.velocity[1] = 0.0;
+          stopped.yaw_rate = 0.0;
+          stopped.valid = truth->second.valid;
+          stopped.header = truth->second.header;
+          stopped.agent_id = id;
+          stopped.vehicle_type = truth->second.vehicle_type;
+          return stopped;
+        }
+      }
+      // No truth fallback is permitted for control.  Preserve the vehicle
+      // type/altitude channel needed by the controller, but make the planar
+      // state explicitly stationary and invalid-looking rather than silently
+      // steering from simulator truth.
+      auto stopped = truth->second;
+      stopped.position[0] = 0.0;
+      stopped.position[1] = 0.0;
+      stopped.velocity[0] = 0.0;
+      stopped.velocity[1] = 0.0;
+      stopped.velocity[2] = truth->second.velocity[2];
+      stopped.yaw = 0.0;
+      stopped.yaw_rate = 0.0;
+      return stopped;
+    }
+    auto result = truth->second;
+    const auto& estimate = localization_estimates_.at(id);
+    result.position[0] = estimate.position[0];
+    result.position[1] = estimate.position[1];
+    result.velocity[0] = estimate.velocity[0];
+    result.velocity[1] = estimate.velocity[1];
+    result.yaw = estimate.yaw;
+    result.yaw_rate = estimate.yaw_rate;
+    return result;
+  }
+
+  hercules_mission_core::AgentState controlAgentState(const std::string& id) const {
+    // A stale agent is stationary at its last valid estimate for geometry and
+    // tracking; the actuation loops separately suppress its command.
+    return agentState(localizedMessage(id, true));
+  }
+
   void tick() {
     if (finished_) return;
     if (!running_) {
-      if (!ready()) {
+      if (!ready() || !localizationReady()) {
         if (seconds(started_at_) > startup_timeout_) {
-          fail("startup timed out before all nine calibrated states were fresh");
+          fail("startup timed out before all nine calibrated states and eight localization estimates were fresh");
         }
         return;
       }
@@ -428,7 +628,7 @@ class RuralNominalMissionNode : public rclcpp::Node {
     std::vector<std::string> ids;
     for (const char* id : kControlled) {
       ids.emplace_back(id);
-      positions[id] = agentState(states_.at(id)).position;
+      positions[id] = controlAgentState(id).position;
     }
     current_adjacency_ = hercules_tracking_ros::buildNeighborGraph(
         positions, config_.communication_range);
@@ -519,7 +719,22 @@ class RuralNominalMissionNode : public rclcpp::Node {
     cbf_diagnostics.step_id = step_;
 
     for (const char* id : kDrones) {
-      const auto agent = agentState(states_.at(id));
+      if (!localizationFresh(id)) {
+        commands[id] = Eigen::Vector3d::Zero();
+        // Keep the JSON/control schema complete while this agent is stopped;
+        // the cached localized pose remains the static CBF obstacle and is
+        // never replaced by simulator truth.
+        const auto cached = localizedMessage(id);
+        desired_slots[id] = Eigen::Vector3d(
+            cached.position[0], cached.position[1], cached.position[2]);
+        slot_errors[id] = 0.0;
+        control_estimates[id] = hercules_mission_core::TargetEstimate{};
+        cbf_diagnostics.entries.push_back(
+            stoppedDiagnostics(id, agentState(cached)));
+        if (!dry_run_ && enable_formation_) publishUav(id, Eigen::Vector3d::Zero());
+        continue;
+      }
+      const auto agent = controlAgentState(id);
       const auto target_context = controlEstimate(id, target, mission_time);
       const auto& target_estimate = target_context.estimate;
       control_estimates[id] = target_estimate;
@@ -563,7 +778,19 @@ class RuralNominalMissionNode : public rclcpp::Node {
       if (!dry_run_ && enable_formation_) publishUav(id, velocity);
     }
     for (const char* id : kUgvs) {
-      const auto agent = agentState(states_.at(id));
+      if (!localizationFresh(id)) {
+        commands[id] = Eigen::Vector3d::Zero();
+        const auto cached = localizedMessage(id);
+        desired_slots[id] = Eigen::Vector3d(
+            cached.position[0], cached.position[1], cached.position[2]);
+        slot_errors[id] = 0.0;
+        control_estimates[id] = hercules_mission_core::TargetEstimate{};
+        cbf_diagnostics.entries.push_back(
+            stoppedDiagnostics(id, agentState(cached)));
+        if (!dry_run_ && enable_formation_) publishCar(id, stoppedCarCommand());
+        continue;
+      }
+      const auto agent = controlAgentState(id);
       const auto target_context = controlEstimate(id, target, mission_time);
       const auto& target_estimate = target_context.estimate;
       control_estimates[id] = target_estimate;
@@ -625,15 +852,19 @@ class RuralNominalMissionNode : public rclcpp::Node {
       const Control& nominal, const ControlTargetEstimate& target_context) {
     const auto& target_estimate = target_context.estimate;
     std::vector<hercules_interfaces::msg::GroundTruthState> neighbors;
-    const auto& ego_message = states_.at(id);
+    const auto ego_message = localizedMessage(id);
     for (const char* other : kControlled) {
       if (std::string(other) == id) continue;
       const auto found = states_.find(other);
       if (found == states_.end()) continue;
-      const auto other_state = agentState(found->second);
+      if (localization_source_ != "truth" &&
+          !localization_estimates_.count(other) &&
+          !last_localized_states_.count(other)) continue;
+      const auto localized = localizedMessage(other);
+      const auto other_state = agentState(localized);
       if (other_state.vehicle_type != agent.vehicle_type) continue;
       if ((other_state.position - agent.position).norm() <= config_.communication_range)
-        neighbors.push_back(found->second);
+        neighbors.push_back(localized);
     }
     std::vector<hercules_interfaces::msg::ObstacleProxy> obstacles;
     std::optional<hercules_cbf_ros::ObstacleSnapshot> static_snapshot;
@@ -678,8 +909,9 @@ class RuralNominalMissionNode : public rclcpp::Node {
               if (state == states_.end()) continue;
               const double body_radius = expectedVehicleType(other) == std::string("ugv")
                   ? cbf_config_.ugv_radius : cbf_config_.uav_radius;
-              const Eigen::Vector3d position(state->second.position[0], state->second.position[1],
-                                             state->second.position[2]);
+              const auto localized_state = localizedMessage(other);
+              const Eigen::Vector3d position(localized_state.position[0], localized_state.position[1],
+                                             localized_state.position[2]);
               if ((center - position).norm() <= body_radius + 0.5) {
                 body_proxy = true;
                 break;
@@ -766,6 +998,23 @@ class RuralNominalMissionNode : public rclcpp::Node {
     return diagnostic;
   }
 
+  hercules_interfaces::msg::CBFDiagnostics stoppedDiagnostics(
+      const std::string& id, const hercules_mission_core::AgentState& agent) const {
+    const Eigen::Index dimension =
+        agent.vehicle_type == hercules_mission_core::VehicleType::kUgv ? 2 : 3;
+    const Eigen::VectorXd zero = Eigen::VectorXd::Zero(dimension);
+    auto diagnostic = disabledDiagnostics(id, agent, zero);
+    diagnostic.solver_status = "stopped_stale_localization";
+    diagnostic.fallback = true;
+    diagnostic.success = false;
+    diagnostic.final_feasible = true;
+    diagnostic.static_obstacles_valid = true;
+    diagnostic.target_active = false;
+    diagnostic.target_age = 0.0;
+    diagnostic.target_timestamp = 0.0;
+    return diagnostic;
+  }
+
   void publishUav(const std::string& id, const Eigen::Vector3d& velocity) {
     airsim_interfaces::msg::VelCmd message;
     message.twist.linear.x = velocity.x();
@@ -842,6 +1091,146 @@ class RuralNominalMissionNode : public rclcpp::Node {
     else out << "null";
   }
 
+  void writeJsonString(std::ostream& out, const std::string& value) {
+    out << '"';
+    for (const unsigned char character : value) {
+      switch (character) {
+        case '"': out << "\\\""; break;
+        case '\\': out << "\\\\"; break;
+        case '\b': out << "\\b"; break;
+        case '\f': out << "\\f"; break;
+        case '\n': out << "\\n"; break;
+        case '\r': out << "\\r"; break;
+        case '\t': out << "\\t"; break;
+        default:
+          if (character < 0x20U) {
+            out << "\\u00" << std::hex << std::setw(2)
+                << std::setfill('0') << static_cast<unsigned int>(character)
+                << std::dec << std::setfill(' ');
+          } else {
+            out << static_cast<char>(character);
+          }
+      }
+    }
+    out << '"';
+  }
+
+  template <std::size_t Size>
+  void writeNullableArray(std::ostream& out, const std::array<double, Size>& value,
+                          bool present) {
+    out << '[';
+    for (std::size_t index = 0; index < Size; ++index) {
+      if (index) out << ',';
+      if (present) writeNullable(out, value[index]);
+      else out << "null";
+    }
+    out << ']';
+  }
+
+  void writeNullArray(std::ostream& out, std::size_t size) {
+    out << '[';
+    for (std::size_t index = 0; index < size; ++index) {
+      if (index) out << ',';
+      out << "null";
+    }
+    out << ']';
+  }
+
+  void writeLocalizationDiagnostics(
+      std::ostream& out, const std::string& id,
+      const hercules_interfaces::msg::LocalizationEstimate* estimate,
+      const hercules_interfaces::msg::LocalizationDiagnostics* diagnostic,
+      bool stale) {
+    const bool has_diagnostic = diagnostic != nullptr;
+    const auto algorithm = estimate != nullptr && !estimate->algorithm.empty()
+        ? estimate->algorithm
+        : (has_diagnostic && !diagnostic->algorithm.empty()
+               ? diagnostic->algorithm : localization_algorithm_);
+    const bool initialized = has_diagnostic ? diagnostic->initialized
+                                            : (estimate != nullptr && estimate->initialized);
+    const bool valid = has_diagnostic ? diagnostic->valid
+                                      : (estimate != nullptr && estimate->valid);
+    const bool diagnostic_stale = stale || (has_diagnostic && diagnostic->stale);
+    const std::string status = has_diagnostic && !diagnostic->status.empty()
+        ? diagnostic->status
+        : (diagnostic_stale ? "stopped_stale_localization" : "missing");
+    const auto counter = [diagnostic](std::uint64_t value) {
+      return diagnostic == nullptr ? std::uint64_t{0} : value;
+    };
+    const auto real = [diagnostic](double value) {
+      return diagnostic == nullptr ? std::numeric_limits<double>::quiet_NaN() : value;
+    };
+    const auto boolean = [diagnostic](bool value) {
+      return diagnostic == nullptr ? false : value;
+    };
+    out << "{\"agent_id\":";
+    writeJsonString(out, id);
+    out << ",\"algorithm\":";
+    writeJsonString(out, algorithm);
+    out << ",\"initialized\":" << (initialized ? "true" : "false")
+        << ",\"valid\":" << (valid ? "true" : "false")
+        << ",\"stale\":" << (diagnostic_stale ? "true" : "false")
+        << ",\"updates\":" << counter(has_diagnostic ? diagnostic->updates : 0)
+        << ",\"measurements_received\":"
+        << counter(has_diagnostic ? diagnostic->measurements_received : 0)
+        << ",\"peer_estimates_received\":"
+        << counter(has_diagnostic ? diagnostic->peer_estimates_received : 0)
+        << ",\"measurements_rejected\":"
+        << counter(has_diagnostic ? diagnostic->measurements_rejected : 0)
+        << ",\"peer_estimates_rejected\":"
+        << counter(has_diagnostic ? diagnostic->peer_estimates_rejected : 0)
+        << ",\"accepted_relative_updates\":"
+        << counter(has_diagnostic ? diagnostic->accepted_relative_updates : 0)
+        << ",\"accepted_communication_updates\":"
+        << counter(has_diagnostic ? diagnostic->accepted_communication_updates : 0)
+        << ",\"rejected_relative_updates\":"
+        << counter(has_diagnostic ? diagnostic->rejected_relative_updates : 0)
+        << ",\"rejected_communication_updates\":"
+        << counter(has_diagnostic ? diagnostic->rejected_communication_updates : 0)
+        << ",\"duplicate_updates\":"
+        << counter(has_diagnostic ? diagnostic->duplicate_updates : 0)
+        << ",\"communication_rejections\":"
+        << counter(has_diagnostic ? diagnostic->communication_rejections : 0)
+        << ",\"innovation_norm\":";
+    writeNullable(out, real(has_diagnostic ? diagnostic->innovation_norm :
+                             std::numeric_limits<double>::quiet_NaN()));
+    out << ",\"covariance_trace\":";
+    writeNullable(out, real(has_diagnostic ? diagnostic->covariance_trace :
+                             std::numeric_limits<double>::quiet_NaN()));
+    out << ",\"sensor_age\":";
+    writeNullable(out, real(has_diagnostic ? diagnostic->sensor_age :
+                             std::numeric_limits<double>::quiet_NaN()));
+    out << ",\"communication_age\":";
+    writeNullable(out, real(has_diagnostic ? diagnostic->communication_age :
+                             std::numeric_limits<double>::quiet_NaN()));
+    out << ",\"covariance_spd\":"
+        << (boolean(has_diagnostic && diagnostic->covariance_spd) ? "true" : "false")
+        << ",\"robustness_margin\":";
+    writeNullable(out, real(has_diagnostic ? diagnostic->robustness_margin :
+                             std::numeric_limits<double>::quiet_NaN()));
+    out << ",\"update_latency_ms\":";
+    writeNullable(out, real(has_diagnostic ? diagnostic->update_latency_ms :
+                             std::numeric_limits<double>::quiet_NaN()));
+    out << ",\"status\":";
+    writeJsonString(out, status);
+    out << ",\"detail\":";
+    writeJsonString(out, has_diagnostic ? diagnostic->detail : std::string{});
+    out << ",\"failure_reason\":";
+    writeJsonString(out, has_diagnostic ? diagnostic->failure_reason : std::string{});
+    out << ",\"communication_state\":";
+    writeJsonString(out, has_diagnostic ? diagnostic->communication_state : std::string{});
+    out << ",\"header\":{\"frame_id\":";
+    writeJsonString(out, has_diagnostic ? diagnostic->header.frame_id : std::string{});
+    out << ",\"timestamp\":";
+    if (has_diagnostic && timestampValid(diagnostic->header.stamp)) {
+      writeFinite(out, static_cast<double>(diagnostic->header.stamp.sec) +
+          1e-9 * static_cast<double>(diagnostic->header.stamp.nanosec));
+    } else {
+      out << "null";
+    }
+    out << "}}";
+  }
+
   void writeRecord(const hercules_mission_core::AgentState& target,
                    const Eigen::Vector2d& target_command,
                    const std::map<std::string, Eigen::Vector3d>& commands,
@@ -872,7 +1261,135 @@ class RuralNominalMissionNode : public rclcpp::Node {
       writeVector(log_, state.velocity);
       log_ << ",\"yaw\":" << state.yaw << '}';
     }
-    log_ << "},\"calibrated_origins\":{";
+    log_ << "},\"localization\":{\"algorithm\":\"" << localization_algorithm_
+         << "\",\"agents\":{";
+    for (std::size_t i = 0; i < std::size(kControlled); ++i) {
+      if (i) log_ << ',';
+      const std::string id = kControlled[i];
+      const auto estimate = localization_estimates_.find(id);
+      const auto receipt = localization_receipts_.find(id);
+      const bool fresh = localizationFresh(id);
+      const auto diagnostic = localization_diagnostics_.find(id);
+      const auto* estimate_value = estimate == localization_estimates_.end()
+          ? nullptr : &estimate->second;
+      const auto* diagnostic_value = diagnostic == localization_diagnostics_.end()
+          ? nullptr : &diagnostic->second;
+      const bool stale = !fresh;
+      const bool initialized = estimate_value != nullptr && estimate_value->initialized;
+      const bool valid = estimate_value != nullptr && estimate_value->valid;
+      const auto algorithm = estimate_value != nullptr && !estimate_value->algorithm.empty()
+          ? estimate_value->algorithm : localization_algorithm_;
+      const auto counter = [diagnostic_value](std::uint64_t value) {
+        return diagnostic_value == nullptr ? std::uint64_t{0} : value;
+      };
+      const auto real = [diagnostic_value](double value) {
+        return diagnostic_value == nullptr
+            ? std::numeric_limits<double>::quiet_NaN() : value;
+      };
+      log_ << '"' << id << "\":{\"agent_id\":";
+      writeJsonString(log_, id);
+      log_ << ",\"algorithm\":";
+      writeJsonString(log_, algorithm);
+      log_ << ",\"frame_id\":";
+      if (estimate_value != nullptr) writeJsonString(log_, estimate_value->frame_id);
+      else log_ << "null";
+      log_ << ",\"initialized\":" << (initialized ? "true" : "false")
+           << ",\"valid\":" << (valid ? "true" : "false")
+           << ",\"stale\":" << (stale ? "true" : "false")
+           << ",\"pose\":";
+      if (estimate_value != nullptr) {
+        log_ << '[';
+        writeNullable(log_, estimate_value->position[0]);
+        log_ << ',';
+        writeNullable(log_, estimate_value->position[1]);
+        log_ << ',';
+        writeNullable(log_, estimate_value->yaw);
+        log_ << ']';
+      } else {
+        writeNullArray(log_, 3);
+      }
+      log_ << ",\"planar_velocity\":";
+      if (estimate_value != nullptr) {
+        log_ << '[';
+        writeNullable(log_, estimate_value->velocity[0]);
+        log_ << ',';
+        writeNullable(log_, estimate_value->velocity[1]);
+        log_ << ']';
+      } else {
+        writeNullArray(log_, 2);
+      }
+      log_ << ",\"covariance\":";
+      if (estimate_value != nullptr) {
+        writeNullableArray(log_, estimate_value->covariance, true);
+      } else {
+        writeNullArray(log_, 9);
+      }
+      log_ << ",\"timestamp\":";
+      if (estimate_value != nullptr && timestampValid(estimate_value->header.stamp)) {
+        writeFinite(log_, static_cast<double>(estimate_value->header.stamp.sec) +
+            1e-9 * static_cast<double>(estimate_value->header.stamp.nanosec));
+      } else {
+        log_ << "null";
+      }
+      log_ << ",\"receipt_age\":";
+      writeNullable(log_, receipt == localization_receipts_.end()
+          ? std::numeric_limits<double>::quiet_NaN() : seconds(receipt->second));
+      log_ << ",\"sequence\":"
+           << (estimate_value != nullptr ? estimate_value->sequence : 0);
+
+      // Keep the historical flat aliases while also writing one complete,
+      // nested diagnostics object.  Consumers can migrate without needing
+      // special handling for records emitted before diagnostics arrived.
+      log_ << ",\"updates\":" << counter(diagnostic_value ? diagnostic_value->updates : 0)
+           << ",\"measurements_received\":"
+           << counter(diagnostic_value ? diagnostic_value->measurements_received : 0)
+           << ",\"measurements_rejected\":"
+           << counter(diagnostic_value ? diagnostic_value->measurements_rejected : 0)
+           << ",\"peer_estimates_received\":"
+           << counter(diagnostic_value ? diagnostic_value->peer_estimates_received : 0)
+           << ",\"peer_estimates_rejected\":"
+           << counter(diagnostic_value ? diagnostic_value->peer_estimates_rejected : 0)
+           << ",\"accepted_relative_updates\":"
+           << counter(diagnostic_value ? diagnostic_value->accepted_relative_updates : 0)
+           << ",\"accepted_communication_updates\":"
+           << counter(diagnostic_value ? diagnostic_value->accepted_communication_updates : 0)
+           << ",\"rejected_relative_updates\":"
+           << counter(diagnostic_value ? diagnostic_value->rejected_relative_updates : 0)
+           << ",\"rejected_communication_updates\":"
+           << counter(diagnostic_value ? diagnostic_value->rejected_communication_updates : 0)
+           << ",\"duplicate_updates\":"
+           << counter(diagnostic_value ? diagnostic_value->duplicate_updates : 0)
+           << ",\"communication_rejections\":"
+           << counter(diagnostic_value ? diagnostic_value->communication_rejections : 0)
+           << ",\"innovation_norm\":";
+      writeNullable(log_, real(diagnostic_value ? diagnostic_value->innovation_norm :
+                               std::numeric_limits<double>::quiet_NaN()));
+      log_ << ",\"covariance_trace\":";
+      writeNullable(log_, real(diagnostic_value ? diagnostic_value->covariance_trace :
+                               std::numeric_limits<double>::quiet_NaN()));
+      log_ << ",\"sensor_age\":";
+      writeNullable(log_, real(diagnostic_value ? diagnostic_value->sensor_age :
+                               std::numeric_limits<double>::quiet_NaN()));
+      log_ << ",\"communication_age\":";
+      writeNullable(log_, real(diagnostic_value ? diagnostic_value->communication_age :
+                               std::numeric_limits<double>::quiet_NaN()));
+      log_ << ",\"covariance_spd\":"
+           << ((diagnostic_value != nullptr && diagnostic_value->covariance_spd)
+                   ? "true" : "false")
+           << ",\"robustness_margin\":";
+      writeNullable(log_, real(diagnostic_value ? diagnostic_value->robustness_margin :
+                               std::numeric_limits<double>::quiet_NaN()));
+      log_ << ",\"update_latency_ms\":";
+      writeNullable(log_, real(diagnostic_value ? diagnostic_value->update_latency_ms :
+                               std::numeric_limits<double>::quiet_NaN()));
+      log_ << ",\"status\":";
+      writeJsonString(log_, diagnostic_value != nullptr && !diagnostic_value->status.empty()
+          ? diagnostic_value->status : (stale ? "stopped_stale_localization" : "missing"));
+      log_ << ",\"diagnostics\":";
+      writeLocalizationDiagnostics(log_, id, estimate_value, diagnostic_value, stale);
+      log_ << '}';
+    }
+    log_ << "}},\"calibrated_origins\":{";
     for (std::size_t i = 0; i < std::size(kAll); ++i) {
       if (i) log_ << ',';
       log_ << '\"' << kAll[i] << "\":";
@@ -1173,10 +1690,13 @@ class RuralNominalMissionNode : public rclcpp::Node {
   bool finished_{false};
   std::string target_source_name_{"truth"};
   std::string target_observation_source_{"truth"};
+  std::string localization_algorithm_{"recursive_decentralized"};
+  std::string localization_source_{"estimate"};
   std::string actuation_profile_{"current_ros"};
   double duration_{30.0};
   double startup_timeout_{30.0};
   double freshness_timeout_{0.5};
+  double localization_stale_after_{0.5};
   bool cbf_enabled_{false};
   std::string cbf_method_name_{"mestres"};
   std::string cbf_obstacle_source_{"none"};
@@ -1216,6 +1736,12 @@ class RuralNominalMissionNode : public rclcpp::Node {
   std::vector<double> update_gaps_;
   std::map<std::string, hercules_interfaces::msg::GroundTruthState> states_;
   std::map<std::string, Clock::time_point> receipts_;
+  std::map<std::string, hercules_interfaces::msg::LocalizationEstimate> localization_estimates_;
+  std::map<std::string, hercules_interfaces::msg::LocalizationDiagnostics> localization_diagnostics_;
+  std::map<std::string, Clock::time_point> localization_receipts_;
+  std::map<std::string, LocalizationOrderKey> localization_order_;
+  std::map<std::string, std::uint64_t> localization_rejections_;
+  std::map<std::string, hercules_interfaces::msg::GroundTruthState> last_localized_states_;
   std::map<std::string, Eigen::Vector3d> origins_;
   hercules_tracking_ros::Adjacency current_adjacency_;
   std::map<std::string, hercules_interfaces::msg::TargetEstimate> local_estimates_;
@@ -1226,6 +1752,10 @@ class RuralNominalMissionNode : public rclcpp::Node {
   std::map<std::string, std::unique_ptr<hercules_cbf_ros::ObstacleCache>> obstacle_caches_;
   std::vector<rclcpp::Subscription<hercules_interfaces::msg::GroundTruthState>::SharedPtr>
       state_subscriptions_;
+  std::vector<rclcpp::Subscription<hercules_interfaces::msg::LocalizationEstimate>::SharedPtr>
+      localization_subscriptions_;
+  std::vector<rclcpp::Subscription<hercules_interfaces::msg::LocalizationDiagnostics>::SharedPtr>
+      localization_diagnostic_subscriptions_;
   std::vector<rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr>
       origin_subscriptions_;
   std::vector<rclcpp::Subscription<hercules_interfaces::msg::TargetEstimate>::SharedPtr>

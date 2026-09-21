@@ -1,0 +1,30 @@
+# Transport and estimator-health counters. No numerical-core assumptions are
+# encoded here so both supported algorithms can use the same topic.
+std_msgs/Header header
+string agent_id
+string algorithm
+bool initialized
+bool valid
+bool stale
+uint64 updates
+uint64 measurements_received
+uint64 peer_estimates_received
+uint64 measurements_rejected
+uint64 peer_estimates_rejected
+uint64 accepted_relative_updates
+uint64 accepted_communication_updates
+uint64 rejected_relative_updates
+uint64 rejected_communication_updates
+uint64 duplicate_updates
+uint64 communication_rejections
+float64 innovation_norm
+float64 covariance_trace
+float64 sensor_age
+float64 communication_age
+bool covariance_spd
+float64 robustness_margin
+float64 update_latency_ms
+string status
+string detail
+string failure_reason
+string communication_state

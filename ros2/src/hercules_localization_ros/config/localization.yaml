@@ -1,0 +1,15 @@
+/**:
+  ros__parameters:
+    algorithm: recursive_decentralized
+    stale_after_sec: 0.5
+    pair_transaction_timeout_sec: 0.5
+    communication_rate_hz: 2.0
+    camera_range_m: 100.0
+    camera_rate_hz: 2.0
+    covariance_floor: 1.0e-9
+    process_covariance_floor: 1.0e-9
+    measurement_covariance_floor: 1.0e-9
+    dcl_lambda: 1.0
+    ci_self_weight: 0.8
+    ci_max_iterations: 10
+    unknown_motion_variance: 0.25

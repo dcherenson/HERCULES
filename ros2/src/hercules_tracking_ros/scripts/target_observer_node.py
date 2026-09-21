@@ -155,6 +155,7 @@ class TargetObserverNode(Node):
                 measurement_std=self.measurement_std,
                 target_radius=0.0,
                 rate_hz=float(self.get_parameter("tracking_rate").value),
+                detection_filter_patterns=[self.target_id + "*"] + [agent + "*" for agent in AGENTS],
             )
             self.worker.start()
             self.poll_timer = self.create_timer(0.01, self.publish_camera_samples)

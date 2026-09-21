@@ -6,8 +6,11 @@ plot (actual vehicles, desired slots, Target1, and sampled figure eight), UAV
 and UGV slot-error time series, per-agent estimator error/consensus plots,
 tracking availability counts, `metrics.json`, and the existing Python top-down
 MP4/GIF animation. Direct observers are ringed in green; every agent's local
-estimate and covariance are rendered independently. Generated inputs and outputs belong under the
-Git-ignored `artifacts/` directory.
+estimate and covariance are rendered independently. Localization figures are
+named `<stem>_<algorithm>_<agent>.png`, and `metrics.json` contains the
+per-agent RMSE, reported sigma, one-sigma coverage, NEES, and update/rejection
+counters. Generated inputs and outputs belong under the Git-ignored
+`artifacts/` directory.
 
 ```bash
 herculesvenv/bin/python ros2/validation/rural_nominal/render_validation.py \

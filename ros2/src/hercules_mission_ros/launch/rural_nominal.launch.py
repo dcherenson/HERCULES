@@ -64,6 +64,23 @@ def generate_launch_description():
     state_freshness_timeout = LaunchConfiguration("state_freshness_timeout_sec")
     startup_timeout = LaunchConfiguration("startup_timeout_sec")
     truth_rng_mode = LaunchConfiguration("truth_rng_mode")
+    localization_algorithm = LaunchConfiguration("localization_algorithm")
+    localization_anchor_agent = LaunchConfiguration("localization_anchor_agent")
+    localization_source = LaunchConfiguration("localization_source")
+    control_source = LaunchConfiguration("control_source")
+    localization_stale_after = LaunchConfiguration("localization_stale_after_sec")
+    localization_transaction_timeout = LaunchConfiguration("localization_transaction_timeout_sec")
+    localization_covariance_floor = LaunchConfiguration("localization_covariance_floor")
+    localization_process_covariance_floor = LaunchConfiguration("localization_process_covariance_floor")
+    localization_measurement_covariance_floor = LaunchConfiguration(
+        "localization_measurement_covariance_floor")
+    dcl_lambda = LaunchConfiguration("dcl_lambda")
+    ci_self_weight = LaunchConfiguration("ci_self_weight")
+    unknown_motion_variance = LaunchConfiguration("unknown_motion_variance")
+    localization_relative_rate = LaunchConfiguration("localization_relative_rate_hz")
+    localization_communication_rate = LaunchConfiguration("localization_communication_rate_hz")
+    localization_camera_range = LaunchConfiguration("localization_camera_range_m")
+    localization_observation_source = LaunchConfiguration("localization_observation_source")
     route_heading = LaunchConfiguration("route_heading_rad")
     target_speed = LaunchConfiguration("target_speed")
     target_pattern_length = LaunchConfiguration("target_pattern_length")
@@ -128,6 +145,25 @@ def generate_launch_description():
         DeclareLaunchArgument("startup_timeout_sec", default_value="30.0"),
         DeclareLaunchArgument("truth_rng_mode", default_value="seeded",
                               choices=["seeded", "random", "python_global"]),
+        DeclareLaunchArgument("localization_algorithm", default_value="recursive_decentralized",
+                              choices=["recursive_decentralized", "gs_ci"]),
+        DeclareLaunchArgument("localization_anchor_agent", default_value="Drone1"),
+        DeclareLaunchArgument("localization_source", default_value="estimate",
+                              choices=["estimate", "truth"]),
+        DeclareLaunchArgument("control_source", default_value=""),
+        DeclareLaunchArgument("localization_stale_after_sec", default_value="0.5"),
+        DeclareLaunchArgument("localization_transaction_timeout_sec", default_value="0.5"),
+        DeclareLaunchArgument("localization_covariance_floor", default_value="1e-9"),
+        DeclareLaunchArgument("localization_process_covariance_floor", default_value="1e-9"),
+        DeclareLaunchArgument("localization_measurement_covariance_floor", default_value="1e-9"),
+        DeclareLaunchArgument("dcl_lambda", default_value="1.0"),
+        DeclareLaunchArgument("ci_self_weight", default_value="0.8"),
+        DeclareLaunchArgument("unknown_motion_variance", default_value="0.25"),
+        DeclareLaunchArgument("localization_relative_rate_hz", default_value="2.0"),
+        DeclareLaunchArgument("localization_communication_rate_hz", default_value="2.0"),
+        DeclareLaunchArgument("localization_camera_range_m", default_value="100.0"),
+        DeclareLaunchArgument("localization_observation_source", default_value="camera",
+                             choices=["camera", "truth"]),
         DeclareLaunchArgument("route_heading_rad", default_value="-1.5083775167989393"),
         DeclareLaunchArgument("target_speed", default_value="0.10"),
         DeclareLaunchArgument("target_pattern_length", default_value="10.0"),
@@ -178,6 +214,10 @@ def generate_launch_description():
                           "cbf_obstacle_source": cbf_obstacle_source,
                           "truth_obstacle_fixture": ParameterValue(truth_obstacle_fixture, value_type=bool),
                           "uncertainty_radius": ParameterValue(uncertainty_radius, value_type=float),
+                          "localization_algorithm": localization_algorithm,
+                          "localization_source": localization_source,
+                          "control_source": control_source,
+                          "localization_stale_after_sec": ParameterValue(localization_stale_after, value_type=float),
                           "actuation_profile": actuation_profile,
                           "route_heading_rad": ParameterValue(route_heading, value_type=float),
                           "target_speed": ParameterValue(target_speed, value_type=float),
@@ -196,6 +236,56 @@ def generate_launch_description():
                           "target_center_z": ParameterValue(target_center_z, value_type=float),
                           "log_path": log_path}]),
     ]
+    for agent in VEHICLES[:-1]:
+        vehicle_prefix = "hercules_drone" if agent in VEHICLES[:5] else "hercules_ugv"
+        actions.append(Node(
+            package="hercules_localization_ros", executable="localization_node",
+            name=f"localization_{agent}", output="screen",
+            parameters=[{
+                "agent_id": agent,
+                "anchor_agent": localization_anchor_agent,
+                "algorithm": localization_algorithm,
+                "odom_local_topic": f"/{vehicle_prefix}/{agent}/ground_truth/odom_local",
+                "global_gps_topic": f"/{vehicle_prefix}/{agent}/global_gps",
+                "gps_origin_topic": "/hercules_drone/origin_geo_point",
+                "gps_origin_topic_secondary": "/hercules_ugv/origin_geo_point",
+                "stale_after_sec": ParameterValue(localization_stale_after, value_type=float),
+                "pair_transaction_timeout_sec": ParameterValue(
+                    localization_transaction_timeout, value_type=float),
+                "covariance_floor": ParameterValue(
+                    localization_covariance_floor, value_type=float),
+                "process_covariance_floor": ParameterValue(
+                    localization_process_covariance_floor, value_type=float),
+                "measurement_covariance_floor": ParameterValue(
+                    localization_measurement_covariance_floor, value_type=float),
+                "camera_range_m": ParameterValue(localization_camera_range, value_type=float),
+                "camera_rate_hz": ParameterValue(localization_relative_rate, value_type=float),
+                "relative_topic": "/hercules_localization/relative",
+                "peer_topic": "/hercules_localization/peer_estimate",
+                "global_ci_topic": "/hercules_localization/gs_ci",
+                "peer_output_topic": "/hercules_localization/peer_estimate",
+                "global_agent_ids": VEHICLES[:-1],
+                "communication_rate_hz": ParameterValue(
+                    localization_communication_rate, value_type=float),
+                "dcl_lambda": ParameterValue(dcl_lambda, value_type=float),
+                "ci_self_weight": ParameterValue(ci_self_weight, value_type=float),
+                "unknown_motion_variance": ParameterValue(
+                    unknown_motion_variance, value_type=float),
+            }],
+        ))
+    actions.append(Node(
+        package="hercules_localization_ros", executable="relative_observer_node",
+        name="localization_relative_observer", output="screen",
+        parameters=[{"observation_source": localization_observation_source,
+                     "host_ip": airsim_host,
+                     "drone_port": ParameterValue(drone_port, value_type=int),
+                     "ugv_port": ParameterValue(ugv_port, value_type=int),
+                     "uav_camera": "localization_front",
+                     "uav_camera_fallback": "target_bottom",
+                     "rate_hz": ParameterValue(localization_relative_rate, value_type=float),
+                     "sensing_range": ParameterValue(localization_camera_range, value_type=float),
+                     "range_std": 0.25, "bearing_std_rad": 0.017453292519943295}],
+    ))
     actions.append(Node(
         package="hercules_tracking_ros", executable="target_observer_node",
         name="target_observer", output="screen", condition=distributed,

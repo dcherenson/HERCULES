@@ -166,7 +166,8 @@ main() {
 
   local container_artifacts=/workspaces/hercules/ros2/validation/reproduction/artifacts
   mkdir -p "$ARTIFACT_DIR/truth_nominal" \
-    "$ARTIFACT_DIR/distributed_truth" "$ARTIFACT_DIR/distributed_camera"
+    "$ARTIFACT_DIR/distributed_truth" "$ARTIFACT_DIR/distributed_camera_recursive_decentralized" \
+    "$ARTIFACT_DIR/distributed_camera_gs_ci"
   run_live_stage 50 dry_run:=true duration_sec:=5 \
     "${ROS_NETWORK_ARGS[@]}" \
     target_source:=truth \
@@ -201,14 +202,26 @@ main() {
     enable_target:=true enable_formation:=true \
     target_source:=distributed_tracking target_observation_source:=camera \
     record_video:=true \
-    "video_output_dir:=$container_artifacts/distributed_camera/media" \
-    "video_staging_dir:=$container_artifacts/distributed_camera/recording_frames" \
+    localization_algorithm:=recursive_decentralized \
+    "video_output_dir:=$container_artifacts/distributed_camera_recursive_decentralized/media" \
+    "video_staging_dir:=$container_artifacts/distributed_camera_recursive_decentralized/recording_frames" \
     "duration_sec:=$MISSION_DURATION" \
-    "log_path:=$container_artifacts/distributed_camera/mission.jsonl"
+    "log_path:=$container_artifacts/distributed_camera_recursive_decentralized/mission.jsonl"
+  reset_simulator
+  run_live_stage "$((MISSION_DURATION + 45))" dry_run:=false \
+    "${ROS_NETWORK_ARGS[@]}" \
+    enable_target:=true enable_formation:=true \
+    target_source:=distributed_tracking target_observation_source:=camera \
+    localization_algorithm:=gs_ci \
+    record_video:=true \
+    "video_output_dir:=$container_artifacts/distributed_camera_gs_ci/media" \
+    "video_staging_dir:=$container_artifacts/distributed_camera_gs_ci/recording_frames" \
+    "duration_sec:=$MISSION_DURATION" \
+    "log_path:=$container_artifacts/distributed_camera_gs_ci/mission.jsonl"
 
   local mode
   local minimum_records=$((MISSION_DURATION * 8))
-  for mode in truth_nominal distributed_truth distributed_camera; do
+  for mode in truth_nominal distributed_truth distributed_camera_recursive_decentralized distributed_camera_gs_ci; do
     [[ -s "$ARTIFACT_DIR/$mode/mission.jsonl" ]] || {
       echo "$mode did not produce a non-empty mission.jsonl" >&2
       return 1
@@ -227,7 +240,7 @@ main() {
   "$SCRIPT_DIR/exec.sh" python3 \
     /workspaces/hercules/ros2/validation/rural_nominal/compare_tracking_modes.py \
     "$container_artifacts/truth_nominal/mission.jsonl" \
-    "$container_artifacts/distributed_camera/mission.jsonl" \
+    "$container_artifacts/distributed_camera_recursive_decentralized/mission.jsonl" \
     --output-dir "$container_artifacts"
   echo "Live media written to $ARTIFACT_DIR"
 }

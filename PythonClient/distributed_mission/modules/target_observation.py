@@ -241,6 +241,7 @@ class TargetObservationWorker:
     # target_id/pattern positionally remain source-compatible.
     host: str = "127.0.0.1"
     endpoint_ports: Optional[Mapping[str, int]] = None
+    detection_filter_patterns: Optional[Sequence[str]] = None
 
     def __post_init__(self) -> None:
         self.host = str(self.host or "127.0.0.1")
@@ -326,15 +327,20 @@ class TargetObservationWorker:
 
     def _configure(self, client: Any, agent: str, camera: str) -> None:
         image_type = self.airsim_module.ImageType.DepthPerspective
+        patterns = tuple(self.detection_filter_patterns or (self.target_actor_pattern,))
         try:
             client.simSetDetectionFilterRadius(camera, image_type, float(self.sensing_range) * 100.0, vehicle_name=agent)
-            client.simClearDetectionMeshNames(camera, image_type, vehicle_name=agent)
-            client.simAddDetectionFilterMeshName(camera, image_type, self.target_actor_pattern, vehicle_name=agent)
+            # Detection filters are shared by camera/image type inside
+            # AirSim.  Do not clear them here: the cooperative-localization
+            # observer can use this same Husky front camera concurrently.
+            # Each consumer performs exact association on the returned IDs.
+            for pattern in patterns:
+                client.simAddDetectionFilterMeshName(camera, image_type, pattern, vehicle_name=agent)
         except TypeError:
             # Older client bindings do not expose vehicle_name as a keyword.
             client.simSetDetectionFilterRadius(camera, image_type, float(self.sensing_range) * 100.0, agent)
-            client.simClearDetectionMeshNames(camera, image_type, agent)
-            client.simAddDetectionFilterMeshName(camera, image_type, self.target_actor_pattern, agent)
+            for pattern in patterns:
+                client.simAddDetectionFilterMeshName(camera, image_type, pattern, agent)
 
     def _capture(self, client: Any, agent: str, camera: str) -> TargetMeasurement:
         self._configure(client, agent, camera)

@@ -46,7 +46,7 @@ from modules.video_recording import (
     analyze_camera_alignment,
     render_recordings,
 )
-from modules.mission_plots import load_mission_records
+from modules.mission_plots import load_mission_records, localization_log_entry
 from simulation.airsim_runtime import AsyncJsonlWriter, AirSimFacade, AirSimLaunchConfig, AirSimLauncher
 
 
@@ -2672,6 +2672,35 @@ def main(argv: List[str] = None) -> int:
                                 if raw_states[name].get("actor_position") is not None else None
                             ),
                         }
+                        for name in names
+                    },
+                    # Keep simulator truth and estimator output in separate,
+                    # explicit fields.  ``states`` remains the historical
+                    # truth-only interface used by mission/control code;
+                    # post-run diagnostics can compare both without changing
+                    # the controller's state contract.
+                    "localization": {
+                        name: localization_log_entry(
+                            {
+                                "position": states[name].position,
+                                "velocity": states[name].velocity,
+                                "yaw": states[name].yaw,
+                                "yaw_rate": states[name].yaw_rate,
+                            },
+                            agents[name].local_state_estimate,
+                            vehicle_type=types[name],
+                            algorithm=str(
+                                getattr(agents[name].loc_module, "algorithm", None)
+                                or getattr(agents[name].loc_module, "algorithm_name", None)
+                                or "python_placeholder"
+                            ),
+                            valid=agents[name].local_state_estimate.get("valid", True),
+                            stale=agents[name].local_state_estimate.get("stale", False),
+                            initialized=agents[name].local_state_estimate.get("initialized", True),
+                            timestamp=now,
+                            sequence=step,
+                            diagnostics=agents[name].local_state_estimate.get("diagnostics"),
+                        )
                         for name in names
                     },
                     "commands": {name: np.asarray(command).tolist() for name, command in safe_commands.items()},

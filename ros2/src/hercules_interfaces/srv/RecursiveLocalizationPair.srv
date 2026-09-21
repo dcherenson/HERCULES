@@ -1,0 +1,24 @@
+# Submit one pairwise relative observation to a recursive localization core.
+string source_id
+string target_id
+string event_id
+PlanarRelativeMeasurement measurement
+float64[3] observer_pose
+float64[9] observer_covariance
+float64[3] observed_pose
+float64[9] observed_covariance
+float64[9] correlation_factor
+float64[9] reciprocal_factor
+uint64 pair_sequence
+---
+bool accepted
+bool duplicate
+string message
+uint64 sequence
+string cached_event_id
+float64[3] observer_posterior_pose
+float64[9] observer_posterior_covariance
+float64[3] observed_posterior_pose
+float64[9] observed_posterior_covariance
+float64[9] correlation_factor
+float64[9] reciprocal_factor

@@ -2,7 +2,7 @@
 <package format="3">
   <name>hercules_interfaces</name>
   <version>0.1.0</version>
-  <description>Typed ROS 2 schemas for future HERCULES target-tracking transport.</description>
+  <description>Typed ROS 2 schemas for HERCULES tracking, localization, and safety transport.</description>
   <maintainer email="maintainers@example.com">HERCULES developers</maintainer>
   <license>MIT</license>
   <buildtool_depend>ament_cmake</buildtool_depend>

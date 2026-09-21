@@ -21,6 +21,15 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CBFDiagnostics.msg"
   "msg/CBFDiagnosticsArray.msg"
   "msg/MissionCollision.msg"
+  "msg/LocalizationMeasurement.msg"
+  "msg/LocalizationEstimate.msg"
+  "msg/LocalizationPeerEstimate.msg"
+  "msg/LocalizationDiagnostics.msg"
+  "msg/PlanarRelativeMeasurement.msg"
+  "msg/GlobalCiBelief.msg"
+  "srv/SetLocalizationAlgorithm.srv"
+  "srv/ResetLocalization.srv"
+  "srv/RecursiveLocalizationPair.srv"
   DEPENDENCIES builtin_interfaces std_msgs
 )
 

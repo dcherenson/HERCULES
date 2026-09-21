@@ -13,6 +13,7 @@
   <depend>hercules_cbf_ros</depend>
   <depend>hercules_mission_core</depend>
   <depend>hercules_tracking_ros</depend>
+  <exec_depend>hercules_localization_ros</exec_depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rclcpp</depend>

@@ -18,6 +18,26 @@ UGVS = ["Husky1", "Husky2", "Husky3"]
 CONTROLLED = DRONES + UGVS
 
 
+def _localization_tools():
+    """Load the Python diagnostics without requiring a ROS environment."""
+
+    repo = Path(__file__).resolve().parents[3]
+    for path in (repo / "PythonClient", repo / "PythonClient" / "distributed_mission"):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+    from modules.localization_plots import (  # pylint: disable=import-outside-toplevel
+        compute_localization_metrics,
+        extract_localization_series,
+        has_localization_data,
+        has_localization_estimates,
+        plot_localization_truth_vs_estimate,
+        render_localization_plots,
+    )
+    return (compute_localization_metrics, has_localization_data,
+            has_localization_estimates, plot_localization_truth_vs_estimate,
+            render_localization_plots, extract_localization_series)
+
+
 def load(path: Path):
     with path.open(encoding="utf-8") as stream:
         return [json.loads(line) for line in stream if line.strip()]
@@ -157,6 +177,30 @@ def save_tracking_counts(records, output: Path):
     plt.close(fig)
 
 
+def save_localization(records, output: Path):
+    """Render localization truth/estimate traces when a log contains them.
+
+    The plotting adapter accepts both the current explicit ``localization``
+    schema and legacy truth-only logs.  Callers should use
+    :func:`has_localization_estimates` when deciding whether to create the
+    artifact; this function itself remains useful in tests and writes a
+    clearly labelled empty plot for a legacy log.
+    """
+
+    (
+        _, _, _, plot_localization_truth_vs_estimate,
+        render_localization_plots, extract_localization_series,
+    ) = _localization_tools()
+    algorithms = {
+        str(value.get("algorithm_name", "legacy"))
+        for value in extract_localization_series(records).values()
+    }
+    algorithm = ", ".join(sorted(algorithms)) or "legacy"
+    plot_localization_truth_vs_estimate(records, str(output), title=f"Localization truth versus estimate ({algorithm})")
+    render_localization_plots(records, str(output.parent), stem=output.stem)
+    return str(output)
+
+
 def cbf_metrics(records):
     """Summarize optional Phase 2/3 CBF diagnostics, accepting old logs."""
     entries = []
@@ -260,6 +304,11 @@ def metrics(records):
         "origin_validation_errors": 0,
     }
     result["cbf"] = cbf_metrics(records)
+    compute_localization_metrics, _, _, _, _, _ = _localization_tools()
+    # Localization fields were introduced after the first validation logs.
+    # Always include a stable machine-readable section, but report unavailable
+    # rather than treating omitted estimates as zero error.
+    result["localization"] = compute_localization_metrics(records)
     tracking_rows = {}
     for row in records:
         tracking = row.get("target_tracking") or {}
@@ -314,6 +363,9 @@ def main():
         raise SystemExit("mission JSONL is empty")
     save_trajectory(records, output / "full_mission_trajectories.png")
     save_errors(records, output / "slot_errors.png")
+    _, has_localization_data, _, _, _, _ = _localization_tools()
+    if has_localization_data(records):
+        save_localization(records, output / "localization.png")
     if any((row.get("target_tracking") or {}).get("enabled", False) for row in records):
         save_tracking_errors(records, output / "tracking_errors.png")
         save_tracking_counts(records, output / "tracking_counts.png")

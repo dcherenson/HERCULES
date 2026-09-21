@@ -9,9 +9,25 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+
+from .localization_plots import (
+    compute_localization_error_metrics,
+    compute_localization_metrics,
+    extract_localization_series,
+    has_localization_data,
+    has_localization_estimates,
+    localization_log_entry,
+    localization_metrics,
+    plot_localization,
+    plot_localization_comparison,
+    plot_localization_per_agent,
+    plot_localization_truth_vs_estimate,
+    render_localization_plots,
+    wrap_angle,
+)
 
 
 def ned_to_display(points: Any) -> np.ndarray:
@@ -710,6 +726,18 @@ def generate_mission_plots(
     plot_trajectories_3d(records, trajectory_path)
     plot_collision_clearances(records, clearance_path, vehicle_radii)
     paths = [trajectory_path, clearance_path]
+    # Localization was added after the original JSONL schema.  Keep older
+    # logs fully compatible by emitting these artifacts only when an explicit
+    # localization object exists; invalid/stale-only runs still get visible
+    # per-agent plots with gaps.
+    if has_localization_data(records):
+        paths.extend(render_localization_plots(records, target_dir, stem=stem))
+        localization_metrics_path = os.path.join(
+            target_dir, stem + "_localization_metrics.json")
+        with open(localization_metrics_path, "w", encoding="utf-8") as metrics_file:
+            json.dump(compute_localization_metrics(records), metrics_file,
+                      indent=2, sort_keys=True, allow_nan=False)
+        paths.append(localization_metrics_path)
     if include_animation:
         topdown_mp4 = os.path.join(target_dir, stem + "_topdown.mp4")
         topdown_gif = os.path.join(target_dir, stem + "_topdown.gif")

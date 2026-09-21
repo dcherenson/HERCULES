@@ -1,0 +1,8 @@
+# Select the transport-visible numerical method. The adapter validates the
+# name; this service selects the dispatch path but does not implement the
+# numerical algorithm itself.
+string algorithm
+---
+bool accepted
+string active_algorithm
+string message

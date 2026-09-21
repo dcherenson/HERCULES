@@ -2,7 +2,38 @@
 #include "common/AirSimSettings.hpp"
 #include <tf2_sensor_msgs/tf2_sensor_msgs.h>
 
+#include <cmath>
+#include <cstdint>
+
 using namespace std::placeholders;
+
+namespace {
+
+std::int8_t rosNavSatStatusFromAirSimFix(msr::airlib::GpsBase::GnssFixType fix_type)
+{
+    // AirSim's GNSS enum is unsigned and starts at zero, while ROS uses -1
+    // for STATUS_NO_FIX.  Passing the AirSim value through directly would
+    // incorrectly publish NO_FIX as a valid fix.
+    switch (static_cast<int>(fix_type))
+    {
+    case static_cast<int>(msr::airlib::GpsBase::GNSS_FIX_2D_FIX):
+    case static_cast<int>(msr::airlib::GpsBase::GNSS_FIX_3D_FIX):
+        return sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+    case static_cast<int>(msr::airlib::GpsBase::GNSS_FIX_NO_FIX):
+    case static_cast<int>(msr::airlib::GpsBase::GNSS_FIX_TIME_ONLY):
+    default:
+        return sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+    }
+}
+
+bool finiteGeoPoint(const msr::airlib::GeoPoint &geo_point)
+{
+    return std::isfinite(geo_point.latitude) &&
+           std::isfinite(geo_point.longitude) &&
+           std::isfinite(geo_point.altitude);
+}
+
+}  // namespace
 
 constexpr char AirsimROSWrapper::CAM_YML_NAME[];
 constexpr char AirsimROSWrapper::WIDTH_YML_NAME[];
@@ -1103,7 +1134,6 @@ sensor_msgs::msg::MagneticField AirsimROSWrapper::get_mag_msg_from_airsim(const 
     return mag_msg;
 }
 
-// todo covariances
 sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_msg_from_airsim(const msr::airlib::GpsBase::Output& gps_data) const
 {
     sensor_msgs::msg::NavSatFix gps_msg;
@@ -1111,10 +1141,29 @@ sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_msg_from_airsim(const msr:
     gps_msg.latitude = gps_data.gnss.geo_point.latitude;
     gps_msg.longitude = gps_data.gnss.geo_point.longitude;
     gps_msg.altitude = gps_data.gnss.geo_point.altitude;
-    gps_msg.status.service = sensor_msgs::msg::NavSatStatus::SERVICE_GLONASS;
-    gps_msg.status.status = gps_data.gnss.fix_type;
-    // gps_msg.position_covariance_type =
-    // gps_msg.position_covariance =
+    gps_msg.status.service = sensor_msgs::msg::NavSatStatus::SERVICE_GPS;
+    gps_msg.status.status = rosNavSatStatusFromAirSimFix(gps_data.gnss.fix_type);
+    for (auto &value : gps_msg.position_covariance)
+        value = 0.0;
+    if (gps_msg.status.status >= sensor_msgs::msg::NavSatStatus::STATUS_FIX)
+    {
+        const bool have_eph = std::isfinite(gps_data.gnss.eph) && gps_data.gnss.eph > 0.0;
+        const bool have_epv = std::isfinite(gps_data.gnss.epv) && gps_data.gnss.epv > 0.0;
+        const double eph = have_eph ? static_cast<double>(gps_data.gnss.eph) : 0.5;
+        const double epv = have_epv ? static_cast<double>(gps_data.gnss.epv) : 0.5;
+        gps_msg.position_covariance[0] = eph * eph;
+        gps_msg.position_covariance[4] = eph * eph;
+        gps_msg.position_covariance[8] = epv * epv;
+        gps_msg.position_covariance_type =
+            have_eph && have_epv
+                ? sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN
+                : sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_APPROXIMATED;
+    }
+    else
+    {
+        gps_msg.position_covariance_type =
+            sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+    }
 
     return gps_msg;
 }
@@ -1242,6 +1291,12 @@ sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_sensor_msg_from_airsim_geo
     gps_msg.latitude = geo_point.latitude;
     gps_msg.longitude = geo_point.longitude;
     gps_msg.altitude = geo_point.altitude;
+    gps_msg.status.service = sensor_msgs::msg::NavSatStatus::SERVICE_GPS;
+    gps_msg.status.status = finiteGeoPoint(geo_point)
+        ? sensor_msgs::msg::NavSatStatus::STATUS_FIX
+        : sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+    gps_msg.position_covariance_type =
+        sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
     return gps_msg;
 }
 
@@ -1381,7 +1436,21 @@ rclcpp::Time AirsimROSWrapper::update_state()
                 got_sim_time = true;
             }
 
-            vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(drone->curr_drone_state_.gps_location);
+            vehicle_ros->gps_sensor_msg_ =
+                get_gps_sensor_msg_from_airsim_geo_point(drone->curr_drone_state_.gps_location);
+            try
+            {
+                // Prefer the configured/default AirSim GPS sensor when it is
+                // available so fix quality and EPH/EPV reach localization.
+                // Older servers without a GPS sensor still get the state
+                // GeoPoint fallback above.
+                vehicle_ros->gps_sensor_msg_ = get_gps_msg_from_airsim(
+                    airsim_client_->getGpsData("", vehicle_ros->vehicle_name_));
+            }
+            catch (const std::exception &)
+            {
+                // Keep the state GeoPoint compatibility fallback.
+            }
             vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
 
             vehicle_ros->curr_odom_ = get_odom_msg_from_multirotor_state(drone->curr_drone_state_);
@@ -1427,6 +1496,7 @@ rclcpp::Time AirsimROSWrapper::update_state()
         }
 
         vehicle_ros->stamp_ = vehicle_time;
+        vehicle_ros->gps_sensor_msg_.header.frame_id = vehicle_ros->vehicle_name_;
 
         airsim_interfaces::msg::Environment env_msg = get_environment_msg_from_airsim(env_data);
         env_msg.header.frame_id = vehicle_ros->vehicle_name_;

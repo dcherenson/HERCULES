@@ -1,0 +1,6 @@
+# Reset adapter sequencing and transport state. Numerical-core reset is left
+# to the injected estimator callback.
+bool reset_sequence
+---
+bool success
+string message

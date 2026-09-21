@@ -2,7 +2,38 @@
 #include "common/AirSimSettings.hpp"
 #include <tf2_sensor_msgs/tf2_sensor_msgs.hpp>
 
+#include <cmath>
+#include <cstdint>
+
 using namespace std::placeholders;
+
+namespace {
+
+std::int8_t rosNavSatStatusFromAirSimFix(msr::airlib::GpsBase::GnssFixType fix_type)
+{
+    // AirSim's GNSS enum is not sensor_msgs/NavSatStatus's enum: AirSim uses
+    // 0 for NO_FIX, while ROS uses -1.  TIME_ONLY is not a position fix
+    // either, so both values must remain rejected by localization.
+    switch (static_cast<int>(fix_type))
+    {
+    case static_cast<int>(msr::airlib::GpsBase::GNSS_FIX_2D_FIX):
+    case static_cast<int>(msr::airlib::GpsBase::GNSS_FIX_3D_FIX):
+        return sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+    case static_cast<int>(msr::airlib::GpsBase::GNSS_FIX_NO_FIX):
+    case static_cast<int>(msr::airlib::GpsBase::GNSS_FIX_TIME_ONLY):
+    default:
+        return sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+    }
+}
+
+bool finiteGeoPoint(const msr::airlib::GeoPoint &geo_point)
+{
+    return std::isfinite(geo_point.latitude) &&
+           std::isfinite(geo_point.longitude) &&
+           std::isfinite(geo_point.altitude);
+}
+
+} // namespace
 
 constexpr char AirsimROSWrapper::CAM_YML_NAME[];
 constexpr char AirsimROSWrapper::WIDTH_YML_NAME[];
@@ -1344,7 +1375,6 @@ sensor_msgs::msg::MagneticField AirsimROSWrapper::get_mag_msg_from_airsim(const 
     return mag_msg;
 }
 
-// todo covariances
 sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_msg_from_airsim(const msr::airlib::GpsBase::Output &gps_data) const
 {
     sensor_msgs::msg::NavSatFix gps_msg;
@@ -1352,10 +1382,35 @@ sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_msg_from_airsim(const msr:
     gps_msg.latitude = gps_data.gnss.geo_point.latitude;
     gps_msg.longitude = gps_data.gnss.geo_point.longitude;
     gps_msg.altitude = gps_data.gnss.geo_point.altitude;
-    gps_msg.status.service = sensor_msgs::msg::NavSatStatus::SERVICE_GLONASS;
-    gps_msg.status.status = gps_data.gnss.fix_type;
-    // gps_msg.position_covariance_type =
-    // gps_msg.position_covariance =
+    gps_msg.status.service = sensor_msgs::msg::NavSatStatus::SERVICE_GPS;
+    gps_msg.status.status = rosNavSatStatusFromAirSimFix(gps_data.gnss.fix_type);
+    // AirSim exposes EPH/EPV as the horizontal/vertical GPS uncertainty
+    // estimate.  Preserve it on the ROS wire so localization can use the
+    // simulator's reported quality.  If AirSim omits dilution values, use a
+    // conservative approximation and say so on the ROS wire.  A no-fix or
+    // time-only report must not carry a seemingly usable covariance.
+    for (auto &value : gps_msg.position_covariance)
+        value = 0.0;
+    const bool has_fix = gps_msg.status.status >= sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+    if (has_fix)
+    {
+        const bool have_eph = std::isfinite(gps_data.gnss.eph) && gps_data.gnss.eph > 0.0;
+        const bool have_epv = std::isfinite(gps_data.gnss.epv) && gps_data.gnss.epv > 0.0;
+        const double eph = have_eph ? static_cast<double>(gps_data.gnss.eph) : 0.5;
+        const double epv = have_epv ? static_cast<double>(gps_data.gnss.epv) : 0.5;
+        gps_msg.position_covariance[0] = eph * eph;
+        gps_msg.position_covariance[4] = eph * eph;
+        gps_msg.position_covariance[8] = epv * epv;
+        gps_msg.position_covariance_type =
+            have_eph && have_epv
+                ? sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN
+                : sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_APPROXIMATED;
+    }
+    else
+    {
+        gps_msg.position_covariance_type =
+            sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+    }
 
     return gps_msg;
 }
@@ -1484,11 +1539,35 @@ sensor_msgs::msg::NavSatFix AirsimROSWrapper::get_gps_sensor_msg_from_airsim_geo
     gps_msg.latitude = geo_point.latitude;
     gps_msg.longitude = geo_point.longitude;
     gps_msg.altitude = geo_point.altitude;
+    gps_msg.status.service = sensor_msgs::msg::NavSatStatus::SERVICE_GPS;
+    // A ground-truth GeoPoint has no AirSim EPH/EPV report.  Mark the
+    // coordinates as a valid fix when finite, but leave covariance unknown so
+    // consumers apply their documented truth/fallback uncertainty.
+    gps_msg.status.status = finiteGeoPoint(geo_point)
+        ? sensor_msgs::msg::NavSatStatus::STATUS_FIX
+        : sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+    gps_msg.position_covariance_type =
+        sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
     return gps_msg;
 }
 
 msr::airlib::GeoPoint AirsimROSWrapper::get_origin_geo_point() const
 {
+    // The ROS wrapper is a separate process from Unreal and its local
+    // AirSimSettings singleton may not contain the settings file used by the
+    // running simulator.  A vehicle's RPC home point includes that actor's
+    // spawn offset, so remove its authoritative world-NED object position to
+    // recover the common simulator origin.  This produces the same origin on
+    // the multirotor and car endpoints regardless of map iteration order.
+    if (!vehicle_name_ptr_map_.empty()) {
+        const std::string &vehicle_name = vehicle_name_ptr_map_.begin()->first;
+        const auto vehicle_home = airsim_client_->getHomeGeoPoint(vehicle_name);
+        const auto world_pose = airsim_client_->simGetObjectPose(vehicle_name, true);
+        const msr::airlib::Vector3r inverse_world_xy(
+            -world_pose.position.x(), -world_pose.position.y(), 0.0f);
+        return msr::airlib::EarthUtils::nedToGeodeticFast(inverse_world_xy, vehicle_home);
+    }
+
     msr::airlib::HomeGeoPoint geo_point = AirSimSettings::singleton().origin_geopoint;
     return geo_point.home_geo_point;
 }
@@ -1618,7 +1697,14 @@ rclcpp::Time AirsimROSWrapper::update_state()
         auto &vehicle_ros = vehicle_name_ptr_pair.second;
 
         // vehicle environment, we can get ambient temperature here and other truths !NOTE by SSG: disabling because not needed.
-        // auto env_data = airsim_client_->simGetGroundTruthEnvironment(vehicle_ros->vehicle_name_);
+        // The Hero car API does not expose a GeoPoint in CarState.  Keep the
+        // environment query for cars (and CV mode) so their global_gps topic
+        // carries the same world GNSS truth as the UAV path.
+        msr::airlib::Environment::State env_data;
+        const bool have_environment = airsim_mode_ == AIRSIM_MODE::CAR ||
+                                      airsim_mode_ == AIRSIM_MODE::COMPUTERVISION;
+        if (have_environment)
+            env_data = airsim_client_->simGetGroundTruthEnvironment(vehicle_ros->vehicle_name_);
 
         if (airsim_mode_ == AIRSIM_MODE::DRONE)
         {
@@ -1633,7 +1719,28 @@ rclcpp::Time AirsimROSWrapper::update_state()
                 got_sim_time = true;
             }
 
-            vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(drone->curr_drone_state_.gps_location);
+            // MultirotorState only carries a GeoPoint, so prefer the full
+            // GNSS report when the configured/default AirSim GPS sensor is
+            // available (it carries fix quality), and retain the state point
+            // as a compatibility fallback for older Hero servers without the
+            // getGpsData endpoint.
+            vehicle_ros->gps_sensor_msg_ =
+                get_gps_sensor_msg_from_airsim_geo_point(drone->curr_drone_state_.gps_location);
+            try
+            {
+                const auto gps_data = airsim_client_->getGpsData("", vehicle_ros->vehicle_name_);
+                // Preserve an explicit NO_FIX report.  Falling back whenever
+                // is_valid is false would silently turn a GPS outage into a
+                // truth-like position and defeat localization's stale/invalid
+                // safety behavior.  A missing sensor is handled by the
+                // exception path below.
+                vehicle_ros->gps_sensor_msg_ = get_gps_msg_from_airsim(gps_data);
+            }
+            catch (const std::exception &)
+            {
+                // State GPS is still a valid ground-truth fallback on older
+                // AirSim builds that do not expose a default GPS sensor.
+            }
             vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
 
             vehicle_ros->curr_odom_ = get_odom_msg_from_multirotor_state(drone->curr_drone_state_);
@@ -1651,9 +1758,8 @@ rclcpp::Time AirsimROSWrapper::update_state()
                 got_sim_time = true;
             }
 
-            // !NOTE by SSG: Removing gpssensor topic because call to get GT env is not used; saving # of calls
-            // vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(env_data.geo_point);
-            // vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
+            vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(env_data.geo_point);
+            vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
 
             vehicle_ros->curr_odom_ = get_odom_msg_from_car_state(car->curr_car_state_);
 
@@ -1674,9 +1780,8 @@ rclcpp::Time AirsimROSWrapper::update_state()
                 got_sim_time = true;
             }
 
-            // !NOTE by SSG: Removing gpssensor topic because call to get GT env is not used; saving # of calls
-            // vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(env_data.geo_point);
-            // vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
+            vehicle_ros->gps_sensor_msg_ = get_gps_sensor_msg_from_airsim_geo_point(env_data.geo_point);
+            vehicle_ros->gps_sensor_msg_.header.stamp = vehicle_time;
 
             vehicle_ros->curr_odom_ = get_odom_msg_from_computer_vision_state(computer_vision->curr_computer_vision_state_);
 
@@ -1685,6 +1790,7 @@ rclcpp::Time AirsimROSWrapper::update_state()
             computer_vision->computer_vision_state_msg_ = state_msg;
         }
 
+        vehicle_ros->gps_sensor_msg_.header.frame_id = vehicle_ros->vehicle_name_;
         vehicle_ros->stamp_ = vehicle_time;
 
         // !NOTE by SSG: Removing gpssensor topic because call to get GT env is not used; saving # of calls
