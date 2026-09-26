@@ -59,6 +59,27 @@ hercules_cbf::AgentState stateFromRos(
   return state;
 }
 
+void applyConfiguredWangModel(hercules_cbf::AgentState& state,
+                              const hercules_cbf::CBFConfig& config) {
+  const auto& coefficients = state.vehicle_type == hercules_cbf::VehicleType::kDrone
+      ? config.uav_acceleration_model_coefficients
+      : config.ugv_acceleration_model_coefficients;
+  state.margin = state.vehicle_type == hercules_cbf::VehicleType::kDrone
+      ? std::max(0.0, config.uav_margin) : std::max(0.0, config.ugv_margin);
+  bool finite = std::isfinite(state.position.x()) && std::isfinite(state.position.y());
+  for (const double coefficient : coefficients) finite = finite && std::isfinite(coefficient);
+  if (!finite) {
+    state.learned_acceleration = Eigen::Vector3d::Constant(
+        std::numeric_limits<double>::quiet_NaN());
+    return;
+  }
+  state.learned_acceleration = Eigen::Vector3d(
+      coefficients[0] + coefficients[1] * state.position.x() +
+          coefficients[2] * state.position.y(),
+      coefficients[3] + coefficients[4] * state.position.x() +
+          coefficients[5] * state.position.y(), 0.0);
+}
+
 hercules_cbf::ObstacleProxy obstacleFromRos(
     const hercules_interfaces::msg::ObstacleProxy& message) {
   hercules_cbf::ObstacleProxy obstacle;
@@ -139,11 +160,18 @@ AdapterResult filterRequest(
     const std::string& selected_method, const std::string& effective_method) {
   hercules_cbf::CBFRequest request;
   request.ego = stateFromRos(ego);
+  applyConfiguredWangModel(request.ego, config);
   request.nominal_control = nominal;
-  request.sensor_valid = sensor_valid && finiteStateMessage(ego);
+  request.sensor_valid = sensor_valid && finiteStateMessage(ego) &&
+      (!request.ego.learned_acceleration ||
+       request.ego.learned_acceleration->array().isFinite().all());
   for (const auto& neighbor : neighbors) {
     request.sensor_valid = request.sensor_valid && finiteStateMessage(neighbor);
     request.neighbors.push_back(stateFromRos(neighbor));
+    applyConfiguredWangModel(request.neighbors.back(), config);
+    request.sensor_valid = request.sensor_valid &&
+        (!request.neighbors.back().learned_acceleration ||
+         request.neighbors.back().learned_acceleration->array().isFinite().all());
   }
   for (const auto& obstacle : obstacles) {
     request.sensor_valid = request.sensor_valid && finiteObstacleMessage(obstacle);
@@ -180,8 +208,9 @@ AdapterResult filterRequest(
   diagnostic.row_labels = constraints.row_labels;
   diagnostic.maximum_row_violation = output.result.maximum_row_violation;
   diagnostic.maximum_bound_violation = output.result.maximum_bound_violation;
-  diagnostic.final_feasible = diagnostic.maximum_row_violation <= 1e-6 &&
-                              diagnostic.maximum_bound_violation <= 1e-6;
+  diagnostic.final_feasible = output.result.success &&
+      diagnostic.maximum_row_violation <= 1e-6 &&
+      diagnostic.maximum_bound_violation <= 1e-6;
   if (output.result.safe_control.size() > 0 &&
       nominal.size() >= output.result.safe_control.size() &&
       output.result.safe_control.array().isFinite().all() &&

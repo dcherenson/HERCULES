@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
 find_package(airsim_interfaces REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(hercules_interfaces REQUIRED)
 find_package(hercules_localization REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -24,7 +25,7 @@ target_compile_options(${PROJECT_NAME}_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(localization_node src/localization_node.cpp)
 target_link_libraries(localization_node PRIVATE ${PROJECT_NAME}_core)
-ament_target_dependencies(localization_node PUBLIC airsim_interfaces hercules_interfaces nav_msgs rclcpp sensor_msgs)
+ament_target_dependencies(localization_node PUBLIC airsim_interfaces geometry_msgs hercules_interfaces nav_msgs rclcpp sensor_msgs)
 target_compile_options(localization_node PRIVATE -Wall -Wextra -Wpedantic)
 
 install(TARGETS ${PROJECT_NAME}_core EXPORT ${PROJECT_NAME}Targets
@@ -38,7 +39,7 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_export_targets(${PROJECT_NAME}Targets HAS_LIBRARY_TARGET)
-ament_export_dependencies(Eigen3 airsim_interfaces hercules_interfaces hercules_localization nav_msgs rclcpp sensor_msgs)
+ament_export_dependencies(Eigen3 airsim_interfaces geometry_msgs hercules_interfaces hercules_localization nav_msgs rclcpp sensor_msgs)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)

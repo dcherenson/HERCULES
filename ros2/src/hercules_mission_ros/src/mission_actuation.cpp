@@ -53,6 +53,41 @@ CarCommand stoppedCarCommand() {
   return result;
 }
 
+CarCommand paperUgvCarCommand(double speed, double yaw_rate, double measured_speed,
+                             double yaw_rate_limit) {
+  if (std::abs(speed) < 0.03 && std::abs(yaw_rate) < 0.03) return stoppedCarCommand();
+  CarCommand command;
+  // The old nominal target adapter capped throttle at 0.08, which cannot
+  // track a short research patrol. Use velocity feedback for the 10 s loop.
+  command.manual_gear = speed < 0.0 ? -1 : 1;
+  const double error = std::abs(speed) - measured_speed;
+  command.throttle = clip(0.15 * std::abs(speed) + 0.4 * error, 0.0, 0.85);
+  command.brake = error < -0.15 ? clip(-0.6 * error, 0.0, 1.0) : 0.0;
+  if (command.brake > 0.0) command.throttle = 0.0;
+  // The running AirSim Husky needs signed throttle as well as reverse gear.
+  if (speed < 0.0) command.throttle = -command.throttle;
+  command.steering = clip(yaw_rate / yaw_rate_limit, -1.0, 1.0);
+  return command;
+}
+
+Eigen::Vector2d ugvAccelerationCommand(const Eigen::Vector3d& velocity, double yaw,
+                                     const Eigen::Vector3d& acceleration, double dt,
+                                     double speed_limit, double yaw_rate_limit) {
+  if (!velocity.allFinite() || !acceleration.allFinite() || !std::isfinite(yaw) ||
+      !std::isfinite(dt) || dt <= 0.0 || !std::isfinite(speed_limit) || speed_limit <= 0.0 ||
+      !std::isfinite(yaw_rate_limit) || yaw_rate_limit <= 0.0)
+    throw std::invalid_argument("invalid UGV acceleration command");
+  const Eigen::Vector2d desired = velocity.head<2>() + dt * acceleration.head<2>();
+  const double speed = std::min(speed_limit, desired.norm());
+  if (speed < 1e-8) return Eigen::Vector2d::Zero();
+  const double longitudinal = desired.dot(Eigen::Vector2d(std::cos(yaw), std::sin(yaw)));
+  const double direction = longitudinal < 0.0 ? -1.0 : 1.0;
+  const double heading = std::atan2(direction * desired.y(), direction * desired.x()) - yaw;
+  const double error = std::atan2(std::sin(heading), std::cos(heading));
+  return {direction * speed * std::max(0.0, std::cos(error)),
+          clip(error / dt, -yaw_rate_limit, yaw_rate_limit)};
+}
+
 Eigen::Vector3d pythonCbfUavVelocityCommand(
     const Eigen::Vector3d& measured_velocity,
     const Eigen::Vector3d& nominal_acceleration, double dt,

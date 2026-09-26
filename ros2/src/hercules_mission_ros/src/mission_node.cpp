@@ -36,6 +36,7 @@
 #include <hercules_interfaces/msg/tracking_epoch.hpp>
 #include <hercules_mission_core/formation_controller.hpp>
 #include <hercules_mission_core/mission_config.hpp>
+#include <hercules_mission_core/periodic_mission.hpp>
 #include <hercules_mission_core/target_formation.hpp>
 #include <hercules_mission_core/target_motion.hpp>
 #include <hercules_tracking/models.hpp>
@@ -53,12 +54,10 @@ namespace hercules_mission_ros {
 namespace {
 using Clock = std::chrono::steady_clock;
 constexpr const char* kDrones[] = {
-    "Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5"};
+    "Drone1", "Drone2", "SimpleFlight"};
 constexpr const char* kUgvs[] = {"Husky1", "Husky2", "Husky3"};
-constexpr const char* kControlled[] = {"Drone1", "Drone2", "SimpleFlight", "Drone4",
-                                       "Drone5", "Husky1", "Husky2", "Husky3"};
-constexpr const char* kAll[] = {"Drone1", "Drone2", "SimpleFlight", "Drone4",
-                                "Drone5", "Husky1", "Husky2", "Husky3",
+constexpr const char* kControlled[] = {"Drone1", "Drone2", "SimpleFlight", "Husky1", "Husky2", "Husky3"};
+constexpr const char* kAll[] = {"Drone1", "Drone2", "SimpleFlight", "Husky1", "Husky2", "Husky3",
                                 "Target1"};
 constexpr const char* kLocalizationFrame = "airsim_world_ned";
 
@@ -163,6 +162,15 @@ class RuralNominalMissionNode : public rclcpp::Node {
       : Node("rural_nominal_mission"),
         config_(hercules_mission_core::ruralTargetTrackingConfig()),
         controller_(config_.formation), started_at_(Clock::now()) {
+    maicp_case_ = declare_parameter<std::string>("maicp_case", "");
+    if (!maicp_case_.empty() && maicp_case_ != "collision" &&
+        maicp_case_ != "tracking" && maicp_case_ != "localization")
+      throw std::invalid_argument("maicp_case must be collision, tracking, or localization");
+    if (maicp_case_ == "tracking") config_.tracking_rate = 1.0;
+    maicp_steps_ = declare_parameter<int>("maicp_steps", 100);
+    maicp_loop_radius_ = declare_parameter<double>("maicp_loop_radius", 2.5);
+    if (maicp_steps_ < 2 || !std::isfinite(maicp_loop_radius_) || maicp_loop_radius_ <= 0.0)
+      throw std::invalid_argument("MAICP steps and route length must be positive");
     dry_run_ = declare_parameter<bool>("dry_run", true);
     enable_target_ = declare_parameter<bool>("enable_target", true);
     enable_formation_ = declare_parameter<bool>("enable_formation", true);
@@ -173,6 +181,8 @@ class RuralNominalMissionNode : public rclcpp::Node {
     target_observation_source_ =
         declare_parameter<std::string>("target_observation_source", "truth");
     duration_ = declare_parameter<double>("duration_sec", 30.0);
+    if (!maicp_case_.empty() && (!std::isfinite(duration_) || duration_ <= 0.0 || duration_ > 10.0))
+      throw std::invalid_argument("paper missions require 0 < duration_sec <= 10");
     startup_timeout_ = declare_parameter<double>("startup_timeout_sec", 30.0);
     freshness_timeout_ = declare_parameter<double>("freshness_timeout_sec", 0.5);
     localization_algorithm_ = declare_parameter<std::string>(
@@ -226,6 +236,26 @@ class RuralNominalMissionNode : public rclcpp::Node {
     cbf_obstacle_source_ = declare_parameter<std::string>("cbf_obstacle_source", "none");
     truth_obstacle_fixture_ = declare_parameter<bool>("truth_obstacle_fixture", false);
     cbf_uncertainty_radius_ = declare_parameter<double>("uncertainty_radius", 0.0);
+    cbf_config_.ugv_margin = declare_parameter<double>("maicp_margin_ugv", 0.0);
+    cbf_config_.uav_margin = declare_parameter<double>("maicp_margin_uav", 0.0);
+    if (!std::isfinite(cbf_config_.ugv_margin) || cbf_config_.ugv_margin < 0.0 ||
+        !std::isfinite(cbf_config_.uav_margin) || cbf_config_.uav_margin < 0.0)
+      throw std::invalid_argument("MAICP class margins must be finite and nonnegative");
+    const auto read_model = [this](const std::string& name, std::array<double, 6>& model) {
+      std::istringstream values(declare_parameter<std::string>(name, "0 0 0 0 0 0"));
+      for (double& value : model) {
+        if (!(values >> value) || !std::isfinite(value))
+          throw std::invalid_argument(name + " needs six finite affine coefficients");
+      }
+      std::string extra;
+      if (values >> extra) throw std::invalid_argument(name + " has extra coefficients");
+    };
+    read_model("maicp_model_ugv", cbf_config_.ugv_acceleration_model_coefficients);
+    read_model("maicp_model_uav", cbf_config_.uav_acceleration_model_coefficients);
+    if (maicp_case_ == "collision") {
+      cbf_config_.wang_corridor_y_min = -14.75;
+      cbf_config_.wang_corridor_y_max = 14.75;
+    }
     cbf_config_.k1 = declare_parameter<double>("cbf_k1", cbf_config_.k1);
     cbf_config_.k2 = declare_parameter<double>("cbf_k2", cbf_config_.k2);
     cbf_config_.alpha = declare_parameter<double>("cbf_alpha", cbf_config_.alpha);
@@ -461,7 +491,7 @@ class RuralNominalMissionNode : public rclcpp::Node {
             std::chrono::duration<double>(config_.control_dt)),
         [this]() { tick(); });
     RCLCPP_INFO(get_logger(),
-                "Rural nominal mission waiting for nine calibrated states and eight localization estimates (%s; algorithm=%s)",
+                "Rural nominal mission waiting for seven calibrated states and six localization estimates (%s; algorithm=%s)",
                 dry_run_ ? "dry-run: actuation disabled" : "live actuation",
                 localization_algorithm_.c_str());
   }
@@ -567,18 +597,20 @@ class RuralNominalMissionNode : public rclcpp::Node {
     if (!running_) {
       if (!ready() || !localizationReady()) {
         if (seconds(started_at_) > startup_timeout_) {
-          fail("startup timed out before all nine calibrated states and eight localization estimates were fresh");
+          fail("startup timed out before all seven calibrated states and six localization estimates were fresh");
         }
         return;
       }
       startMission();
+      if (running_) step();
       return;
     }
     if (!ready()) {
       fail("state became stale or unavailable; actuation suppressed");
       return;
     }
-    if (seconds(mission_started_at_) >= duration_) {
+    if (seconds(mission_started_at_) >= duration_ ||
+        (!maicp_case_.empty() && step_ >= static_cast<std::size_t>(maicp_steps_))) {
       finishMission();
       return;
     }
@@ -618,6 +650,16 @@ class RuralNominalMissionNode : public rclcpp::Node {
       fail("could not open JSONL log: " + log_path_);
       return;
     }
+    for (const char* id : kControlled) {
+      maicp_home_[id] = controlAgentState(id).position;
+      maicp_truth_home_[id] = agentState(states_.at(id)).position;
+      maicp_last_truth_[id] = maicp_truth_home_[id];
+      maicp_travel_[id] = 0.0;
+      maicp_velocity_[id] = controlAgentState(id).velocity;
+      maicp_returning_[id] = false;
+    }
+    maicp_home_["Target1"] = target.position;
+    maicp_velocity_["Target1"] = target.velocity;
     running_ = true;
     mission_started_at_ = Clock::now();
     RCLCPP_INFO(get_logger(), "preflight passed; mission started");
@@ -685,6 +727,68 @@ class RuralNominalMissionNode : public rclcpp::Node {
     return result;
   }
 
+  bool periodicMission() const {
+    // All paper cases share a short closed patrol; each estimator/controller
+    // is evaluated independently along that patrol.
+    return !maicp_case_.empty();
+  }
+
+  hercules_mission_core::PeriodicReference loopReference(const std::string& id) const {
+    const double period = std::max(1.0, duration_ - 2.5);
+    const double t = std::min(period, seconds(mission_started_at_) + config_.control_dt);
+    const bool ground = id.rfind("Husky", 0) == 0 || id == "Target1";
+    auto reference = ground
+        ? hercules_mission_core::outAndBackMissionReference(maicp_home_.at(id), 2.0, period, t)
+        : hercules_mission_core::periodicMissionReference(maicp_home_.at(id), maicp_loop_radius_, period, t);
+    if (t >= period) {
+      reference.velocity.setZero();
+      reference.acceleration.setZero();
+    }
+    return reference;
+  }
+
+  Eigen::Vector3d missionGoal(const std::string& id,
+                             const hercules_mission_core::AgentState&) {
+    maicp_returning_[id] = seconds(mission_started_at_) >= (duration_ - 2.5) * 0.75;
+    return loopReference(id).position;
+  }
+
+  Eigen::Vector3d goalAcceleration(const hercules_mission_core::AgentState& agent,
+                                   const Eigen::Vector3d& goal) const {
+    Eigen::Vector3d desired_velocity = config_.formation.position_gain * (goal - agent.position);
+    Eigen::Vector3d feedforward = Eigen::Vector3d::Zero();
+    if (!maicp_case_.empty()) {
+      const auto reference = loopReference(agent.agent_id);
+      desired_velocity += reference.velocity;
+      feedforward = reference.acceleration;
+    }
+    const double speed_limit = maicp_case_.empty() ? config_.formation.max_speed : 5.0;
+    const double speed = desired_velocity.norm();
+    if (speed > speed_limit) desired_velocity *= speed_limit / speed;
+    return feedforward + config_.formation.velocity_gain * (desired_velocity - agent.velocity);
+  }
+
+  Eigen::Vector3d paperVelocity(const std::string& id, const Eigen::Vector3d& acceleration) {
+    // Integrate the commanded acceleration. Resetting this integrator to the
+    // measured velocity every tick attenuates it through AirSim's inner loop.
+    auto& velocity = maicp_velocity_.at(id);
+    velocity += config_.control_dt * acceleration;
+    const double speed = velocity.head<2>().norm();
+    if (speed > 5.0) velocity.head<2>() *= 5.0 / speed;
+    // Only XY is the paper's double integrator. A separate height loop
+    // supplies AirSim's vertical velocity setpoint without integrating it.
+    const double height_error = maicp_home_.at(id).z() - agentState(states_.at(id)).position.z();
+    velocity.z() = std::clamp(1.5 * height_error, -2.0, 2.0);
+    return velocity;
+  }
+
+  Eigen::Vector2d paperGroundCommand(const hercules_mission_core::AgentState& agent,
+                                     const Eigen::Vector3d& acceleration) {
+    const auto desired = paperVelocity(agent.agent_id, acceleration);
+    return ugvAccelerationCommand(desired, agent.yaw, Eigen::Vector3d::Zero(),
+                                  config_.control_dt, 5.0, cbf_config_.ugv_yaw_rate_limit);
+  }
+
   void step() {
     const auto tick_time = Clock::now();
     if (last_step_time_) {
@@ -698,12 +802,15 @@ class RuralNominalMissionNode : public rclcpp::Node {
       publishTrackingEpoch(mission_time);
       next_tracking_time_ += 1.0 / config_.tracking_rate;
     }
-    const Eigen::Vector2d target_command =
-        target_controller_->update(target.position, target.yaw, config_.control_dt);
+    const Eigen::Vector2d target_command = maicp_case_ == "tracking"
+        ? paperGroundCommand(target, goalAcceleration(target, loopReference("Target1").position))
+        : target_controller_->update(target.position, target.yaw, config_.control_dt);
     const double measured_target_speed = target.velocity.head<2>().norm();
-    const CarCommand target_car = ugvCarCommand(
-        target_command.x(), target_command.y(), measured_target_speed,
-        config_.target_motion.max_yaw_rate, true);
+    const CarCommand target_car = maicp_case_ == "tracking"
+        ? paperUgvCarCommand(target_command.x(), target_command.y(), measured_target_speed,
+                             cbf_config_.ugv_yaw_rate_limit)
+        : ugvCarCommand(target_command.x(), target_command.y(), measured_target_speed,
+                        config_.target_motion.max_yaw_rate, true);
 
     std::map<std::string, Eigen::Vector3d> commands;
     std::map<std::string, Eigen::Vector3d> desired_slots;
@@ -738,10 +845,10 @@ class RuralNominalMissionNode : public rclcpp::Node {
       const auto target_context = controlEstimate(id, target, mission_time);
       const auto& target_estimate = target_context.estimate;
       control_estimates[id] = target_estimate;
-      const auto acceleration = controller_.targetNominalControl(
+      const auto acceleration = periodicMission() ? goalAcceleration(agent, missionGoal(id, agent)) : controller_.targetNominalControl(
           agent, target_estimate, route_heading_, config_.target_ground_z,
           config_.target_ugv_circumradius);
-      const auto nominal_velocity = target_estimate.active
+      const auto nominal_velocity = (periodicMission() || target_estimate.active)
           ? (actuation_profile_ == "python_cbf"
                  ? pythonCbfUavVelocityCommand(agent.velocity, acceleration, config_.control_dt,
                                                uav_velocity_limit_, uav_altitude_ceiling_,
@@ -749,10 +856,11 @@ class RuralNominalMissionNode : public rclcpp::Node {
                  : uavVelocityCommand(agent.velocity, acceleration, config_.control_dt,
                                       uav_velocity_limit_))
           : Eigen::Vector3d::Zero();
-      Eigen::Vector3d velocity = nominal_velocity;
+      Eigen::Vector3d velocity = (periodicMission() && !cbf_enabled_) ? paperVelocity(id, acceleration) : nominal_velocity;
       if (cbf_enabled_) {
         const auto filtered = runCbf(id, agent, acceleration, target_context);
-        velocity = actuation_profile_ == "python_cbf"
+        velocity = periodicMission() ? paperVelocity(id, filtered.result.safe_control)
+            : actuation_profile_ == "python_cbf"
             ? pythonCbfUavVelocityCommand(agent.velocity, filtered.result.safe_control,
                                           config_.control_dt, uav_velocity_limit_,
                                           uav_altitude_ceiling_, agent.position.z())
@@ -772,8 +880,8 @@ class RuralNominalMissionNode : public rclcpp::Node {
           id, hercules_mission_core::VehicleType::kDrone, estimate_position,
           estimate_velocity, route_heading_, config_.uav_altitude,
           config_.target_ground_z, config_.target_ugv_circumradius);
-      desired_slots[id] = slot.position;
-      slot_errors[id] = (agent.position - slot.position).norm();
+      desired_slots[id] = periodicMission() ? missionGoal(id, agent) : slot.position;
+      slot_errors[id] = (agent.position - desired_slots[id]).norm();
       step_max_uav = std::max(step_max_uav, slot_errors[id]);
       if (!dry_run_ && enable_formation_) publishUav(id, velocity);
     }
@@ -798,12 +906,37 @@ class RuralNominalMissionNode : public rclcpp::Node {
           agent, target_estimate, route_heading_, config_.target_ground_z,
           config_.target_ugv_circumradius);
       Eigen::Vector2d model_command(command.x(), command.y());
-      if (cbf_enabled_) {
-        const auto filtered = runCbf(id, agent, model_command, target_context);
-        model_command = filtered.result.safe_control.head<2>();
+      if (cbf_enabled_ && cbf_method_name_ == "wang") {
+        Eigen::Vector3d goal;
+        if (periodicMission()) goal = missionGoal(id, agent);
+        else {
+          const auto slot = hercules_mission_core::targetCenteredSlot(
+              id, hercules_mission_core::VehicleType::kUgv,
+              Eigen::Vector3d(target_estimate.position.x(), target_estimate.position.y(), agent.position.z()),
+              Eigen::Vector3d(target_estimate.velocity.x(), target_estimate.velocity.y(), 0.0),
+              route_heading_, config_.uav_altitude, config_.target_ground_z, config_.target_ugv_circumradius);
+          goal = slot.position;
+        }
+        Eigen::Vector3d acceleration = goalAcceleration(agent, goal);
+        acceleration.z() = 0.0;
+        const auto filtered = runCbf(id, agent, acceleration, target_context);
+        model_command = periodicMission() ? paperGroundCommand(agent, filtered.result.safe_control.head<3>())
+            : ugvAccelerationCommand(agent.velocity, agent.yaw,
+                filtered.result.safe_control.head<3>(), config_.control_dt,
+                cbf_config_.ugv_speed_limit, cbf_config_.ugv_yaw_rate_limit);
         cbf_diagnostics.entries.push_back(filtered.diagnostics);
       } else {
-        cbf_diagnostics.entries.push_back(disabledDiagnostics(id, agent, model_command));
+        if (periodicMission()) {
+          const Eigen::Vector3d acceleration = goalAcceleration(agent, missionGoal(id, agent));
+          model_command = paperGroundCommand(agent, acceleration);
+        }
+        if (cbf_enabled_) {
+          const auto filtered = runCbf(id, agent, model_command, target_context);
+          model_command = filtered.result.safe_control.head<2>();
+          cbf_diagnostics.entries.push_back(filtered.diagnostics);
+        } else {
+          cbf_diagnostics.entries.push_back(disabledDiagnostics(id, agent, model_command));
+        }
       }
       commands[id] = {model_command.x(), model_command.y(), 0.0};
       const Eigen::Vector3d estimate_position(target_estimate.position.x(),
@@ -815,15 +948,18 @@ class RuralNominalMissionNode : public rclcpp::Node {
           id, hercules_mission_core::VehicleType::kUgv, estimate_position,
           estimate_velocity, route_heading_, config_.uav_altitude,
           config_.target_ground_z, config_.target_ugv_circumradius);
-      desired_slots[id] = slot.position;
+      desired_slots[id] = periodicMission() ? missionGoal(id, agent) : slot.position;
       slot_errors[id] =
-          (agent.position.head<2>() - slot.position.head<2>()).norm();
+          (agent.position.head<2>() - desired_slots[id].head<2>()).norm();
       step_max_ugv = std::max(step_max_ugv, slot_errors[id]);
       const double radius = (agent.position.head<2>() - target.position.head<2>()).norm();
       step_min_radius = std::min(step_min_radius, radius);
       step_max_radius = std::max(step_max_radius, radius);
-      if (!dry_run_ && enable_formation_ && (target_estimate.active || cbf_enabled_)) {
-        publishCar(id, actuation_profile_ == "python_cbf"
+      if (!dry_run_ && enable_formation_ && (periodicMission() || target_estimate.active || cbf_enabled_)) {
+        publishCar(id, !maicp_case_.empty()
+            ? paperUgvCarCommand(model_command.x(), model_command.y(),
+                agent.velocity.head<2>().norm(), cbf_config_.ugv_yaw_rate_limit)
+            : actuation_profile_ == "python_cbf"
             ? pythonCbfUgvCarCommand(model_command.x(), model_command.y(),
                                      agent.velocity.head<2>().norm(), cbf_config_.ugv_yaw_rate_limit,
                                      false, cbf_config_.ugv_speed_limit)
@@ -923,7 +1059,19 @@ class RuralNominalMissionNode : public rclcpp::Node {
         obstacles.swap(filtered);
       }
     }
-    if (agent.vehicle_type == hercules_mission_core::VehicleType::kUgv && target_estimate.active) {
+    if (maicp_case_ == "collision") {
+      for (const auto& center : {Eigen::Vector2d(2.5, -9.0), Eigen::Vector2d(2.5, 0.0),
+                                 Eigen::Vector2d(2.5, 9.0)}) {
+        hercules_interfaces::msg::ObstacleProxy obstacle;
+        obstacle.proxy_id = "maicp_column_" + std::to_string(obstacles.size());
+        obstacle.source = "truth_maicp_fixture";
+        obstacle.center = {center.x(), center.y(), agent.position.z()};
+        obstacle.radius = std::sqrt(0.5);
+        obstacle.is_planar = true;
+        obstacles.push_back(obstacle);
+      }
+    }
+    if (!periodicMission() && agent.vehicle_type == hercules_mission_core::VehicleType::kUgv && target_estimate.active) {
       hercules_interfaces::msg::TargetEstimate target_message;
       const auto estimate_message = local_estimates_.find(id);
       if (target_source_name_ == "distributed_tracking" && estimate_message != local_estimates_.end())
@@ -948,8 +1096,10 @@ class RuralNominalMissionNode : public rclcpp::Node {
         target_estimate.active;
     const bool sensor_valid = static_sensor_valid || target_proxy_active;
     hercules_cbf::CBFConfig config = cbf_config_;
-    if (agent.vehicle_type == hercules_mission_core::VehicleType::kUgv)
-      config.method = hercules_cbf::Method::kMestres;
+    if (!maicp_case_.empty() && maicp_case_ != "collision") {
+      config.ugv_margin = 0.0;
+      config.uav_margin = 0.0;
+    }
     Eigen::VectorXd input;
     if constexpr (std::is_same_v<Control, Eigen::Vector3d>) input = nominal;
     else input = nominal;
@@ -1055,6 +1205,10 @@ class RuralNominalMissionNode : public rclcpp::Node {
     finished_ = true;
     timer_->cancel();
     log_.close();
+    if (!maicp_case_.empty()) {
+      std::ofstream status(log_path_ + ".done");
+      status << "complete\n";
+    }
     double mean_hz = 0.0;
     double max_gap = 0.0;
     if (!update_gaps_.empty()) {
@@ -1075,6 +1229,10 @@ class RuralNominalMissionNode : public rclcpp::Node {
     finished_ = true;
     if (timer_) timer_->cancel();
     if (log_) log_.close();
+    if (!maicp_case_.empty()) {
+      std::ofstream status(log_path_ + ".failed");
+      status << reason << '\n';
+    }
     RCLCPP_FATAL(get_logger(), "%s", reason.c_str());
   }
 
@@ -1243,7 +1401,27 @@ class RuralNominalMissionNode : public rclcpp::Node {
          << ",\"dt\":" << config_.control_dt
          << ",\"timestamp\":" << seconds(mission_started_at_)
          << ",\"wall_timestamp\":" << now().seconds()
-         << ",\"vehicle_types\":{";
+         << ",\"maicp\":{\"case\":\"" << maicp_case_
+         << "\",\"logical_time\":" << static_cast<double>(step_) * config_.control_dt
+         << ",\"margin_ugv\":" << cbf_config_.ugv_margin
+         << ",\"margin_uav\":" << cbf_config_.uav_margin
+         << ",\"returned_home\":{";
+    for (std::size_t i = 0; i < std::size(kControlled); ++i) {
+      if (i) log_ << ',';
+      const std::string id = kControlled[i];
+      const auto truth_position = agentState(states_.at(id)).position;
+      if (periodicMission()) {
+        maicp_travel_[id] += (truth_position.head<2>() - maicp_last_truth_.at(id).head<2>()).norm();
+        maicp_last_truth_[id] = truth_position;
+      }
+      const double required_travel = id.rfind("Husky", 0) == 0
+          ? 2.8 : 0.7 * 2.0 * std::acos(-1.0) * maicp_loop_radius_;
+      const bool home = periodicMission() && maicp_returning_.at(id) &&
+          maicp_travel_.at(id) >= required_travel &&
+          (truth_position.head<2>() - maicp_truth_home_.at(id).head<2>()).norm() < 0.8;
+      log_ << '\"' << id << "\":" << (home ? "true" : "false");
+    }
+    log_ << "}},\"vehicle_types\":{";
     for (std::size_t i = 0; i < std::size(kAll); ++i) {
       if (i) log_ << ',';
       const std::string id = kAll[i];
@@ -1259,7 +1437,8 @@ class RuralNominalMissionNode : public rclcpp::Node {
       writeVector(log_, state.position);
       log_ << ",\"velocity\":";
       writeVector(log_, state.velocity);
-      log_ << ",\"yaw\":" << state.yaw << '}';
+      log_ << ",\"yaw\":" << state.yaw << ",\"source_timestamp\":"
+           << hercules_tracking_ros::timeSeconds(states_.at(kAll[i]).header.stamp) << '}';
     }
     log_ << "},\"localization\":{\"algorithm\":\"" << localization_algorithm_
          << "\",\"agents\":{";
@@ -1721,6 +1900,14 @@ class RuralNominalMissionNode : public rclcpp::Node {
   double uav_altitude_ceiling_{-8.0};
   double cbf_obstacle_stale_after_{1.3};
   double cbf_agent_deadline_ms_{5.0};
+  std::string maicp_case_;
+  int maicp_steps_{100};
+  double maicp_loop_radius_{2.5};
+  std::map<std::string, Eigen::Vector3d> maicp_home_;
+  std::map<std::string, Eigen::Vector3d> maicp_velocity_;
+  std::map<std::string, Eigen::Vector3d> maicp_truth_home_, maicp_last_truth_;
+  std::map<std::string, double> maicp_travel_;
+  std::map<std::string, bool> maicp_returning_;
   std::string log_path_;
   std::ofstream log_;
   std::size_t step_{0};

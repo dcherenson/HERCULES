@@ -54,6 +54,12 @@ CONTROL_DT = 0.1
 SIMULATION_STEPS = 100
 COMMUNICATION_RANGE_METERS = 10.0
 UAV_ALTITUDE_CEILING_METERS = 10.0
+# The executable mission fleet is deliberately explicit. Keep these names
+# separate from the generic formation slot map so legacy slots cannot
+# silently change the vehicles that the mission starts.
+DEFAULT_UAV_NAMES = ("Drone1", "Drone2", "SimpleFlight")
+DEFAULT_UGV_NAMES = ("Husky1", "Husky2", "Husky3")
+DEFAULT_CONTROLLED_NAMES = DEFAULT_UAV_NAMES + DEFAULT_UGV_NAMES
 RURAL_TARGET_CAMERA_RIGHT_OFFSET_METERS = 5.0
 # Move the RuralAustralia target route back toward the robot launch point,
 # measured along the resolved start-to-goal route.  The whole fixed
@@ -1412,9 +1418,12 @@ def main(argv: List[str] = None) -> int:
             file=sys.stderr,
         )
         return 2
-    names = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5", "Husky1", "Husky2", "Husky3"]
-    uav_names = names[:5]
-    ugv_names = names[5:]
+    # Keep the production roster explicit: three UAVs and three controlled
+    # UGVs. Slicing a mixed legacy list here previously classified legacy
+    # drone entries by position and made the default mission an eight-agent run.
+    names = list(DEFAULT_CONTROLLED_NAMES)
+    uav_names = list(DEFAULT_UAV_NAMES)
+    ugv_names = list(DEFAULT_UGV_NAMES)
     types = {name: "drone" for name in uav_names}
     types.update({name: "ugv" for name in ugv_names})
     target_name = str(args.target_name)

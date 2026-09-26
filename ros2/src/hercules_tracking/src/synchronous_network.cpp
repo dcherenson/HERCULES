@@ -11,7 +11,8 @@ namespace hercules_tracking {
 SynchronousTrackingNetwork::SynchronousTrackingNetwork(
     const std::vector<std::string>& agent_ids, TrackConfig config,
     int max_iterations, double tolerance)
-    : max_iterations_(max_iterations), tolerance_(tolerance) {
+    : max_iterations_(config.maicp_enabled ? kPaperAdmmIterations : max_iterations),
+      tolerance_(tolerance), paper_mode_(config.maicp_enabled) {
   for (const auto& agent_id : agent_ids) modules_.try_emplace(agent_id, agent_id, config);
   if (modules_.empty()) throw std::invalid_argument("network requires at least one agent");
 }
@@ -98,7 +99,7 @@ NetworkResult SynchronousTrackingNetwork::update(double timestamp,
     }
     history.push_back(std::move(snapshot));
     residual = round_residual;
-    if (residual <= tolerance_) break;
+    if (!paper_mode_ && residual <= tolerance_) break;
   }
   if (rounds > max_iterations_) rounds = max_iterations_;
 

@@ -1,5 +1,10 @@
 # Distributed tracking live reproduction
 
+The [2026-09-26 branch review](BRANCH_REVIEW_2026-09-26.md) records full native
+Unreal/AirSim + Docker ROS tests with the current 3-UAV/3-UGV fleet, separate
+Target1, Python comparisons, unresolved correctness findings, and measured
+faster-than-real-time capacity. The older eight-agent result below is historical.
+
 Generated logs, metrics, plots, and animations belong only in the ignored
 `artifacts/` child directory. Run the complete deterministic and live workflow
 from the repository root with:

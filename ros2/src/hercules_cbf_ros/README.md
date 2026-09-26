@@ -19,6 +19,13 @@ worker threads and publishes immutable per-agent snapshots; the latter polls
 authoritative AirSim collision state and de-duplicates persistent events. Both
 observers are read-only and have no actuator authority.
 
+The default controlled fleet is three UAVs (`Drone1`, `Drone2`, and
+`SimpleFlight`) and three UGVs (`Husky1`, `Husky2`, and `Husky3`). The obstacle
+observer publishes only those six agents. The collision observer additionally
+polls `Target1` as a separate target vehicle. These defaults are explicit in
+`config/rural_perception.yaml` and can be overridden with the corresponding
+ROS parameters without changing the generic formation slot map.
+
 The mission defaults remain `cbf_enabled=false`, `cbf_method=mestres`,
 `cbf_obstacle_source=none`, and `actuation_profile=current_ros`. Enabling CBF
 selects Wang for UAVs when requested and always forces physical UGVs through

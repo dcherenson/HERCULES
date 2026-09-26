@@ -28,3 +28,28 @@ TEST(MissionActuation, UgvBrakesOverspeedAndSaturatesSteering) {
   EXPECT_NEAR(command.brake, 0.8, 1e-12);
   EXPECT_DOUBLE_EQ(command.steering, -1.0);
 }
+
+TEST(MissionActuation, WangAccelerationMapsToHuskySpeedAndYaw) {
+  const auto forward = hercules_mission_ros::ugvAccelerationCommand(
+      {1.0, 0.0, 0.0}, 0.0, {2.0, 0.0, 0.0}, 0.1, 3.0, 1.5);
+  EXPECT_NEAR(forward.x(), 1.2, 1e-12);
+  EXPECT_NEAR(forward.y(), 0.0, 1e-12);
+  const auto turn = hercules_mission_ros::ugvAccelerationCommand(
+      {1.0, 0.0, 0.0}, 0.0, {0.0, 10.0, 0.0}, 0.1, 3.0, 1.5);
+  EXPECT_NEAR(turn.y(), 1.5, 1e-12);
+  EXPECT_NEAR(turn.x(), 1.0, 1e-12);
+  const auto brake = hercules_mission_ros::ugvAccelerationCommand(
+      {1.0, 0.0, 0.0}, 0.0, {-10.0, 0.0, 0.0}, 0.1, 3.0, 1.5);
+  EXPECT_TRUE(brake.isZero());
+}
+
+TEST(MissionActuation, PaperClosedPatrolCanReverseWithoutTurningAround) {
+  const auto reverse = hercules_mission_ros::ugvAccelerationCommand(
+      {0.0, -1.0, 0.0}, 1.5707963267948966, {0.0, 0.0, 0.0}, 0.1, 3.0, 1.5);
+  EXPECT_NEAR(reverse.x(), -1.0, 1e-12);
+  EXPECT_NEAR(reverse.y(), 0.0, 1e-12);
+  const auto car = hercules_mission_ros::paperUgvCarCommand(-1.0, 0.0, 0.5, 1.5);
+  EXPECT_EQ(car.manual_gear, -1);
+  EXPECT_LT(car.throttle, 0.0);
+  EXPECT_FALSE(car.handbrake);
+}

@@ -349,7 +349,10 @@ class RelativeObservationWorker:
                         break
                     started = time.monotonic()
                     try:
-                        client = clients.setdefault(observer, self._client_for_agent(observer))
+                        client = clients.get(observer)
+                        if client is None:
+                            client = self._client_for_agent(observer)
+                            clients[observer] = client
                         value = self._capture(client, observer, camera)
                         with self._lock:
                             if value.valid:

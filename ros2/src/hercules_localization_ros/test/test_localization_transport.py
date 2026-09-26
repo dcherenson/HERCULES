@@ -1,3 +1,4 @@
+import math
 import os
 import subprocess
 import time
@@ -16,8 +17,10 @@ from hercules_interfaces.srv import (
     ResetLocalization,
     SetLocalizationAlgorithm,
 )
+from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import NavSatFix
 
 
@@ -69,6 +72,7 @@ def test_localization_transport_selects_algorithm_and_publishes_outputs():
         "-p", f"measurement_topic:={topic_prefix}/measurement",
         "-p", f"odom_local_topic:={topic_prefix}/odom_local",
         "-p", f"global_gps_topic:={topic_prefix}/global_gps",
+        "-p", f"odom_origin_topic:={topic_prefix}/odom_origin",
         "-p", f"relative_topic:={topic_prefix}/relative",
         "-p", f"peer_topic:={topic_prefix}/peer",
         "-p", f"global_ci_topic:={topic_prefix}/gs_ci",
@@ -81,6 +85,11 @@ def test_localization_transport_selects_algorithm_and_publishes_outputs():
         LocalizationMeasurement, f"{topic_prefix}/measurement", 20)
     odom_publisher = driver.create_publisher(Odometry, f"{topic_prefix}/odom_local", 20)
     gps_publisher = driver.create_publisher(NavSatFix, f"{topic_prefix}/global_gps", 20)
+    origin_qos = QoSProfile(
+        depth=1, reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    origin_publisher = driver.create_publisher(
+        PointStamped, f"{topic_prefix}/odom_origin", origin_qos)
     relative_publisher = driver.create_publisher(
         PlanarRelativeMeasurement, f"{topic_prefix}/relative", 20)
     peer_publisher = driver.create_publisher(
@@ -110,11 +119,32 @@ def test_localization_transport_selects_algorithm_and_publishes_outputs():
             lambda: measurement_publisher.get_subscription_count() > 0
             and odom_publisher.get_subscription_count() > 0
             and gps_publisher.get_subscription_count() > 0
+            and origin_publisher.get_subscription_count() > 0
             and relative_publisher.get_subscription_count() > 0
             and peer_publisher.get_subscription_count() > 0
             and global_ci_publisher.get_subscription_count() > 0,
             timeout=8.0,
         )
+
+        # A configured calibration topic gates odometry until its transient
+        # local value arrives; accepting a raw sample first would establish an
+        # inconsistent previous-position baseline.
+        gated_odom = Odometry()
+        gated_odom.pose.pose.position.x = 99.0
+        gated_odom.pose.pose.orientation.w = 1.0
+        odom_publisher.publish(gated_odom)
+        for _ in range(5):
+            rclpy.spin_once(driver, timeout_sec=0.03)
+        assert not estimates
+
+        origin = PointStamped()
+        origin.header.frame_id = "airsim_world_ned"
+        origin.point.x = 100.0
+        origin.point.y = 200.0
+        origin.point.z = 300.0
+        for _ in range(3):
+            origin_publisher.publish(origin)
+            rclpy.spin_once(driver, timeout_sec=0.03)
 
         peer = LocalizationPeerEstimate()
         peer.sender_id = "peer"
@@ -147,6 +177,56 @@ def test_localization_transport_selects_algorithm_and_publishes_outputs():
         assert wait_until(driver, lambda: beliefs, timeout=3.0)
         assert beliefs[-1].agent_id == "transport_agent"
         assert beliefs[-1].confidence_weight == 0.8
+
+        # The AirSim wrapper negates Y/Z position and velocity, quaternion Y/Z,
+        # and angular Z before publishing ROS odometry.  A nonzero heading and
+        # lateral velocity make the inverse conversion observable here.
+        odom = Odometry()
+        odom.header.stamp.sec = 3
+        odom.pose.pose.position.x = 10.0
+        odom.pose.pose.position.y = -20.0
+        odom.pose.pose.position.z = -30.0
+        yaw = 0.75
+        odom.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        odom.pose.pose.orientation.z = -math.sin(yaw / 2.0)
+        odom.twist.twist.linear.x = 1.0
+        odom.twist.twist.linear.y = -2.0
+        odom.twist.twist.linear.z = -3.0
+        odom.twist.twist.angular.z = -0.4
+        first_odom_estimate_count = len(estimates)
+        odom_publisher.publish(odom)
+        assert wait_until(
+            driver,
+            lambda: len(estimates) > first_odom_estimate_count and
+            abs(estimates[-1].yaw - yaw) < 1e-9,
+            timeout=5.0,
+        )
+        converted = estimates[-1]
+        # The first odometry sample establishes the motion baseline; the GPS
+        # pose remains [1, 2] while the calibrated vertical output is 330.
+        assert list(converted.position) == [1.0, 2.0, 330.0]
+        assert list(converted.velocity) == [1.0, 2.0, 3.0]
+        assert abs(converted.yaw_rate - 0.4) < 1e-9
+
+        # Keep the same calibration translation on the next sample.  Only the
+        # physical one-metre motion should reach the estimator.
+        second_odom = Odometry()
+        second_odom.header.stamp.sec = 4
+        second_odom.pose.pose.position.x = 11.0
+        second_odom.pose.pose.position.y = -21.0
+        second_odom.pose.pose.position.z = -30.0
+        second_odom.pose.pose.orientation = odom.pose.pose.orientation
+        second_odom.twist.twist = odom.twist.twist
+        second_odom_estimate_count = len(estimates)
+        odom_publisher.publish(second_odom)
+        assert wait_until(
+            driver,
+            lambda: len(estimates) > second_odom_estimate_count,
+            timeout=5.0,
+        )
+        converted = estimates[-1]
+        assert list(converted.position) == [2.0, 3.0, 330.0]
+        assert abs(converted.yaw - yaw) < 1e-9
 
         assert pair_client.wait_for_service(timeout_sec=3.0)
         pair_request = RecursiveLocalizationPair.Request()
@@ -182,14 +262,16 @@ def test_localization_transport_selects_algorithm_and_publishes_outputs():
 
         # Reset restores the first-GPS initialization gate; odometry alone
         # must not seed a new estimator state.
+        reset_estimate_count = len(estimates)
         odom = Odometry()
         odom.header.frame_id = "map"
         odom.pose.pose.position.x = 7.0
         odom.pose.pose.orientation.w = 1.0
         odom_publisher.publish(odom)
-        assert wait_until(driver, lambda: len(estimates) >= 2, timeout=5.0)
+        assert wait_until(driver, lambda: len(estimates) > reset_estimate_count, timeout=5.0)
         assert not estimates[-1].initialized
         assert not estimates[-1].valid
+        assert list(estimates[-1].position) == [107.0, 200.0, 300.0]
     finally:
         driver.destroy_node()
         if process.poll() is None:

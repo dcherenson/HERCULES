@@ -32,3 +32,21 @@ TEST(CbfAdapter, TargetProxyUsesPositionCovarianceAndVelocity) {
   EXPECT_DOUBLE_EQ(obstacles[0].radius, 5.25);
   EXPECT_TRUE(obstacles[0].velocity->isApprox(Eigen::Vector3d(.5, 1, 0)));
 }
+
+TEST(CbfAdapter, AppliesFrozenClassAccelerationModelAndMargin) {
+  hercules_interfaces::msg::GroundTruthState ego;
+  ego.agent_id = "Drone1";
+  ego.vehicle_type = "drone";
+  ego.position = {2.0, -3.0, -5.0};
+  ego.velocity = {0.0, 0.0, 0.0};
+  hercules_cbf::CBFConfig config;
+  config.method = hercules_cbf::Method::kWang;
+  config.uav_margin = 0.4;
+  config.uav_acceleration_model_coefficients = {1.0, 2.0, 3.0,
+                                                -1.0, 4.0, 5.0};
+  hercules_cbf::AgentState state = hercules_cbf_ros::stateFromRos(ego);
+  hercules_cbf_ros::applyConfiguredWangModel(state, config);
+  ASSERT_TRUE(state.learned_acceleration.has_value());
+  EXPECT_TRUE(state.learned_acceleration->isApprox(Eigen::Vector3d(-4.0, -8.0, 0.0)));
+  EXPECT_DOUBLE_EQ(state.margin, 0.4);
+}

@@ -9,7 +9,14 @@
     covariance_floor: 1.0e-9
     process_covariance_floor: 1.0e-9
     measurement_covariance_floor: 1.0e-9
+    odom_origin_topic: ""
     dcl_lambda: 1.0
     ci_self_weight: 0.8
     ci_max_iterations: 10
     unknown_motion_variance: 0.25
+    # Static per-mission MA-ICP paper settings. A zero gain selects the
+    # typed-class defaults UGV=.30 and UAV=.20.
+    maicp_enabled: false
+    maicp_margin: 0.0
+    maicp_covariance_gain: 0.0
+    maicp_class: unknown

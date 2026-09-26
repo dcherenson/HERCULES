@@ -72,6 +72,23 @@ Eigen::VectorXd alignTrajectory(const TrackMessage& message, const std::vector<d
   return aligned;
 }
 
+PositionMatrix measurementCovariance(
+    const TargetMeasurement& measurement, bool maicp_enabled,
+    double maicp_margin, double maicp_covariance_gain, MaicpClass maicp_class) {
+  PositionMatrix covariance = positiveDefinite(measurement.covariance);
+  if (!maicp_enabled) return covariance;
+  const double margin = std::isfinite(maicp_margin) ? std::max(0.0, maicp_margin) : 0.0;
+  const double gain = std::max(
+      0.0, std::isfinite(maicp_covariance_gain) && maicp_covariance_gain > 0.0
+               ? maicp_covariance_gain
+               : defaultMaicpCovarianceGain(maicp_class));
+  // The paper's simple case uses Delta R = I for the planar measurement.  It
+  // is intentionally additive in variance; the process and prior factors are
+  // assembled independently below.
+  covariance.diagonal().array() += gain * margin;
+  return positiveDefinite(covariance);
+}
+
 }  // namespace
 
 std::pair<Eigen::MatrixXd, Eigen::VectorXd> assembleWindowInformation(
@@ -80,7 +97,9 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> assembleWindowInformation(
     const State& prior_mean, const StateMatrix& prior_covariance,
     double process_noise_spectral_density, int active_tracker_count,
     const std::optional<StateMatrix>& handoff_information,
-    const std::optional<State>& handoff_information_vector) {
+    const std::optional<State>& handoff_information_vector,
+    bool maicp_enabled, double maicp_margin, double maicp_covariance_gain,
+    MaicpClass maicp_class) {
   if (times.empty() || times.size() != measurements.size()) {
     throw std::invalid_argument("times and measurements must have equal nonzero length");
   }
@@ -118,7 +137,10 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> assembleWindowInformation(
     if (!measurements[index] || !measurements[index]->valid) continue;
     addFactor(information, information_vector,
               {{static_cast<int>(index), measurement_matrix}},
-              measurements[index]->position, positiveDefinite(measurements[index]->covariance));
+              measurements[index]->position,
+              measurementCovariance(*measurements[index], maicp_enabled,
+                                    maicp_margin, maicp_covariance_gain,
+                                    maicp_class));
   }
   information = positiveDefinite(information);
   return {information, information_vector};
@@ -136,6 +158,9 @@ bool TargetTrack::ensureInitialized(const std::optional<TargetMeasurement>& meas
   prior_mean_ = State(measurement->position.x(), measurement->position.y(), 0.0, 0.0);
   const double velocity_variance = std::max(1.0, 4.0 * config_.measurement_std * config_.measurement_std);
   prior_covariance_ = StateMatrix::Zero();
+  // The margin belongs only to the measurement factor below.  The prior uses
+  // the nominal observation covariance, preserving its historical value while
+  // remaining independent of r_c.
   prior_covariance_(0, 0) = std::max(measurement->covariance(0, 0), 1e-4);
   prior_covariance_(1, 1) = std::max(measurement->covariance(1, 1), 1e-4);
   prior_covariance_(2, 2) = velocity_variance;
@@ -202,7 +227,9 @@ bool TargetTrack::begin(double timestamp, const std::optional<TargetMeasurement>
   auto assembled = assembleWindowInformation(
       times_, measurements_, *prior_mean_, prior_covariance_,
       config_.process_noise_spectral_density, active_count,
-      pending_handoff_information_, pending_handoff_vector_);
+      pending_handoff_information_, pending_handoff_vector_,
+      config_.maicp_enabled, config_.maicp_margin,
+      config_.maicp_covariance_gain, config_.maicp_class);
   information_ = std::move(assembled.first);
   information_vector_ = std::move(assembled.second);
   pending_handoff_information_.reset();

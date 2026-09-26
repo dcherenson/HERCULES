@@ -27,8 +27,23 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Header
 
 
-AGENTS = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
-          "Husky1", "Husky2", "Husky3"]
+DEFAULT_UAV_AGENTS = ("Drone1", "Drone2", "SimpleFlight")
+DEFAULT_UGV_AGENTS = ("Husky1", "Husky2", "Husky3")
+DEFAULT_CONTROLLED_AGENTS = DEFAULT_UAV_AGENTS + DEFAULT_UGV_AGENTS
+AGENTS = list(DEFAULT_CONTROLLED_AGENTS)
+
+
+def _configured_agents(value, parameter_name: str, default) -> Tuple[str, ...]:
+    """Validate a configured vehicle-name array while preserving its order."""
+    values = default if value is None else value
+    if isinstance(values, str):
+        raise ValueError(f"{parameter_name} must be a list of vehicle names")
+    names = tuple(str(agent).strip() for agent in values)
+    if not names or any(not agent for agent in names):
+        raise ValueError(f"{parameter_name} must contain at least one nonempty name")
+    if len(set(names)) != len(names):
+        raise ValueError(f"{parameter_name} must not contain duplicate names")
+    return names
 
 
 def _source_modules():
@@ -147,12 +162,25 @@ def _capture_state(facade, agent: str, message: GroundTruthState,
     return state
 
 
+def _capture_worker_pool() -> ThreadPoolExecutor:
+    """Create the single thread that owns all AirSim perception clients.
+
+    The msgpack/Tornado client used by AirSim is thread-affine.  A lock around
+    calls is insufficient when a facade is constructed on one pool worker and
+    later reused on another, so client construction and every capture must run
+    on the same dedicated worker.
+    """
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="cbf-perception")
+
+
 class ObstacleObserverNode(Node):
     def __init__(self) -> None:
         super().__init__("obstacle_observer")
         self.declare_parameter("source", "perception")
         self.declare_parameter("sensor_rate", 2.5)
         self.declare_parameter("stale_after", 1.3)
+        self.declare_parameter("uav_agents", list(DEFAULT_UAV_AGENTS))
+        self.declare_parameter("ugv_agents", list(DEFAULT_UGV_AGENTS))
         self.declare_parameter("host_ip", "127.0.0.1")
         self.declare_parameter("rpc_port", 41451)
         self.declare_parameter("car_port", 41452)
@@ -160,6 +188,13 @@ class ObstacleObserverNode(Node):
         self.declare_parameter("ugv_radius", 1.25)
         self.declare_parameter("body_exclusion_margin", 0.5)
         self.declare_parameter("map_name", "rural_australia")
+        self.uav_agents = _configured_agents(
+            self.get_parameter("uav_agents").value, "uav_agents", DEFAULT_UAV_AGENTS)
+        self.ugv_agents = _configured_agents(
+            self.get_parameter("ugv_agents").value, "ugv_agents", DEFAULT_UGV_AGENTS)
+        if set(self.uav_agents).intersection(self.ugv_agents):
+            raise ValueError("uav_agents and ugv_agents must be disjoint")
+        self.agents = self.uav_agents + self.ugv_agents
         self.source = str(self.get_parameter("source").value)
         if self.source not in ("perception", "truth", "none"):
             raise ValueError("source must be perception, truth, or none")
@@ -167,14 +202,14 @@ class ObstacleObserverNode(Node):
         # ``Node.publishers`` is an rclpy-managed read-only property; keep
         # the observer's handles under a private name instead.
         self.proxy_publishers = {agent: self.create_publisher(
-            ObstacleProxyArray, f"/hercules_mission/obstacles/{agent}", 10) for agent in AGENTS}
+            ObstacleProxyArray, f"/hercules_mission/obstacles/{agent}", 10) for agent in self.agents}
         self.states: Dict[str, GroundTruthState] = {}
         self.origins: Dict[str, np.ndarray] = {}
         # ``Node.subscriptions`` is also managed by rclpy and read-only.
         self.state_subscriptions = [self.create_subscription(
             GroundTruthState, f"/hercules_mission/ground_truth/{agent}",
             lambda message, agent=agent: self.states.__setitem__(agent, message), 10)
-            for agent in AGENTS]
+            for agent in self.agents]
         origin_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                 durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.origin_subscriptions = [self.create_subscription(
@@ -182,12 +217,12 @@ class ObstacleObserverNode(Node):
             lambda message, agent=agent: self.origins.__setitem__(
                 agent, np.asarray([message.point.x, message.point.y, message.point.z], dtype=float)),
             origin_qos)
-            for agent in AGENTS]
-        # ``Node.executor`` is an rclpy-managed read-only property.
-        self.worker_pool = ThreadPoolExecutor(max_workers=len(AGENTS), thread_name_prefix="cbf-perception")
-        # The AirSim msgpack/Tornado client is not safe for concurrent writes.
-        # Workers remain independent at the scheduling level, but all RPC
-        # capture calls pass through this short critical section.
+            for agent in self.agents]
+        # ``Node.executor`` is an rclpy-managed read-only property.  Keep all
+        # AirSim client construction and use on one dedicated thread: the
+        # msgpack/Tornado client is thread-affine, so a lock alone does not
+        # make a facade safe to reuse across a multi-worker pool.
+        self.worker_pool = _capture_worker_pool()
         self.capture_lock = threading.Lock()
         self.futures = {}
         (detector_type, config_type, capture_type, filter_type,
@@ -219,7 +254,7 @@ class ObstacleObserverNode(Node):
         # fitting thresholds from the dense FlyingCPP scene.
         def detector_config(agent: str):
             if self.map_name == "rural_australia":
-                if agent.startswith("Drone") or agent == "SimpleFlight":
+                if agent in self.uav_agents:
                     return config_type(
                         top_n=5,
                         cluster_min_samples=20,
@@ -244,13 +279,17 @@ class ObstacleObserverNode(Node):
             return config_type(stale_after=stale_after)
         self.detectors = {
             agent: detector_type(detector_config(agent))
-            for agent in AGENTS
+            for agent in self.agents
         }
-        # A capture future is serialized per agent, so one facade per agent is
-        # safe to reuse.  Constructing a new AirSim facade on every sensor
-        # tick leaks RPC client resources in the AirSim Python bindings and
-        # eventually exhausts the host when a launch is left unattended.
+        # A capture future is serialized per agent, and all futures run on the
+        # dedicated worker, so one facade per agent is safe to reuse.  Creating
+        # a new AirSim facade on every sensor tick leaks RPC client resources in
+        # the AirSim Python bindings and eventually exhausts the host when a
+        # launch is left unattended.
         self.facades = {}
+        # The camera FOV is static for a mission.  Keep the cache at node scope
+        # so each UAV camera makes at most one simGetCameraInfo RPC.
+        self.camera_fovs: Dict[str, float] = {}
         self.timer = self.create_timer(1.0 / self.sensor_rate, self.schedule)
 
     def destroy_node(self):
@@ -261,7 +300,7 @@ class ObstacleObserverNode(Node):
     def schedule(self) -> None:
         if self.source in ("none", "truth"):
             now = time.time()
-            for agent in AGENTS:
+            for agent in self.agents:
                 self.proxy_publishers[agent].publish(snapshot_message(
                     agent, f"empty_{int(now * 1e6)}_{agent}", self.source,
                     True, True, now, []))
@@ -291,7 +330,7 @@ class ObstacleObserverNode(Node):
                 proxies, valid, sensor_view, trace = self.capture(
                     facade, self.detectors[agent], agent,
                     "drone" if message.vehicle_type == "drone" else "ugv",
-                    state, time.time(), {})
+                    state, time.time(), self.camera_fovs)
             if valid:
                 states = dict(self.states)
                 vehicle_radii = {

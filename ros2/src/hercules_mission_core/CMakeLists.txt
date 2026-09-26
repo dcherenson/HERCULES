@@ -35,6 +35,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_mission_core ${PROJECT_NAME})
   target_compile_options(test_mission_core PRIVATE -Wall -Wextra -Wpedantic)
 
+  ament_add_gtest(test_periodic_mission test/test_periodic_mission.cpp)
+  target_link_libraries(test_periodic_mission ${PROJECT_NAME})
+  target_compile_options(test_periodic_mission PRIVATE -Wall -Wextra -Wpedantic)
+
   add_executable(mission_parity_dump test/mission_parity_dump.cpp)
   target_link_libraries(mission_parity_dump ${PROJECT_NAME})
   target_compile_options(mission_parity_dump PRIVATE -Wall -Wextra -Wpedantic)

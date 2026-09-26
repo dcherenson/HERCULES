@@ -10,8 +10,7 @@ from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
 
 
-AGENTS = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
-          "Husky1", "Husky2", "Husky3"]
+AGENTS = ["Drone1", "Drone2", "SimpleFlight", "Husky1", "Husky2", "Husky3"]
 
 
 def _state(name, position, vehicle_type="drone"):

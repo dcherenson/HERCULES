@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -20,6 +21,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "hercules_tracking/target_tracker.hpp"
+#include "hercules_tracking/synchronous_network.hpp"
 #include "hercules_tracking_ros/neighbor_graph.hpp"
 #include "hercules_tracking_ros/tracking_adapter.hpp"
 #include "hercules_tracking_ros/tracking_protocol.hpp"
@@ -30,6 +32,28 @@ using SteadyClock = std::chrono::steady_clock;
 
 enum class Stage { kIdle, kSeed, kRound, kStatus };
 
+std::string lower(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char character) {
+                   return static_cast<char>(std::tolower(character));
+                 });
+  return value;
+}
+
+hercules_tracking::MaicpClass maicpClassFromParameter(const std::string& value) {
+  const auto normalized = lower(value);
+  if (normalized.empty() || normalized == "unknown") {
+    return hercules_tracking::MaicpClass::kUnknown;
+  }
+  if (normalized == "ugv" || normalized == "ground" || normalized == "ground_vehicle") {
+    return hercules_tracking::MaicpClass::kUgv;
+  }
+  if (normalized == "uav" || normalized == "drone" || normalized == "air") {
+    return hercules_tracking::MaicpClass::kUav;
+  }
+  throw std::invalid_argument("maicp_class must be ugv, uav, or unknown");
+}
+
 hercules_tracking::TrackConfig trackingConfig(rclcpp::Node& node) {
   hercules_tracking::TrackConfig value;
   value.window_seconds = node.declare_parameter<double>("tracking_window", 5.0);
@@ -39,6 +63,21 @@ hercules_tracking::TrackConfig trackingConfig(rclcpp::Node& node) {
   value.process_noise_spectral_density =
       node.declare_parameter<double>("tracking_process_noise", 0.20);
   value.measurement_std = node.declare_parameter<double>("tracking_measurement_std", 0.25);
+  value.maicp_enabled = node.declare_parameter<bool>("maicp_enabled", false);
+  value.maicp_margin = node.declare_parameter<double>("maicp_margin", 0.0);
+  value.maicp_covariance_gain =
+      node.declare_parameter<double>("maicp_covariance_gain", 0.0);
+  value.maicp_class = maicpClassFromParameter(
+      node.declare_parameter<std::string>("maicp_class", "unknown"));
+  if (!std::isfinite(value.maicp_margin) || value.maicp_margin < 0.0 ||
+      !std::isfinite(value.maicp_covariance_gain) ||
+      value.maicp_covariance_gain < 0.0) {
+    throw std::invalid_argument(
+        "maicp_margin and maicp_covariance_gain must be finite and nonnegative");
+  }
+  if (value.maicp_enabled) {
+    value.max_iterations = hercules_tracking::SynchronousTrackingNetwork::kPaperAdmmIterations;
+  }
   return value;
 }
 }  // namespace
@@ -101,7 +140,17 @@ class TrackerNode : public rclcpp::Node {
  private:
   void queueEpoch(const hercules_interfaces::msg::TrackingEpoch& epoch) {
     if (epoch.target_id != target_id_ || epoch.epoch_id <= last_epoch_id_) return;
-    if (stage_ != Stage::kIdle) finishEpoch(true);
+    if (stage_ != Stage::kIdle) {
+      if (config_.maicp_enabled) {
+        // A paper epoch is a fixed finite 50-round run.  Keep only the newest
+        // snapshot while it is active; preempting here would publish a
+        // partial iterate whenever the coordinator runs faster than ADMM.
+        pending_epoch_ = epoch;
+        last_epoch_id_ = epoch.epoch_id;
+        return;
+      }
+      finishEpoch(true);
+    }
     pending_epoch_ = epoch;
     last_epoch_id_ = epoch.epoch_id;
     deadline_ = SteadyClock::now() + std::chrono::duration_cast<SteadyClock::duration>(
@@ -282,16 +331,25 @@ class TrackerNode : public rclcpp::Node {
   }
 
   void evaluateStatus(bool deadline_expired) {
-    if (deadline_expired && !protocol_.allStatusesReceived()) epoch_timed_out_ = true;
+    const bool missing_statuses = deadline_expired && !protocol_.allStatusesReceived();
+    if (missing_statuses) epoch_timed_out_ = true;
     double maximum = 0.0;
     for (const auto& [sender, status] : protocol_.statuses()) {
       (void)sender;
       maximum = std::max(maximum, status.residual);
       epoch_timed_out_ = epoch_timed_out_ || status.round_timed_out;
     }
-    const bool converged = protocol_.allStatusesReceived() && maximum <= config_.tolerance;
+    // Paper runs deliberately execute the fixed 50-round DRWT schedule.  A
+    // small residual must not silently shorten a run whose sensitivity was
+    // defined for the prescribed finite iterate.
+    const bool converged = !config_.maicp_enabled &&
+                           protocol_.allStatusesReceived() && maximum <= config_.tolerance;
+    // Missing statuses invalidate the paper epoch, but do not change its
+    // prescribed round count.  The local state can still advance with the
+    // statuses that arrived; the diagnostic flag lets scoring reject it.
+    const bool timed_out = missing_statuses && !config_.maicp_enabled;
     if (converged || protocol_.roundId() >= static_cast<uint32_t>(config_.max_iterations) ||
-        (deadline_expired && !protocol_.allStatusesReceived())) {
+        timed_out) {
       finishEpoch(epoch_timed_out_);
     } else {
       startRound(protocol_.roundId() + 1);
@@ -364,6 +422,13 @@ class TrackerNode : public rclcpp::Node {
     diagnostics.handoffs_accepted = handoffs_accepted_;
     diagnostics_publisher_->publish(diagnostics);
     stage_ = Stage::kIdle;
+    if (pending_epoch_) {
+      // queueEpoch() deliberately leaves the active round deadline untouched
+      // while a paper run is in progress.  Arm the pending snapshot only now,
+      // after the current 50-round run has completed.
+      deadline_ = SteadyClock::now() + std::chrono::duration_cast<SteadyClock::duration>(
+                                            std::chrono::duration<double>(measurement_wait_));
+    }
   }
 
   void advance() {

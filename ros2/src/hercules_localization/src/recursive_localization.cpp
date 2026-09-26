@@ -118,19 +118,8 @@ ObservationUpdate updateFromRangeBearing(const PoseEstimate& prior,
                                        : floor;
   Eigen::Matrix2d measurement_covariance =
       regularizeCovariance(observation.measurement.covariance, measurement_floor);
-  // `robustness_margin` is a standard-deviation margin.  The optional
-  // covariance inflation setting follows the same convention so callers can
-  // provide either one without constructing a covariance matrix themselves.
-  const double margin = std::isfinite(config.robustness_margin)
-                            ? std::max(0.0, config.robustness_margin)
-                            : 0.0;
-  const double inflation = std::isfinite(config.covariance_inflation)
-                               ? std::max(0.0, config.covariance_inflation)
-                               : 0.0;
-  const double total_margin = std::hypot(margin, inflation);
-  const Eigen::Matrix2d inflated_measurement =
-      inflateCovariance(measurement_covariance, total_margin, measurement_floor);
-  measurement_covariance = regularizeCovariance(inflated_measurement, measurement_floor);
+  measurement_covariance = measurementCovarianceForConfig(
+      measurement_covariance, config, measurement_floor);
   // Treat the neighbor state as uncertain rather than as an independent exact
   // anchor.  This is the key consistency property of the recursive update.
   const Eigen::Matrix2d projected_neighbor = config.lambda *
@@ -451,11 +440,8 @@ RecursiveTransactionResult RecursiveDecentralizedState::applyPairTransaction(
           : config_.covariance_floor;
   Eigen::Matrix2d measurement_covariance = regularizeCovariance(
       transaction.measurement.covariance, measurement_floor);
-  measurement_covariance = inflateCovariance(
-      measurement_covariance,
-      std::hypot(std::max(0.0, config_.robustness_margin),
-                 std::max(0.0, config_.covariance_inflation)),
-      measurement_floor);
+  measurement_covariance = measurementCovarianceForConfig(
+      measurement_covariance, config_, measurement_floor);
   const Eigen::Matrix2d innovation_covariance = regularizeCovariance(
       Eigen::Matrix2d(measurement_jacobian * joint_covariance *
                       measurement_jacobian.transpose() + measurement_covariance),

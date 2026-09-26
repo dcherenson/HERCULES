@@ -29,6 +29,8 @@ struct NetworkResult {
 
 class SynchronousTrackingNetwork {
  public:
+  static constexpr int kPaperAdmmIterations = 50;
+
   SynchronousTrackingNetwork(const std::vector<std::string>& agent_ids,
                              TrackConfig config = {}, int max_iterations = 20,
                              double tolerance = 1e-3);
@@ -46,6 +48,7 @@ class SynchronousTrackingNetwork {
   std::map<std::string, TargetTracker> modules_;
   int max_iterations_;
   double tolerance_;
+  bool paper_mode_{false};
   NetworkResult last_result_;
 };
 

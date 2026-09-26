@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -104,6 +105,22 @@ SolveOutput solveOsqp(const Eigen::VectorXd& nominal, const ConstraintSet& const
   return output;
 }
 
+Eigen::VectorXd brakingFallback(const CBFRequest& request, const CBFConfig& config,
+                                const ConstraintSet* constraints = nullptr) {
+  const int dimension = controlDimension(request, config);
+  if (isUnicycle(request, config)) return Eigen::VectorXd::Zero(dimension);
+  Eigen::VectorXd value = (-request.ego.velocity).head(dimension);
+  const double limit = request.ego.vehicle_type == VehicleType::kDrone
+      ? config.uav_acceleration_limit : config.ugv_acceleration_limit;
+  value = value.cwiseMax(Eigen::VectorXd::Constant(dimension, -limit));
+  value = value.cwiseMin(Eigen::VectorXd::Constant(dimension, limit));
+  if (constraints && constraints->lower.size() == dimension &&
+      constraints->upper.size() == dimension) {
+    value = value.cwiseMax(constraints->lower).cwiseMin(constraints->upper);
+  }
+  return value;
+}
+
 CBFResult failureResult(const CBFRequest& request, const CBFConfig& config,
                         const std::string& status, const std::chrono::steady_clock::time_point& start) {
   CBFResult result;
@@ -163,6 +180,26 @@ CBFResult filter(const CBFRequest& request, const CBFConfig& config) {
     return failureResult(request, config, "invalid_nominal_control", start);
   const Eigen::VectorXd nominal = request.nominal_control.head(dimension);
   const ConstraintSet constraints = buildConstraints(request, config);
+  if (!constraints.valid) {
+    CBFResult result;
+    result.safe_control = brakingFallback(request, config, &constraints);
+    result.success = false;
+    result.status = constraints.invalid_reason.empty()
+        ? "invalid_wang_geometry" : constraints.invalid_reason;
+    result.message = "Wang barrier undefined at or inside the safety boundary; "
+                     "fail-safe control applied";
+    result.fallback = true;
+    result.constraint_count = static_cast<int>(constraints.rows.size());
+    result.robust_terms = constraints.robust_terms;
+    result.minimum_barrier = constraints.barriers.empty()
+        ? std::numeric_limits<double>::infinity()
+        : *std::min_element(constraints.barriers.begin(), constraints.barriers.end());
+    result.maximum_row_violation = maximumRowViolation(result.safe_control, constraints);
+    result.maximum_bound_violation = maximumBoundViolation(result.safe_control, constraints);
+    result.solve_time_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    return result;
+  }
   SolveOutput solve;
   if (constraints.rows.empty()) {
     solve.control = nominal;
@@ -187,11 +224,7 @@ CBFResult filter(const CBFRequest& request, const CBFConfig& config) {
   } else if (isUnicycle(request, config)) {
     result.safe_control = Eigen::VectorXd::Zero(dimension);
   } else {
-    result.safe_control = (-request.ego.velocity).head(dimension);
-    result.safe_control = result.safe_control.cwiseMax(
-        Eigen::VectorXd::Constant(dimension, -config.uav_acceleration_limit));
-    result.safe_control = result.safe_control.cwiseMin(
-        Eigen::VectorXd::Constant(dimension, config.uav_acceleration_limit));
+    result.safe_control = brakingFallback(request, config, &constraints);
   }
   if (solve.success && config.method == Method::kMestres && !constraints.rows.empty())
     result.safe_control = projectedCorrection(result.safe_control, constraints, config, &result.distributed_rounds);

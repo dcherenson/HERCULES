@@ -34,9 +34,9 @@ from orchestrator import (  # noqa: E402
 )
 
 
-AGENTS = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
+AGENTS = ["Drone1", "Drone2", "SimpleFlight",
           "Husky1", "Husky2", "Husky3"]
-UAVS = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5"]
+UAVS = ["Drone1", "Drone2", "SimpleFlight"]
 UGVS = ["Husky1", "Husky2", "Husky3"]
 
 

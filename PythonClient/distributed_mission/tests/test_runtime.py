@@ -35,6 +35,9 @@ from orchestrator import (
     safe_target_ugv_startup_positions,
     filter_agent_body_obstacle_proxies,
     run_artifact_stem,
+    DEFAULT_CONTROLLED_NAMES,
+    DEFAULT_UAV_NAMES,
+    DEFAULT_UGV_NAMES,
 )
 
 
@@ -47,6 +50,14 @@ def test_launcher_preserves_start_formation_modes():
     assert existing.command() == []
     assert "RuralAustralia_Example_01" in visible.map_url
     assert "FlyingExampleMap" in headless.map_url
+
+
+def test_default_controlled_fleet_is_three_uavs_and_three_ugvs():
+    assert DEFAULT_UAV_NAMES == ("Drone1", "Drone2", "SimpleFlight")
+    assert DEFAULT_UGV_NAMES == ("Husky1", "Husky2", "Husky3")
+    assert DEFAULT_CONTROLLED_NAMES == DEFAULT_UAV_NAMES + DEFAULT_UGV_NAMES
+    assert len(DEFAULT_CONTROLLED_NAMES) == 6
+    assert "Target1" not in DEFAULT_CONTROLLED_NAMES
 
 
 def test_run_artifact_stem_includes_map_name():

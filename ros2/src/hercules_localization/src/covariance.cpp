@@ -136,4 +136,30 @@ Eigen::MatrixXd inflateCovariance(const Eigen::Ref<const Eigen::MatrixXd>& matri
   return regularizeDynamic(result, floor);
 }
 
+Eigen::Matrix2d measurementCovarianceForConfig(
+    const Eigen::Matrix2d& nominal, const LocalizationConfig& config,
+    double floor) {
+  Eigen::Matrix2d result = regularizeCovariance(nominal, floor);
+  if (config.maicp_enabled) {
+    const double margin = std::isfinite(config.maicp_margin)
+                              ? std::max(0.0, config.maicp_margin)
+                              : 0.0;
+    const double gain = std::max(0.0, effectiveMaicpCovarianceGain(config));
+    // Delta R is the identity for the planar range/bearing contract.  The
+    // margin is therefore an additive variance term, rather than a squared
+    // standard-deviation or a process/prior rescaling.
+    result.diagonal().array() += gain * margin;
+    return regularizeCovariance(result, floor);
+  }
+
+  const double robustness_margin = std::isfinite(config.robustness_margin)
+                                       ? std::max(0.0, config.robustness_margin)
+                                       : 0.0;
+  const double covariance_inflation = std::isfinite(config.covariance_inflation)
+                                          ? std::max(0.0, config.covariance_inflation)
+                                          : 0.0;
+  return inflateCovariance(
+      result, std::hypot(robustness_margin, covariance_inflation), floor);
+}
+
 }  // namespace hercules_localization

@@ -1,6 +1,7 @@
 #include "hercules_localization_ros/localization_adapter.hpp"
 
 #include <airsim_interfaces/msg/gps_yaw.hpp>
+#include <geometry_msgs/msg/point_stamped.hpp>
 #include <hercules_interfaces/msg/global_ci_belief.hpp>
 #include <hercules_interfaces/srv/recursive_localization_pair.hpp>
 #include <hercules_interfaces/srv/reset_localization.hpp>
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <chrono>
 #include <map>
@@ -104,6 +106,23 @@ std::string withDefault(const std::string &value, const std::string &fallback) {
   return value.empty() ? fallback : value;
 }
 
+hercules_localization::MaicpClass maicpClassFromParameter(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char character) {
+                   return static_cast<char>(std::tolower(character));
+                 });
+  if (value.empty() || value == "unknown") {
+    return hercules_localization::MaicpClass::kUnknown;
+  }
+  if (value == "ugv" || value == "ground" || value == "ground_vehicle") {
+    return hercules_localization::MaicpClass::kUgv;
+  }
+  if (value == "uav" || value == "drone" || value == "air") {
+    return hercules_localization::MaicpClass::kUav;
+  }
+  throw std::invalid_argument("maicp_class must be ugv, uav, or unknown");
+}
+
 }  // namespace
 
 class LocalizationNode final : public rclcpp::Node {
@@ -131,6 +150,7 @@ public:
     const auto global_gps_topic = declare_parameter<std::string>("global_gps_topic", "");
     gps_topic_ = withDefault(
         global_gps_topic, withDefault(declare_parameter<std::string>("gps_topic", ""), default_gps));
+    odom_origin_topic_ = declare_parameter<std::string>("odom_origin_topic", "");
     origin_topic_ = declare_parameter<std::string>(
         "gps_origin_topic", "/hercules_drone/origin_geo_point");
     secondary_origin_topic_ = declare_parameter<std::string>(
@@ -183,6 +203,16 @@ public:
         "unknown_motion_variance", 0.25);
     localization_config.communication_timeout_sec = declare_parameter<double>(
         "pair_transaction_timeout_sec", 0.5);
+    localization_config.maicp_enabled = declare_parameter<bool>("maicp_enabled", false);
+    localization_config.maicp_margin = declare_parameter<double>("maicp_margin", 0.0);
+    localization_config.maicp_covariance_gain = declare_parameter<double>(
+        "maicp_covariance_gain", 0.0);
+    std::string maicp_class = declare_parameter<std::string>(
+        "maicp_class", vehicle_type.empty() ? "unknown" : vehicle_type);
+    if ((maicp_class.empty() || maicp_class == "unknown") && !vehicle_type.empty()) {
+      maicp_class = vehicle_type;
+    }
+    localization_config.maicp_class = maicpClassFromParameter(maicp_class);
     if (!finite(localization_config.process_covariance_floor) ||
         localization_config.process_covariance_floor <= 0.0 ||
         !finite(localization_config.measurement_covariance_floor) ||
@@ -190,7 +220,11 @@ public:
         !finite(localization_config.unknown_motion_variance) ||
         localization_config.unknown_motion_variance < 0.0 ||
         !finite(localization_config.communication_timeout_sec) ||
-        localization_config.communication_timeout_sec <= 0.0) {
+        localization_config.communication_timeout_sec <= 0.0 ||
+        !finite(localization_config.maicp_margin) ||
+        localization_config.maicp_margin < 0.0 ||
+        !finite(localization_config.maicp_covariance_gain) ||
+        localization_config.maicp_covariance_gain < 0.0) {
       throw std::invalid_argument("invalid localization covariance or communication timeout");
     }
     adapterConfigTimeout_ = localization_config.communication_timeout_sec;
@@ -220,6 +254,20 @@ public:
     gps_subscription_ = create_subscription<sensor_msgs::msg::NavSatFix>(
         gps_topic_, qos,
         [this](sensor_msgs::msg::NavSatFix::ConstSharedPtr message) { onGps(*message); });
+    if (!odom_origin_topic_.empty()) {
+      odom_origin_subscription_ = create_subscription<geometry_msgs::msg::PointStamped>(
+          odom_origin_topic_, rclcpp::QoS(1).transient_local().reliable(),
+          [this](geometry_msgs::msg::PointStamped::ConstSharedPtr message) {
+            if (!message ||
+                (!message->header.frame_id.empty() &&
+                 message->header.frame_id != "airsim_world_ned") ||
+                !finite(message->point.x) || !finite(message->point.y) ||
+                !finite(message->point.z)) {
+              return;
+            }
+            odom_origin_ned_ = {message->point.x, message->point.y, message->point.z};
+          });
+    }
     const auto on_origin = [this](airsim_interfaces::msg::GPSYaw::ConstSharedPtr message) {
           if (!message || gps_reference_configured_ ||
               !finite(message->latitude) || !finite(message->longitude) ||
@@ -560,17 +608,31 @@ private:
     const auto &position = message.pose.pose.position;
     const auto &orientation = message.pose.pose.orientation;
     const auto &velocity = message.twist.twist.linear;
-    measurement.position = {position.x, position.y, position.z};
-    measurement.velocity = {velocity.x, velocity.y, velocity.z};
-    measurement.orientation = {orientation.w, orientation.x, orientation.y, orientation.z};
-    measurement.yaw = yawFromQuaternion(orientation.x, orientation.y, orientation.z, orientation.w);
-    measurement.yaw_rate = message.twist.twist.angular.z;
+    // The AirSim wrapper publishes ROS odometry with Y/Z negated.  Convert
+    // back to the canonical AirSim NED convention at this boundary, matching
+    // the inverse used by the mission state adapter.
+    measurement.position = {position.x, -position.y, -position.z};
+    // Mission state calibration publishes a static per-agent NED translation.
+    // Apply the same translation to every sample.  The adapter derives motion
+    // from consecutive odometry positions, so dropping it after initialization
+    // would turn a constant frame offset into a false position jump.
+    if (odom_origin_ned_.has_value()) {
+      for (std::size_t index = 0; index < measurement.position.size(); ++index) {
+        measurement.position[index] += (*odom_origin_ned_)[index];
+      }
+    }
+    measurement.velocity = {velocity.x, -velocity.y, -velocity.z};
+    measurement.orientation = {orientation.w, orientation.x, -orientation.y, -orientation.z};
+    measurement.yaw = yawFromQuaternion(orientation.x, -orientation.y,
+                                        -orientation.z, orientation.w);
+    measurement.yaw_rate = -message.twist.twist.angular.z;
     // nav_msgs uses a 6x6 pose covariance with x/y/z/roll/pitch/yaw ordering.
-    // Localization is planar,
-    // so retain the x/y/yaw principal block rather than treating z as yaw.
-    measurement.covariance = {message.pose.covariance[0], message.pose.covariance[1], message.pose.covariance[5],
-                              message.pose.covariance[6], message.pose.covariance[7], message.pose.covariance[11],
-                              message.pose.covariance[30], message.pose.covariance[31], message.pose.covariance[35]};
+    // Localization is planar, so retain the x/y/yaw principal block rather
+    // than treating z as yaw.  The Y and yaw sign changes also transform the
+    // corresponding covariance rows/columns.
+    measurement.covariance = {message.pose.covariance[0], -message.pose.covariance[1], -message.pose.covariance[5],
+                              -message.pose.covariance[6], message.pose.covariance[7], message.pose.covariance[11],
+                              -message.pose.covariance[30], message.pose.covariance[31], message.pose.covariance[35]};
     if (!finite(measurement.covariance[0]) || measurement.covariance[0] <= 0.0 ||
         !finite(measurement.covariance[4]) || measurement.covariance[4] <= 0.0 ||
         !finite(measurement.covariance[8]) || measurement.covariance[8] <= 0.0) {
@@ -692,6 +754,12 @@ private:
   }
 
   void onOdometry(const nav_msgs::msg::Odometry &message) {
+    // A configured transient-local origin is required before accepting the
+    // first odometry sample.  Otherwise a raw sample could initialize the
+    // adapter (or become its previous-position baseline) before the static
+    // translation arrives, after which applying the translation would create
+    // an artificial jump.
+    if (!odom_origin_topic_.empty() && !odom_origin_ned_.has_value()) return;
     have_odometry_sample_ = true;
     onMeasurement(measurementFromOdometry(message));
     if (pending_gps_.has_value()) {
@@ -997,6 +1065,7 @@ private:
   std::string measurement_topic_;
   std::string odometry_topic_;
   std::string gps_topic_;
+  std::string odom_origin_topic_;
   std::string origin_topic_;
   std::string secondary_origin_topic_;
   std::string relative_topic_;
@@ -1006,6 +1075,7 @@ private:
   std::string diagnostics_topic_;
   std::string peer_output_topic_;
   std::vector<std::string> global_agent_ids_;
+  std::optional<std::array<double, 3>> odom_origin_ned_;
   double communication_rate_hz_{2.0};
   double adapterConfigTimeout_{0.5};
   double stale_after_sec_{0.5};
@@ -1020,6 +1090,7 @@ private:
   rclcpp::Subscription<LocalizationMeasurement>::SharedPtr measurement_subscription_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscription_;
+  rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr odom_origin_subscription_;
   rclcpp::Subscription<airsim_interfaces::msg::GPSYaw>::SharedPtr origin_subscription_;
   rclcpp::Subscription<airsim_interfaces::msg::GPSYaw>::SharedPtr secondary_origin_subscription_;
   rclcpp::Subscription<PlanarRelativeMeasurement>::SharedPtr relative_subscription_;

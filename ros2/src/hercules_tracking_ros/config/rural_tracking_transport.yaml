@@ -7,6 +7,12 @@
     tracking_admm_tolerance: 0.001
     tracking_process_noise: 0.20
     tracking_measurement_std: 0.25
+    # Static per-mission MA-ICP paper settings.  The gain defaults from the
+    # typed class when left at zero (UGV=.30, UAV=.20).
+    maicp_enabled: false
+    maicp_margin: 0.0
+    maicp_covariance_gain: 0.0
+    maicp_class: unknown
     measurement_wait_sec: 0.010
     seed_timeout_sec: 0.020
     round_timeout_sec: 0.008

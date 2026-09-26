@@ -312,8 +312,8 @@ GlobalCiResult rangeBearingUpdateImpl(
 
   const Eigen::MatrixXd covariance =
       regularizeDynamic(prior.covariance, config.covariance_floor);
-  const Eigen::Matrix2d noise = regularizeCovariance(
-      measurement.covariance, config.measurement_covariance_floor);
+  const Eigen::Matrix2d noise = measurementCovarianceForConfig(
+      measurement.covariance, config, config.measurement_covariance_floor);
   const Eigen::Matrix2d raw_innovation_covariance =
       jacobian * covariance * jacobian.transpose() + noise;
   const Eigen::Matrix2d innovation_covariance = regularizeCovariance(

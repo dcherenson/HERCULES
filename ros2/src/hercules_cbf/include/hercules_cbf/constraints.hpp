@@ -9,4 +9,25 @@ ConstraintSet buildConstraints(const CBFRequest& request, const CBFConfig& confi
 double uncertainty(const CBFRequest& request, const CBFConfig& config);
 bool isUnicycle(const CBFRequest& request, const CBFConfig& config);
 
+// Direct Wang equation helpers.  They use planar position/velocity and are
+// useful to callers that need to audit a generated row without reconstructing
+// the QP.  Both throw no exceptions; invalid geometry is represented by NaN.
+double wangBarrier(const Eigen::Vector3d& position_i,
+                   const Eigen::Vector3d& position_k,
+                   const Eigen::Vector3d& velocity_i,
+                   const Eigen::Vector3d& velocity_k,
+                   double acceleration_limit_i,
+                   double acceleration_limit_k,
+                   double safe_distance);
+double wangRhs(const Eigen::Vector3d& position_i,
+               const Eigen::Vector3d& position_k,
+               const Eigen::Vector3d& velocity_i,
+               const Eigen::Vector3d& velocity_k,
+               double acceleration_limit_i,
+               double acceleration_limit_k,
+               double safe_distance,
+               double gamma);
+double strategyBAuthorityWeight(double own_acceleration_limit,
+                                double other_acceleration_limit);
+
 }  // namespace hercules_cbf

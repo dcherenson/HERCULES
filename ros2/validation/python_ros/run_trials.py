@@ -28,7 +28,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 
-AGENTS = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
+AGENTS = ["Drone1", "Drone2", "SimpleFlight",
           "Husky1", "Husky2", "Husky3", "Target1"]
 ROWS = (
     ("mestres_truth", "mestres", "truth", "none"),

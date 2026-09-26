@@ -12,6 +12,7 @@ from pathlib import Path
 import rclpy
 from geometry_msgs.msg import PointStamped
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 
 
 def _import_airsim():
@@ -41,7 +42,7 @@ class DirectPoseBridge(Node):
     def __init__(self) -> None:
         super().__init__("mission_direct_pose_bridge")
         self.declare_parameter("vehicle_names", [
-            "Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
+            "Drone1", "Drone2", "SimpleFlight",
             "Husky1", "Husky2", "Husky3", "Target1",
         ])
         self.declare_parameter("rpc_host", "127.0.0.1")
@@ -110,7 +111,7 @@ class DirectPoseBridge(Node):
         }
         rate = float(self.get_parameter("publish_rate_hz").value)
         self.timer = self.create_timer(1.0 / rate, self.publish)
-        self.get_logger().info("direct AirSim pose bridge verified all nine vehicles")
+        self.get_logger().info(f"direct AirSim pose bridge verified all {len(self.names)} vehicles")
 
     def publish(self) -> None:
         # A timer callback can already be queued while launch is tearing down
@@ -143,13 +144,14 @@ class DirectPoseBridge(Node):
 
 def main() -> None:
     rclpy.init()
+    node = DirectPoseBridge()
     try:
-        rclpy.spin(DirectPoseBridge())
-    except KeyboardInterrupt:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        if rclpy.ok():
-            rclpy.shutdown()
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
 
-AGENTS = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
+AGENTS = ["Drone1", "Drone2", "SimpleFlight",
           "Husky1", "Husky2", "Husky3", "Target1"]
 CONTROLLED = AGENTS[:-1]
 
@@ -92,7 +92,7 @@ class RosVideoRecorder(Node):
         self.rendering = False
         self.timer = self.create_timer(0.05, self.tick)
         self.get_logger().info(
-            f"ROS media recorder waiting for nine states; outputs={self.output_dir}")
+            f"ROS media recorder waiting for seven states; outputs={self.output_dir}")
 
     def _start(self) -> None:
         plotter, loader, recorder_type, camera_type, render_type = _source_modules()

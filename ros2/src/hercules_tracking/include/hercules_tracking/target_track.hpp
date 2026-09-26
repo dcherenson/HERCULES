@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <map>
 #include <limits>
 #include <optional>
@@ -12,6 +13,30 @@
 
 namespace hercules_tracking {
 
+/** Sensing class used to select the paper's fixed covariance gain. */
+enum class MaicpClass {
+  kUnknown,
+  kUgv,
+  kUav,
+};
+
+using TrackingClass = MaicpClass;
+
+inline constexpr double kUgvMaicpCovarianceGain = 0.30;
+inline constexpr double kUavMaicpCovarianceGain = 0.20;
+
+inline double defaultMaicpCovarianceGain(MaicpClass value) {
+  switch (value) {
+    case MaicpClass::kUgv:
+      return kUgvMaicpCovarianceGain;
+    case MaicpClass::kUav:
+      return kUavMaicpCovarianceGain;
+    case MaicpClass::kUnknown:
+      return 0.0;
+  }
+  return 0.0;
+}
+
 struct TrackConfig {
   double window_seconds{5.0};
   double process_noise_spectral_density{1.0};
@@ -19,7 +44,24 @@ struct TrackConfig {
   double rho{1.0};
   int max_iterations{20};
   double tolerance{1e-3};
+  // MA-ICP paper settings are static for a mission.  Disabled preserves the
+  // historical estimator path exactly; when enabled only direct measurement
+  // covariances are inflated.
+  bool maicp_enabled{false};
+  double maicp_margin{0.0};
+  // A positive explicit gain takes precedence.  Zero selects the typed-class
+  // default (.30 UGV, .20 UAV).
+  double maicp_covariance_gain{0.0};
+  MaicpClass maicp_class{MaicpClass::kUnknown};
 };
+
+inline double effectiveMaicpCovarianceGain(const TrackConfig& config) {
+  if (std::isfinite(config.maicp_covariance_gain) &&
+      config.maicp_covariance_gain > 0.0) {
+    return config.maicp_covariance_gain;
+  }
+  return defaultMaicpCovarianceGain(config.maicp_class);
+}
 
 struct TrackMessage {
   std::string target_id;
@@ -61,7 +103,10 @@ std::pair<Eigen::MatrixXd, Eigen::VectorXd> assembleWindowInformation(
     const State& prior_mean, const StateMatrix& prior_covariance,
     double process_noise_spectral_density = 1.0, int active_tracker_count = 1,
     const std::optional<StateMatrix>& handoff_information = std::nullopt,
-    const std::optional<State>& handoff_information_vector = std::nullopt);
+    const std::optional<State>& handoff_information_vector = std::nullopt,
+    bool maicp_enabled = false, double maicp_margin = 0.0,
+    double maicp_covariance_gain = 0.0,
+    MaicpClass maicp_class = MaicpClass::kUnknown);
 
 class TargetTrack {
  public:

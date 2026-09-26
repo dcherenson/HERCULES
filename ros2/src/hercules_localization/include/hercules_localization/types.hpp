@@ -154,6 +154,30 @@ enum class CovarianceIntersectionCost {
   kTrace,
 };
 
+/** Sensing class used to select the paper's fixed covariance gain. */
+enum class MaicpClass {
+  kUnknown,
+  kUgv,
+  kUav,
+};
+
+using LocalizationClass = MaicpClass;
+
+inline constexpr double kUgvMaicpCovarianceGain = 0.30;
+inline constexpr double kUavMaicpCovarianceGain = 0.20;
+
+inline double defaultMaicpCovarianceGain(MaicpClass value) {
+  switch (value) {
+    case MaicpClass::kUgv:
+      return kUgvMaicpCovarianceGain;
+    case MaicpClass::kUav:
+      return kUavMaicpCovarianceGain;
+    case MaicpClass::kUnknown:
+      return 0.0;
+  }
+  return 0.0;
+}
+
 /** Numerical and robustification settings shared by both algorithms. */
 struct LocalizationConfig {
   double covariance_floor{kDefaultCovarianceFloor};
@@ -162,6 +186,13 @@ struct LocalizationConfig {
   double range_epsilon{kDefaultRangeEpsilon};
   double robustness_margin{0.0};
   double covariance_inflation{0.0};
+  // Static paper settings.  When enabled, only the relative measurement
+  // covariance is changed using R := R_nom + beta*r*DeltaR.  A positive
+  // explicit gain takes precedence; zero selects the typed-class default.
+  bool maicp_enabled{false};
+  double maicp_margin{0.0};
+  double maicp_covariance_gain{0.0};
+  MaicpClass maicp_class{MaicpClass::kUnknown};
   double innovation_gate{std::numeric_limits<double>::infinity()};
   int max_iterations{10};
   double convergence_tolerance{1e-6};
@@ -175,6 +206,14 @@ struct LocalizationConfig {
   double unknown_motion_variance{0.25};
   double communication_timeout_sec{0.5};
 };
+
+inline double effectiveMaicpCovarianceGain(const LocalizationConfig& config) {
+  if (std::isfinite(config.maicp_covariance_gain) &&
+      config.maicp_covariance_gain > 0.0) {
+    return config.maicp_covariance_gain;
+  }
+  return defaultMaicpCovarianceGain(config.maicp_class);
+}
 
 using CorrelationFactors = std::map<std::string, Eigen::Matrix3d>;
 

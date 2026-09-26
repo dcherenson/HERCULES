@@ -67,6 +67,47 @@ TEST(LinearAlgebra, BlockCholeskyMatchesIndependentDenseSolve) {
                    ht::denseInformationSolution(information, vector), 1e-8);
 }
 
+TEST(LinearAlgebra, PaperMarginInflatesOnlyDirectMeasurementCovariance) {
+  const std::vector<double> times{0.0, 1.0};
+  const std::vector<std::optional<ht::TargetMeasurement>> measurements{
+      std::nullopt, measurement("Target1", 1.0, -2.0, 1.0, 0.4)};
+  const ht::State prior_mean = ht::State::Zero();
+  const ht::StateMatrix prior_covariance = ht::StateMatrix::Identity() * 3.0;
+  const auto nominal = ht::assembleWindowInformation(
+      times, measurements, prior_mean, prior_covariance, 0.5, 1,
+      std::nullopt, std::nullopt, false);
+  const auto paper = ht::assembleWindowInformation(
+      times, measurements, prior_mean, prior_covariance, 0.5, 1,
+      std::nullopt, std::nullopt, true, 2.0, 0.30,
+      ht::MaicpClass::kUgv);
+
+  // The paper policy is R_nom + beta*r*I = R_nom + 0.6 I.  Only the final
+  // position measurement factor changes; the prior and process blocks do not.
+  const Eigen::MatrixXd prior_difference =
+      paper.first.topLeftCorner(4, 4) - nominal.first.topLeftCorner(4, 4);
+  EXPECT_TRUE(prior_difference.isZero(1e-12));
+  const Eigen::MatrixXd measurement_difference =
+      (paper.first - nominal.first).block(4, 4, 2, 2);
+  EXPECT_TRUE(measurement_difference.isApprox(
+      (Eigen::Matrix2d::Identity() * (1.0 / 1.0 - 1.0 / 0.4)), 1e-12));
+  EXPECT_TRUE((paper.second - nominal.second).head<4>().isZero(1e-12));
+}
+
+TEST(Network, PaperModeRunsFixedFiftyRoundsWithoutToleranceExit) {
+  ht::TrackConfig config;
+  config.maicp_enabled = true;
+  config.maicp_margin = 0.5;
+  config.maicp_covariance_gain = 0.30;
+  ht::SynchronousTrackingNetwork network({"a", "b"}, config, 2, 1e9);
+  const ht::Adjacency graph{{"a", {"b"}}, {"b", {"a"}}};
+  const auto result = network.update(
+      0.0,
+      {{"a", {{"Target1", measurement("Target1", 0.0, 0.0, 0.0)}}},
+       {"b", {{"Target1", measurement("Target1", 1.0, 0.0, 0.0)}}}},
+      graph);
+  EXPECT_EQ(result.iterations, ht::SynchronousTrackingNetwork::kPaperAdmmIterations);
+}
+
 TEST(Network, ConnectedThreeAgentConsensus) {
   ht::TrackConfig config;
   config.max_iterations = 20;

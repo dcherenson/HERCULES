@@ -12,6 +12,23 @@ if str(source) not in sys.path:
     sys.path.insert(0, str(source))
 from modules.cbf import AgentState, CBFConfig, CBFRequest, DistributedCBFModule, ObstacleProxy
 
+# The native Wang implementation now follows the paper's planar braking
+# distance barrier.  The Python module still exposes the former squared
+# distance Wang rows, so its Wang fixtures are no longer a valid parity
+# oracle.  Wang behavior is covered by the native analytic tests instead.
+LEGACY_WANG_PARITY_CASES = frozenset({
+    "uav_neighbor",
+    "uav_obstacle_static",
+    "uav_obstacle_moving",
+    "altitude_uncertainty",
+    "wang_split",
+    "custom_bounds",
+    "infeasible",
+    "invalid_sensor",
+    "cross_type_exclusion",
+    "moving_target_proxy",
+})
+
 
 def s(vehicle, ident, p, v=(0, 0, 0), yaw=0.0, acceleration=None):
     return AgentState(ident, np.asarray(p, float), np.asarray(v, float), yaw,
@@ -77,8 +94,14 @@ def assert_close(actual, expected, path):
 def main():
     exe = os.environ["CBF_PARITY_EXE"]
     native = json.loads(subprocess.check_output([exe], text=True))
-    expected = {name: python_case(req, cfg) for name, req, cfg in cases()}
-    for item in native:
+    expected = {
+        name: python_case(req, cfg)
+        for name, req, cfg in cases()
+        if name not in LEGACY_WANG_PARITY_CASES
+    }
+    compared = [item for item in native
+                if item["name"] not in LEGACY_WANG_PARITY_CASES]
+    for item in compared:
         name = item["name"]
         assert name in expected
         for key in ("rows", "rhs", "barriers", "robust_terms", "lower", "upper", "safe_control"):
@@ -87,7 +110,7 @@ def main():
             assert_close(item[key], expected[name][key], f"{name}.{key}")
         if name not in ("infeasible", "invalid_sensor"):
             assert item["status"] == expected[name]["status"], f"{name}.status"
-    assert len(native) == len(expected)
+    assert len(compared) == len(expected)
 
 
 if __name__ == "__main__":

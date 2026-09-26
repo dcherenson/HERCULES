@@ -8,8 +8,6 @@ agents:
   - {id: Drone1, type: drone}
   - {id: Drone2, type: drone}
   - {id: SimpleFlight, type: drone}
-  - {id: Drone4, type: drone}
-  - {id: Drone5, type: drone}
   - {id: Husky1, type: ugv}
   - {id: Husky2, type: ugv}
   - {id: Husky3, type: ugv}
@@ -74,8 +72,6 @@ target_observation:
     Drone1: target_bottom
     Drone2: target_bottom
     SimpleFlight: target_bottom
-    Drone4: target_bottom
-    Drone5: target_bottom
     Husky1: front_center
     Husky2: front_center
     Husky3: front_center

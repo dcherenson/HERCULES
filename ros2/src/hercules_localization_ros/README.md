@@ -18,6 +18,10 @@ to the following configurable inputs:
   `nav_msgs/msg/Odometry`;
 * `global_gps_topic` (`/<agent_id>/global_gps` by default),
   `sensor_msgs/msg/NavSatFix`;
+* `odom_origin_topic` (empty by default), an optional transient-local
+  `geometry_msgs/msg/PointStamped` per-agent NED translation from the mission
+  state calibrator; when configured, odometry waits for this value and applies
+  the constant translation to every sample;
 * `gps_origin_topic` and `gps_origin_topic_secondary` (the drone and UGV
   AirSim wrapper home-origin topics by default), `airsim_interfaces/msg/GPSYaw`;
 * `measurement_topic` (`/hercules_localization/<agent_id>/measurement`),
@@ -32,6 +36,14 @@ GS-CI also broadcasts and consumes typed `GlobalCiBelief` packets on
 `[x1,y1,...,xn,yaw_sender]` state and deterministic self/peer weights. Launch exposes the stale and
 transaction timeouts, camera range/rate, process/measurement covariance floors,
 `dcl_lambda`, and `ci_self_weight` parameters.
+
+Paper-mode relative covariance inflation is opt in with static per-mission
+parameters `maicp_enabled`, `maicp_margin`, `maicp_covariance_gain`, and
+`maicp_class` (`ugv` or `uav`). The recursive Luft pair transaction applies
+`R := R_nom + gain * margin * I`; process and prior covariances are unchanged.
+A zero gain selects the typed-class defaults UGV `0.30` and UAV `0.20`. Set
+these parameters before starting a mission and restart the node to change
+them.
 
 It publishes `LocalizationEstimate` and `LocalizationDiagnostics` on
 per-agent `estimate_topic` and `diagnostics_topic` topics, and broadcasts a

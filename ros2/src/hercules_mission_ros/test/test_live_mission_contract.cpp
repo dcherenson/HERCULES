@@ -8,10 +8,10 @@
 #include "hercules_mission_ros/mission_actuation.hpp"
 #include "hercules_mission_ros/mission_gate.hpp"
 
-TEST(LiveMissionContract, HasEightFixedControlledAgentsAndSeparateTarget) {
+TEST(LiveMissionContract, HasSixFixedControlledAgentsAndSeparateTarget) {
   const auto config = hercules_mission_core::ruralTargetTrackingConfig();
   const std::vector<std::string> expected = {
-      "Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
+      "Drone1", "Drone2", "SimpleFlight",
       "Husky1", "Husky2", "Husky3"};
   ASSERT_EQ(config.agents.size(), expected.size());
   for (std::size_t i = 0; i < expected.size(); ++i) {

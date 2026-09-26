@@ -19,6 +19,11 @@ struct AdapterResult {
 
 hercules_cbf::AgentState stateFromRos(
     const hercules_interfaces::msg::GroundTruthState& message);
+// Populate the frozen class model and margin that are consumed by Wang.  The
+// model is affine in the planar position with coefficients
+// [bias_x, x_x, y_x, bias_y, x_y, y_y].
+void applyConfiguredWangModel(hercules_cbf::AgentState& state,
+                              const hercules_cbf::CBFConfig& config);
 hercules_cbf::ObstacleProxy obstacleFromRos(
     const hercules_interfaces::msg::ObstacleProxy& message);
 void appendTargetProxy(const hercules_interfaces::msg::TargetEstimate& estimate,

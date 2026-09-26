@@ -97,7 +97,7 @@ Husky1 [0.004974978,  3.001892567, 0.716242492]
 
 `config/hero_smoke_state.yaml` records those explicit mapping origins and also
 documents the requested settings poses. The adapter code contains no
-vehicle-origin constants. The Rural mission launch instead calibrates all nine
+vehicle-origin constants. The Rural mission launch instead calibrates all seven
 origins after runtime spawn/settling from synchronized wrapper-local and direct
 world-NED poses. Requested spawn coordinates alone remain insufficient.
 
@@ -132,7 +132,7 @@ For the full mission, first start Unreal on the host:
 ./docker/ros2/launch_rural_mission_sim.sh
 ```
 
-Then run the nine-vehicle wrapper, runtime calibration, and controller with a
+Then run the seven-vehicle wrapper, runtime calibration, and controller with a
 single ROS launch. Start with the mandatory no-actuation preflight:
 
 ```bash
@@ -151,9 +151,9 @@ The default target path is the production distributed-camera path:
   target_observation_source:=camera duration_sec:=30
 ```
 
-This launch starts eight independent C++ tracker processes and the
+This launch starts six independent C++ tracker processes and the
 asynchronous Python camera observer from `hercules_tracking_ros`. Drone1,
-Drone2, SimpleFlight, Drone4, and Drone5 use `target_bottom`; Husky1, Husky2,
+Drone2 and SimpleFlight use `target_bottom`; Husky1, Husky2,
 and Husky3 use `front_center`. Each formation controller consumes only its own
 `/hercules_tracking/<agent>/Target1/estimate`. A fresh active estimate is
 predicted to the control time; a missing, inactive, future-dated, or stale

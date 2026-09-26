@@ -152,7 +152,7 @@ TEST(FormationControl, UgvHoldAlignmentAndYawSaturation) {
 TEST(MissionConfig, RuralFixtureFreezesNamesAndTestedValues) {
   const auto config = hmc::ruralTargetTrackingConfig();
   const std::vector<std::string> expected{
-      "Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
+      "Drone1", "Drone2", "SimpleFlight",
       "Husky1", "Husky2", "Husky3"};
   ASSERT_EQ(config.agents.size(), expected.size());
   for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -174,7 +174,7 @@ TEST(MissionConfig, RuralFixtureFreezesNamesAndTestedValues) {
                   .isApprox(Eigen::Vector3d(0.0, 7.0, -1.0), 1e-12));
 }
 
-TEST(MissionRegression, EightAgentNominalKinematicsRemainDeterministic) {
+TEST(MissionRegression, SixAgentNominalKinematicsRemainDeterministic) {
   const auto mission = hmc::ruralTargetTrackingConfig();
   hmc::FigureEightConfig motion = mission.target_motion;
   motion.center = Eigen::Vector3d::Zero();

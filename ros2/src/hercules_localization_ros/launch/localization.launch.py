@@ -19,6 +19,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("odom_local_topic", default_value=""),
         DeclareLaunchArgument("global_gps_topic", default_value=""),
+        DeclareLaunchArgument("odom_origin_topic", default_value=""),
         DeclareLaunchArgument("gps_origin_topic", default_value="/hercules_drone/origin_geo_point"),
         DeclareLaunchArgument("gps_origin_topic_secondary", default_value="/hercules_ugv/origin_geo_point"),
         DeclareLaunchArgument("relative_topic", default_value=""),
@@ -38,6 +39,10 @@ def generate_launch_description():
         DeclareLaunchArgument("dcl_lambda", default_value="1.0"),
         DeclareLaunchArgument("ci_self_weight", default_value="0.8"),
         DeclareLaunchArgument("unknown_motion_variance", default_value="0.25"),
+        DeclareLaunchArgument("maicp_enabled", default_value="false"),
+        DeclareLaunchArgument("maicp_margin", default_value="0.0"),
+        DeclareLaunchArgument("maicp_covariance_gain", default_value="0.0"),
+        DeclareLaunchArgument("maicp_class", default_value="unknown"),
         Node(
             package="hercules_localization_ros",
             executable="localization_node",
@@ -50,6 +55,7 @@ def generate_launch_description():
                 "algorithm": LaunchConfiguration("algorithm"),
                 "odom_local_topic": LaunchConfiguration("odom_local_topic"),
                 "global_gps_topic": LaunchConfiguration("global_gps_topic"),
+                "odom_origin_topic": LaunchConfiguration("odom_origin_topic"),
                 "gps_origin_topic": LaunchConfiguration("gps_origin_topic"),
                 "gps_origin_topic_secondary": LaunchConfiguration("gps_origin_topic_secondary"),
                 "relative_topic": LaunchConfiguration("relative_topic"),
@@ -74,6 +80,13 @@ def generate_launch_description():
                 "ci_self_weight": ParameterValue(LaunchConfiguration("ci_self_weight"), value_type=float),
                 "unknown_motion_variance": ParameterValue(
                     LaunchConfiguration("unknown_motion_variance"), value_type=float),
+                "maicp_enabled": ParameterValue(
+                    LaunchConfiguration("maicp_enabled"), value_type=bool),
+                "maicp_margin": ParameterValue(
+                    LaunchConfiguration("maicp_margin"), value_type=float),
+                "maicp_covariance_gain": ParameterValue(
+                    LaunchConfiguration("maicp_covariance_gain"), value_type=float),
+                "maicp_class": LaunchConfiguration("maicp_class"),
             }],
         ),
     ])

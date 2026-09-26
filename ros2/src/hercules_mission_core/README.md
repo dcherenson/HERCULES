@@ -42,6 +42,6 @@ zero offset and unknown UGV IDs use the phase-zero vertex, matching Python.
 The target-centered UGV controller keeps at least 25 percent forward alignment
 outside its 0.5 m hold radius, including when facing away from its slot.
 
-The offline eight-agent test uses deliberately simple kinematics only to catch
+The offline six-agent test uses deliberately simple kinematics only to catch
 identity, slot, sign, heading, and configuration drift. It is not a simulator
 model or a closed-loop stability result.

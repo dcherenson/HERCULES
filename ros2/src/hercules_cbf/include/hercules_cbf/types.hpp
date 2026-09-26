@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <array>
 #include <limits>
 #include <optional>
 #include <string>
@@ -19,6 +20,17 @@ struct AgentState {
   Eigen::Vector3d velocity{Eigen::Vector3d::Zero()};
   double yaw{0.0};
   std::optional<Eigen::Vector3d> acceleration;
+  // Frozen learned acceleration residual used by the Wang double-integrator
+  // barrier.  It is deliberately carried with the local state/neighbor
+  // packet so the CBF has no mutable model state or online fitting step.
+  std::optional<Eigen::Vector3d> learned_acceleration;
+  // Optional per-agent authority override used by direct Wang tests and
+  // heterogeneous callers; normal ROS missions leave it unset and use the
+  // class limit from CBFConfig.
+  std::optional<double> acceleration_limit;
+  // Class-level bound on the learned-model residual.  The mission supplies
+  // this fixed value for the duration of a run.
+  double margin{0.0};
   VehicleType vehicle_type{VehicleType::kDrone};
   double timestamp{0.0};
   double yaw_rate{0.0};
@@ -42,12 +54,26 @@ struct CBFConfig {
   double k1{2.0};
   double k2{2.0};
   double alpha{2.0};
+  // Fixed linear class-K decay used by this AirSim controller. The Python
+  // reference's optional optimized decay has not yet been ported.
+  double wang_gamma{2.0};
   double uncertainty_radius{0.0};
   double uav_radius{1.0};
   double ugv_radius{1.25};
   double obstacle_margin{0.0};
   double uav_acceleration_limit{6.0};
   double ugv_acceleration_limit{3.0};
+  // Frozen class margins and affine learned acceleration models.  Coefficients
+  // are row-major [bias_x, x_x, y_x, bias_y, x_y, y_y] and the model returns
+  // [ax, ay, 0].  Zero coefficients preserve the nominal zero-residual case.
+  double uav_margin{0.0};
+  double ugv_margin{0.0};
+  std::array<double, 6> uav_acceleration_model_coefficients{};
+  std::array<double, 6> ugv_acceleration_model_coefficients{};
+  // Optional planar Wang corridor bounds.  A finite bound adds one local
+  // braking-distance wall row; infinities leave the corresponding wall off.
+  double wang_corridor_y_min{-std::numeric_limits<double>::infinity()};
+  double wang_corridor_y_max{std::numeric_limits<double>::infinity()};
   double uav_velocity_limit{3.0};
   double ugv_speed_limit{3.0};
   double ugv_yaw_rate_limit{1.5};
@@ -78,6 +104,11 @@ struct ConstraintSet {
   std::vector<std::string> row_labels;
   Eigen::VectorXd lower;
   Eigen::VectorXd upper;
+  // Wang's braking-distance barrier is undefined at or inside the physical
+  // separation boundary.  Keep that fact explicit instead of silently
+  // dropping the row and allowing the filter to claim success.
+  bool valid{true};
+  std::string invalid_reason;
 };
 
 struct SolverDiagnostics {

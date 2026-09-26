@@ -16,8 +16,9 @@ from rclpy.executors import ExternalShutdownException
 from hercules_interfaces.msg import GroundTruthState, PlanarRelativeMeasurement
 
 
-AGENTS = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
-          "Husky1", "Husky2", "Husky3"]
+UAV_AGENTS = ["Drone1", "Drone2", "SimpleFlight"]
+UGV_AGENTS = ["Husky1", "Husky2", "Husky3"]
+AGENTS = UAV_AGENTS + UGV_AGENTS
 
 
 def _relative_worker_type():
@@ -80,7 +81,7 @@ class RelativeObserver(Node):
                     airsim_module=airsim,
                     port=int(self.get_parameter("drone_port").value),
                     agent_cameras={agent: (uav_cameras
-                                           if agent in AGENTS[:5] else "front_center")
+                                           if agent in UAV_AGENTS else "front_center")
                                    for agent in AGENTS},
                     agent_ids=AGENTS,
                     sensing_range=self.sensing_range,
@@ -88,8 +89,10 @@ class RelativeObserver(Node):
                     bearing_std_rad=self.bearing_std,
                     rate_hz=self.rate_hz,
                     host=str(self.get_parameter("host_ip").value or "127.0.0.1"),
-                    endpoint_ports={**{agent: int(self.get_parameter("drone_port").value) for agent in AGENTS[:5]},
-                                    **{agent: int(self.get_parameter("ugv_port").value) for agent in AGENTS[5:]}},
+                    endpoint_ports={**{agent: int(self.get_parameter("drone_port").value)
+                                      for agent in UAV_AGENTS},
+                                    **{agent: int(self.get_parameter("ugv_port").value)
+                                       for agent in UGV_AGENTS}},
                 )
                 self.worker.start()
                 self.camera_timer = self.create_timer(0.01, self.publish_camera_measurements)

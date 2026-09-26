@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>hercules_maicp</name><version>0.1.0</version>
+  <description>Paper MA-ICP calibration and three AirSim case studies.</description>
+  <maintainer email="research@example.com">HERCULES researchers</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend><exec_depend>std_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend><exec_depend>python3-scipy</exec_depend>
+  <exec_depend>hercules_mission_ros</exec_depend>
+  <exec_depend>hercules_tracking_ros</exec_depend>
+  <exec_depend>hercules_localization_ros</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

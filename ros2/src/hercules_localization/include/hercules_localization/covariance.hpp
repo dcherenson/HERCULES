@@ -2,6 +2,8 @@
 
 #include <Eigen/Core>
 
+#include "hercules_localization/types.hpp"
+
 namespace hercules_localization {
 
 /** Return the symmetric part of a square matrix. */
@@ -51,5 +53,16 @@ double mahalanobisSquared(const Eigen::Ref<const Eigen::VectorXd>& error,
 Eigen::MatrixXd inflateCovariance(const Eigen::Ref<const Eigen::MatrixXd>& matrix,
                                   double standard_deviation,
                                   double floor = 1e-9);
+
+/**
+ * Apply the configured measurement-covariance policy.
+ *
+ * Paper mode uses the linear, additive rule R_nom + beta*r*I.  The disabled
+ * path retains the historical standard-deviation inflation behavior so the
+ * default ROS configuration remains unchanged.
+ */
+Eigen::Matrix2d measurementCovarianceForConfig(
+    const Eigen::Matrix2d& nominal, const LocalizationConfig& config,
+    double floor = 1e-9);
 
 }  // namespace hercules_localization

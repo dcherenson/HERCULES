@@ -131,8 +131,12 @@ void AirsimROSWrapper::initialize_airsim()
         {
             for (const auto &vehicle_name_ptr_pair : vehicle_name_ptr_map_)
             {
-                airsim_client_->enableApiControl(true, vehicle_name_ptr_pair.first); // todo expose as rosservice?
-                airsim_client_->armDisarm(true, vehicle_name_ptr_pair.first);        // todo exposes as rosservice?
+                // Re-requesting SimpleFlight API control replaces an active
+                // hover goal with RC input. Preserve an already-controlled
+                // vehicle when attaching to a prepared airborne mission.
+                if (!airsim_client_->isApiControlEnabled(vehicle_name_ptr_pair.first))
+                    airsim_client_->enableApiControl(true, vehicle_name_ptr_pair.first);
+                airsim_client_->armDisarm(true, vehicle_name_ptr_pair.first);
             }
         }
 
@@ -1563,9 +1567,14 @@ msr::airlib::GeoPoint AirsimROSWrapper::get_origin_geo_point() const
         const std::string &vehicle_name = vehicle_name_ptr_map_.begin()->first;
         const auto vehicle_home = airsim_client_->getHomeGeoPoint(vehicle_name);
         const auto world_pose = airsim_client_->simGetObjectPose(vehicle_name, true);
-        const msr::airlib::Vector3r inverse_world_xy(
-            -world_pose.position.x(), -world_pose.position.y(), 0.0f);
-        return msr::airlib::EarthUtils::nedToGeodeticFast(inverse_world_xy, vehicle_home);
+        const auto local_state = airsim_client_->simGetGroundTruthKinematics(vehicle_name);
+        // HomeGeoPoint belongs to the fixed spawn frame, not the current pose.
+        // Subtract that frame's origin even after the paper runner teleports
+        // vehicles to a fresh mission fixture.
+        const auto spawn_origin = world_pose.position - local_state.pose.position;
+        const msr::airlib::Vector3r inverse_spawn_xy(
+            -spawn_origin.x(), -spawn_origin.y(), 0.0f);
+        return msr::airlib::EarthUtils::nedToGeodeticFast(inverse_spawn_xy, vehicle_home);
     }
 
     msr::airlib::HomeGeoPoint geo_point = AirSimSettings::singleton().origin_geopoint;
@@ -1808,55 +1817,18 @@ rclcpp::Time AirsimROSWrapper::update_state()
         vehicle_ros->curr_odom_.child_frame_id = vehicle_ros->odom_frame_id_;
         vehicle_ros->curr_odom_.header.stamp = vehicle_time;
 
-        // ───> NEW:  store initial‐odom and zero‐it out, otherwise subtract it:
+        // Retain the legacy position offset (the mission adapter calibrates
+        // it per vehicle), but preserve absolute orientation.  A shared
+        // startup quaternion would rotate every vehicle's heading into the
+        // first vehicle's frame while velocities remain in world axes.
         if (!init_odom_received_)
         {
-            // 1) If this is the very first “tick,” remember it:
             init_odom_msg_ = vehicle_ros->curr_odom_;
             init_odom_received_ = true;
-
-            // 2) Overwrite curr_odom_ to be “zero” so that
-            //    ground_truth/odom_local = identity relative to <robot_name>:
-            vehicle_ros->curr_odom_.pose.pose.position.x = 0.0;
-            vehicle_ros->curr_odom_.pose.pose.position.y = 0.0;
-            vehicle_ros->curr_odom_.pose.pose.position.z = 0.0;
-            vehicle_ros->curr_odom_.pose.pose.orientation.x = 0.0;
-            vehicle_ros->curr_odom_.pose.pose.orientation.y = 0.0;
-            vehicle_ros->curr_odom_.pose.pose.orientation.z = 0.0;
-            vehicle_ros->curr_odom_.pose.pose.orientation.w = 1.0;
         }
-        else
-        {
-            // 3) On subsequent ticks, subtract out the “initial” Odometry:
-            double px = vehicle_ros->curr_odom_.pose.pose.position.x - init_odom_msg_.pose.pose.position.x;
-            double py = vehicle_ros->curr_odom_.pose.pose.position.y - init_odom_msg_.pose.pose.position.y;
-            double pz = vehicle_ros->curr_odom_.pose.pose.position.z - init_odom_msg_.pose.pose.position.z;
-
-            // Build tf2 quaternions from init and current:
-            tf2::Quaternion q_init(
-                init_odom_msg_.pose.pose.orientation.x,
-                init_odom_msg_.pose.pose.orientation.y,
-                init_odom_msg_.pose.pose.orientation.z,
-                init_odom_msg_.pose.pose.orientation.w);
-            tf2::Quaternion q_cur(
-                vehicle_ros->curr_odom_.pose.pose.orientation.x,
-                vehicle_ros->curr_odom_.pose.pose.orientation.y,
-                vehicle_ros->curr_odom_.pose.pose.orientation.z,
-                vehicle_ros->curr_odom_.pose.pose.orientation.w);
-
-            // “Relative rotation” = inverse(init) * current
-            tf2::Quaternion q_rel = q_init.inverse() * q_cur;
-            q_rel.normalize();
-
-            vehicle_ros->curr_odom_.pose.pose.position.x = px;
-            vehicle_ros->curr_odom_.pose.pose.position.y = py;
-            vehicle_ros->curr_odom_.pose.pose.position.z = pz;
-            vehicle_ros->curr_odom_.pose.pose.orientation.x = q_rel.x();
-            vehicle_ros->curr_odom_.pose.pose.orientation.y = q_rel.y();
-            vehicle_ros->curr_odom_.pose.pose.orientation.z = q_rel.z();
-            vehicle_ros->curr_odom_.pose.pose.orientation.w = q_rel.w();
-        }
-        // ─────────────────────────────────────────────────────────────────
+        vehicle_ros->curr_odom_.pose.pose.position.x -= init_odom_msg_.pose.pose.position.x;
+        vehicle_ros->curr_odom_.pose.pose.position.y -= init_odom_msg_.pose.pose.position.y;
+        vehicle_ros->curr_odom_.pose.pose.position.z -= init_odom_msg_.pose.pose.position.z;
     }
 
     return curr_ros_time;

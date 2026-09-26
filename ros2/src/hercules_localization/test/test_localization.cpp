@@ -132,6 +132,47 @@ TEST(Recursive, SequentialRangeBearingUpdateUsesNeighborCovariance) {
   EXPECT_TRUE(result.estimate.covariance.allFinite());
 }
 
+TEST(Recursive, PaperMarginUsesLinearMeasurementOnlyInflation) {
+  hl::LocalizationConfig config;
+  config.maicp_enabled = true;
+  config.maicp_margin = 2.0;
+  config.maicp_class = hl::MaicpClass::kUgv;
+  config.maicp_covariance_gain = 0.0;
+  const Eigen::Matrix2d nominal = Eigen::Matrix2d::Identity() * 0.4;
+  const Eigen::Matrix2d effective = hl::measurementCovarianceForConfig(
+      nominal, config, 1e-12);
+  EXPECT_TRUE(effective.isApprox(Eigen::Matrix2d::Identity(), 1e-12));
+
+  const hl::PoseEstimate prior = estimate(0.0, 0.0, 0.0, 1.0);
+  const hl::PoseEstimate neighbor = estimate(5.0, 0.0, 0.0, 0.25);
+  const auto relative = observation(neighbor, 4.8, 0.0, 0.4);
+  const auto paper = hl::updateFromRangeBearing(prior, relative, config);
+  const auto nominal_result = hl::updateFromRangeBearing(
+      prior, relative, hl::LocalizationConfig{});
+  ASSERT_TRUE(paper.accepted);
+  ASSERT_TRUE(nominal_result.accepted);
+  // With the same prior and neighbor, increasing R must reduce the update
+  // magnitude and leave the prior/process model unchanged.
+  EXPECT_LT(paper.estimate.mean.position.x(), nominal_result.estimate.mean.position.x());
+  EXPECT_GT(paper.estimate.covariance(0, 0), nominal_result.estimate.covariance(0, 0));
+
+  hl::RecursivePairTransaction transaction;
+  transaction.event_id = "paper-pair";
+  transaction.observer_id = "A";
+  transaction.observed_id = "B";
+  transaction.observed = neighbor;
+  transaction.reciprocal_factor = Eigen::Matrix3d::Identity();
+  transaction.measurement = relative.measurement;
+  transaction.measurement.neighbor_id = "B";
+  hl::RecursiveDecentralizedState transactional_state("A", prior, config);
+  transactional_state.initializePeer("B");
+  const auto transaction_result =
+      transactional_state.applyPairTransaction(transaction);
+  ASSERT_TRUE(transaction_result.accepted);
+  EXPECT_GT(transaction_result.result.estimate.covariance(0, 0),
+            nominal_result.estimate.covariance(0, 0));
+}
+
 TEST(Recursive, InvalidMeasurementIsDiagnosedWithoutCorruptingPrior) {
   const hl::PoseEstimate prior = estimate(1.0, 2.0, 0.2);
   auto invalid = observation(estimate(5.0, 1.0, 0.0), 2.0, 0.0);

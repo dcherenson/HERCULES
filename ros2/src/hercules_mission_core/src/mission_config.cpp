@@ -11,8 +11,6 @@ RuralTargetTrackingConfig ruralTargetTrackingConfig() {
       {"Drone1", VehicleType::kDrone},
       {"Drone2", VehicleType::kDrone},
       {"SimpleFlight", VehicleType::kDrone},
-      {"Drone4", VehicleType::kDrone},
-      {"Drone5", VehicleType::kDrone},
       {"Husky1", VehicleType::kUgv},
       {"Husky2", VehicleType::kUgv},
       {"Husky3", VehicleType::kUgv},

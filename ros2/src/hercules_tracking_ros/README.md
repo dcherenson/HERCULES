@@ -34,8 +34,16 @@ available and records the timeout.
 
 `target_observation_source:=truth` is deterministic validation input: truth is
 range-gated, seeded, and enters only as a `TargetMeasurement`. The default
-`camera` mode uses every camera configured by the executable Python mission:
-`target_bottom` for all five UAVs and `front_center` for all three controlled
-UGVs. Camera-generated covariance is retained. `tracking_measurement_std` is
+`camera` mode uses the six production tracking agents: `target_bottom` for
+Drone1, Drone2, and SimpleFlight, and `front_center` for Husky1, Husky2, and
+Husky3. Camera-generated covariance is retained. `tracking_measurement_std` is
 used by truth observations and as the perception covariance floor/invalid
 message covariance, not as a replacement for valid camera covariance.
+
+Paper-mode tracking is opt in with the static per-mission parameters
+`maicp_enabled`, `maicp_margin`, `maicp_covariance_gain`, and `maicp_class`
+(`ugv` or `uav`). It applies `R := R_nom + gain * margin * I` to direct
+measurements only; the prior and process covariance stay fixed. A zero gain
+selects the typed-class defaults UGV `0.30` and UAV `0.20`. Enabled paper
+runs use exactly 50 ADMM rounds and do not stop on the residual tolerance.
+Set these values before a mission and restart the node to change them.

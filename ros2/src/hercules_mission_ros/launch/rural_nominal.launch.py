@@ -1,4 +1,4 @@
-"""Complete nine-vehicle RuralAustralia mission with selectable target source."""
+"""Complete seven-vehicle RuralAustralia mission with selectable target source."""
 
 import os
 
@@ -12,8 +12,9 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
+UAVS = ["Drone1", "Drone2", "SimpleFlight"]
 VEHICLES = [
-    "Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5",
+    "Drone1", "Drone2", "SimpleFlight",
     "Husky1", "Husky2", "Husky3", "Target1",
 ]
 
@@ -98,7 +99,29 @@ def generate_launch_description():
     distributed = IfCondition(PythonExpression([
         "'", target_source, "' == 'distributed_tracking'"
     ]))
+    maicp_case = LaunchConfiguration("maicp_case")
+    maicp_steps = LaunchConfiguration("maicp_steps")
+    maicp_margin_ugv = LaunchConfiguration("maicp_margin_ugv")
+    maicp_margin_uav = LaunchConfiguration("maicp_margin_uav")
+    maicp_model_ugv = LaunchConfiguration("maicp_model_ugv")
+    maicp_model_uav = LaunchConfiguration("maicp_model_uav")
+    maicp_gain_ugv = LaunchConfiguration("maicp_gain_ugv")
+    maicp_gain_uav = LaunchConfiguration("maicp_gain_uav")
+    tracking_iterations = LaunchConfiguration("tracking_iterations")
+    tracking_fixed_iterations = LaunchConfiguration("tracking_fixed_iterations")
+    truth_seed = LaunchConfiguration("truth_seed")
     actions = [
+        DeclareLaunchArgument("maicp_case", default_value=""),
+        DeclareLaunchArgument("maicp_steps", default_value="100"),
+        DeclareLaunchArgument("maicp_margin_ugv", default_value="0.0"),
+        DeclareLaunchArgument("maicp_margin_uav", default_value="0.0"),
+        DeclareLaunchArgument("maicp_model_ugv", default_value="0 0 0 0 0 0"),
+        DeclareLaunchArgument("maicp_model_uav", default_value="0 0 0 0 0 0"),
+        DeclareLaunchArgument("maicp_gain_ugv", default_value="0.30"),
+        DeclareLaunchArgument("maicp_gain_uav", default_value="0.20"),
+        DeclareLaunchArgument("tracking_iterations", default_value="20"),
+        DeclareLaunchArgument("tracking_fixed_iterations", default_value="false"),
+        DeclareLaunchArgument("truth_seed", default_value="7"),
         DeclareLaunchArgument("dry_run", default_value="true"),
         DeclareLaunchArgument("enable_target", default_value="true"),
         DeclareLaunchArgument("enable_formation", default_value="true"),
@@ -139,7 +162,7 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("state_freshness_timeout_sec", default_value="0.5"),
         # Startup can be slow on a host-shared Unreal/Docker session while
-        # nine AirSim wrappers connect and the state adapter receives two
+        # seven AirSim wrappers connect and the state adapter receives two
         # advancing samples per vehicle.  Keep the node's normal 30 s default
         # unless the caller explicitly requests a longer trial grace period.
         DeclareLaunchArgument("startup_timeout_sec", default_value="30.0"),
@@ -205,6 +228,18 @@ def generate_launch_description():
              name="rural_nominal_mission", output="screen",
              parameters=[cbf_config, mission_config, {"dry_run": ParameterValue(dry_run, value_type=bool),
                           "enable_target": ParameterValue(enable_target, value_type=bool),
+                          "maicp_case": maicp_case,
+                          "maicp_steps": ParameterValue(maicp_steps, value_type=int),
+                          "cbf_uav_velocity_limit": ParameterValue(PythonExpression([
+                              "5.0 if '", maicp_case, "' else 3.0"]), value_type=float),
+                          "cbf_ugv_speed_limit": ParameterValue(PythonExpression([
+                              "5.0 if '", maicp_case, "' else 3.0"]), value_type=float),
+                          "cbf_ugv_acceleration_limit": ParameterValue(PythonExpression([
+                              "6.0 if '", maicp_case, "' else 3.0"]), value_type=float),
+                          "maicp_margin_ugv": ParameterValue(maicp_margin_ugv, value_type=float),
+                          "maicp_margin_uav": ParameterValue(maicp_margin_uav, value_type=float),
+                          "maicp_model_ugv": ParameterValue(maicp_model_ugv, value_type=str),
+                          "maicp_model_uav": ParameterValue(maicp_model_uav, value_type=str),
                           "enable_formation": ParameterValue(enable_formation, value_type=bool),
                           "duration_sec": ParameterValue(duration, value_type=float),
                           "target_source": target_source,
@@ -237,16 +272,26 @@ def generate_launch_description():
                           "log_path": log_path}]),
     ]
     for agent in VEHICLES[:-1]:
-        vehicle_prefix = "hercules_drone" if agent in VEHICLES[:5] else "hercules_ugv"
+        vehicle_prefix = "hercules_drone" if agent in UAVS else "hercules_ugv"
         actions.append(Node(
             package="hercules_localization_ros", executable="localization_node",
             name=f"localization_{agent}", output="screen",
+            condition=IfCondition(PythonExpression(["'", localization_source, "' == 'estimate'"])),
             parameters=[{
                 "agent_id": agent,
+                "maicp_enabled": ParameterValue(PythonExpression([
+                    "'", maicp_case, "' == 'localization'"]), value_type=bool),
+                "maicp_class": "uav" if agent in UAVS else "ugv",
+                "maicp_margin": ParameterValue(PythonExpression([
+                    "'", maicp_case, "' == 'localization' and ",
+                    maicp_margin_uav if agent in UAVS else maicp_margin_ugv, " or 0.0"]), value_type=float),
+                "maicp_covariance_gain": ParameterValue(
+                    maicp_gain_uav if agent in UAVS else maicp_gain_ugv, value_type=float),
                 "anchor_agent": localization_anchor_agent,
                 "algorithm": localization_algorithm,
                 "odom_local_topic": f"/{vehicle_prefix}/{agent}/ground_truth/odom_local",
                 "global_gps_topic": f"/{vehicle_prefix}/{agent}/global_gps",
+                "odom_origin_topic": f"/hercules_mission/calibrated_origin/{agent}",
                 "gps_origin_topic": "/hercules_drone/origin_geo_point",
                 "gps_origin_topic_secondary": "/hercules_ugv/origin_geo_point",
                 "stale_after_sec": ParameterValue(localization_stale_after, value_type=float),
@@ -276,6 +321,7 @@ def generate_launch_description():
     actions.append(Node(
         package="hercules_localization_ros", executable="relative_observer_node",
         name="localization_relative_observer", output="screen",
+        condition=IfCondition(PythonExpression(["'", localization_source, "' == 'estimate'"])),
         parameters=[{"observation_source": localization_observation_source,
                      "host_ip": airsim_host,
                      "drone_port": ParameterValue(drone_port, value_type=int),
@@ -297,7 +343,7 @@ def generate_launch_description():
                      "tracking_rate": 4.0,
                      "tracking_measurement_std": 0.25,
                      "target_sensing_range": 100.0,
-                     "truth_seed": 7,
+                     "truth_seed": ParameterValue(truth_seed, value_type=int),
                      "truth_rng_mode": truth_rng_mode}],
     ))
     for agent in VEHICLES[:-1]:
@@ -308,11 +354,18 @@ def generate_launch_description():
             parameters=[{"agent_id": agent, "target_id": "Target1",
                          "tracking_window": 5.0,
                          "tracking_admm_rho": 1.0,
-                         "tracking_admm_max_iterations": 20,
+                         "tracking_admm_max_iterations": ParameterValue(tracking_iterations, value_type=int),
+                         "maicp_enabled": ParameterValue(tracking_fixed_iterations, value_type=bool),
+                         "maicp_class": "uav" if agent in UAVS else "ugv",
+                         "maicp_margin": ParameterValue(PythonExpression([
+                             "'", maicp_case, "' == 'tracking' and ",
+                             maicp_margin_uav if agent in UAVS else maicp_margin_ugv, " or 0.0"]), value_type=float),
+                         "maicp_covariance_gain": ParameterValue(
+                             maicp_gain_uav if agent in UAVS else maicp_gain_ugv, value_type=float),
                          "tracking_admm_tolerance": 0.001,
                          "tracking_process_noise": 0.20,
                          "tracking_measurement_std": 0.25,
-                         "round_timeout_sec": 0.008,
+                         "round_timeout_sec": 0.030,
                          "seed_timeout_sec": 0.020,
                          "measurement_wait_sec": 0.010}],
         ))

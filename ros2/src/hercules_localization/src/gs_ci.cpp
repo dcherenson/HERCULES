@@ -63,14 +63,8 @@ PoseEstimate poseCandidate(const PoseEstimate& current,
           : floor;
   Eigen::Matrix2d measurement_covariance =
       regularizeCovariance(observation.measurement.covariance, measurement_floor);
-  const double margin = std::isfinite(config.robustness_margin)
-                            ? std::max(0.0, config.robustness_margin)
-                            : 0.0;
-  const double inflation = std::isfinite(config.covariance_inflation)
-                               ? std::max(0.0, config.covariance_inflation)
-                               : 0.0;
-  measurement_covariance = inflateCovariance(
-      measurement_covariance, std::hypot(margin, inflation), measurement_floor);
+  measurement_covariance = measurementCovarianceForConfig(
+      measurement_covariance, config, measurement_floor);
 
   // Candidate position = neighbor position - R(yaw) * polar(range,bearing).
   // The observer yaw is retained by the candidate, but its uncertainty still

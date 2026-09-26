@@ -29,5 +29,13 @@ CarCommand pythonCbfUgvCarCommand(double desired_speed, double desired_yaw_rate,
                                   bool target_vehicle = false,
                                   double speed_limit = 3.0);
 CarCommand stoppedCarCommand();
+CarCommand paperUgvCarCommand(double speed, double yaw_rate, double measured_speed,
+                             double yaw_rate_limit);
+
+// Map the planar acceleration requested by Wang's QP onto the Husky's
+// speed/turn-rate interface. Tracking error remains in the calibrated residual.
+Eigen::Vector2d ugvAccelerationCommand(const Eigen::Vector3d& velocity, double yaw,
+                                     const Eigen::Vector3d& acceleration, double dt,
+                                     double speed_limit, double yaw_rate_limit);
 
 }  // namespace hercules_mission_ros

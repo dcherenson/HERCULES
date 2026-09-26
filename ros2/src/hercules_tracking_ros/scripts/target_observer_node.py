@@ -21,9 +21,11 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 
 
-AGENTS = ["Drone1", "Drone2", "SimpleFlight", "Drone4", "Drone5", "Husky1", "Husky2", "Husky3"]
-CAMERAS = {name: "target_bottom" for name in AGENTS[:5]} | {
-    name: "front_center" for name in AGENTS[5:]
+UAV_AGENTS = ["Drone1", "Drone2", "SimpleFlight"]
+UGV_AGENTS = ["Husky1", "Husky2", "Husky3"]
+AGENTS = UAV_AGENTS + UGV_AGENTS
+CAMERAS = {name: "target_bottom" for name in UAV_AGENTS} | {
+    name: "front_center" for name in UGV_AGENTS
 }
 
 
@@ -146,8 +148,8 @@ class TargetObserverNode(Node):
                 CAMERAS,
                 host=self.host_ip,
                 endpoint_ports={
-                    **{name: self.drone_port for name in AGENTS[:5]},
-                    **{name: self.ugv_port for name in AGENTS[5:]},
+                    **{name: self.drone_port for name in UAV_AGENTS},
+                    **{name: self.ugv_port for name in UGV_AGENTS},
                 },
                 target_id=self.target_id,
                 target_actor_pattern=self.target_id + "*",
